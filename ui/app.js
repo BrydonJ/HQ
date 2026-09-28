@@ -924,7 +924,9 @@ class Cell {
     this.stickToBottom = prevStick;
     this.setTitle(this.title);
     saveState(); // keeps a title recovered from the transcript
-    this.notice(lines.length ? 'Session restored. Claude resumes when you send a message.' : 'Session restored (no history found).');
+    if (this.fork) this.notice('Forked: your first message starts a copy of this session. The original is left as it was.');
+    else this.notice(lines.length ? 'Session restored. Claude resumes when you send a message.' : 'Session restored (no history found).');
+    if (this.resumeWarning) this.notice(this.resumeWarning, true);
     this.msgs.scrollTop = this.msgs.scrollHeight;
   }
 }
@@ -1425,7 +1427,10 @@ function resumeSession(info, fork) {
   if (open && !fork) { revealCell(open); return; }
   rememberFolder(info.cwd);
   const cell = addCell({ cwd: info.cwd, sessionId: info.sessionId, title: info.title || info.lastPrompt || '', fork }, { restore: true });
-  if (fork) cell.notice('Forked: your first message starts a copy of this session. The original is left as it was.');
+  // Read by loadHistory once the transcript is drawn, so it lands at the bottom where it is seen.
+  if (!fork && Date.now() - info.modifiedMs < RECENTLY_ACTIVE_MS) {
+    cell.resumeWarning = `This session changed ${timeAgo(info.modifiedMs)}. If it is still open in VS Code or a terminal, close it there before you send a message here.`;
+  }
   revealCell(cell);
 }
 
@@ -1554,8 +1559,16 @@ function scheduleUsageRefresh(cell) {
 function scheduleNextUsage() {
   clearTimeout(usage.timer);
   const anyRunning = app.cells.some(c => c.proc != null);
-  usage.timer = setTimeout(() => refreshUsage(), anyRunning ? USAGE_EVERY_MS : USAGE_PROBE_EVERY_MS);
+  usage.timer = setTimeout(() => {
+    // Starting a probe for a window nobody is looking at is waste; catch up when it is shown.
+    if (document.hidden && !app.cells.some(c => c.proc != null)) return;
+    refreshUsage();
+  }, anyRunning ? USAGE_EVERY_MS : USAGE_PROBE_EVERY_MS);
 }
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && Date.now() - usage.fetchedAt > USAGE_STALE_MS) refreshUsage();
+});
 
 function untilText(ms) {
   const mins = Math.max(0, Math.round((ms - Date.now()) / 60000));
