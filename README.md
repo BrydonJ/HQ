@@ -6,8 +6,8 @@ empty, you add sessions one at a time, the grid lays itself out, and each cell i
 styled like the VS Code extension instead of a terminal.
 
 - **Rust + Tauri 2.** The app uses the WebView2 runtime that ships with Windows. The release
-  binary is about 3.5 MB. The shell (without Claude) uses about 180 MB of private memory.
-  Each session's `claude` process uses its own memory on top of that.
+  binary is about 4.3 MB (the installer 1.5 MB). The shell (without Claude) uses about 180 MB
+  of private memory. Each session's `claude` process uses its own memory on top of that.
 - **Thin by design.** Each cell runs the installed `claude` CLI with the documented stream-json
   protocol. The Agent SDKs and the VS Code extension use the same protocol. The Rust side
   forwards raw JSON lines and never interprets them. The UI ignores message types it does not
