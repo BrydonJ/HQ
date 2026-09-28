@@ -20,6 +20,9 @@ const app = {
   query: '',
 };
 
+// Which copy of HQ this is (see build_info in main.rs); filled in by restore().
+let build = { profile: null, version: '', liveUi: false };
+
 // Shown until a session has started once and reported the real list.
 const FALLBACK_MODELS = [
   { value: 'default', displayName: 'Default', description: 'Your configured default model' },
@@ -64,6 +67,7 @@ class Cell {
     this.proc = null;          // backend process id while claude is running
     this.spawning = null;      // promise while a spawn is in flight
     this.status = 'idle';      // idle | running | exited
+    this.bgTasks = [];         // background agents and shells still running: { id, type, description }
     this.unread = false;
     this.pending = new Map();  // control request_id -> prompt element
     this.controls = new Map(); // our control request_id -> resolver awaiting Claude's reply
@@ -92,9 +96,10 @@ class Cell {
     this.stopBtn = el.querySelector('.act-stop');
     this.titleEl = el.querySelector('.cell-title');
     this.cleanBtn = el.querySelector('.act-clean');
+    this.bgEl = el.querySelector('.bg-tasks');
 
     el.style.setProperty('--proj', this.color);
-    el.querySelector('.cell-project').textContent = baseName(this.cwd) || this.cwd;
+    for (const name of el.querySelectorAll('.proj-name, .sweep-name')) name.textContent = baseName(this.cwd) || this.cwd;
     el.querySelector('.cell-path').textContent = this.cwd;
     this.modeSel.value = this.permissionMode;
     this.setTitle(this.title);
@@ -486,9 +491,41 @@ class Cell {
     el.classList.toggle('state-running', this.status === 'running' && !waiting);
     el.classList.toggle('state-waiting', waiting);
     el.classList.toggle('state-exited', this.status === 'exited');
+    el.classList.toggle('state-bg', this.bgTasks.length > 0 && this.status !== 'running' && !waiting);
     el.classList.toggle('unread', this.unread && !waiting);
     this.stopBtn.classList.toggle('hidden', this.status !== 'running' && !waiting);
+    this.bgEl.classList.toggle('hidden', !this.bgTasks.length);
+    if (this.bgTasks.length) {
+      this.bgEl.querySelector('.bg-count').textContent = String(this.bgTasks.length);
+      const lines = this.bgTasks.map(t => `${BG_LABELS[t.type] || 'Task'}: ${t.description}`);
+      this.bgEl.title = ['Running in the background:', ...lines].join('\n');
+    }
     updateSummary();
+  }
+
+  /** Anything that would be lost if this cell's claude stopped now. */
+  busy() {
+    return this.status === 'running' || this.pending.size > 0 || this.bgTasks.length > 0;
+  }
+
+  setBackground(tasks) {
+    this.bgTasks = tasks;
+    this.refreshState();
+  }
+
+  /** Keeps a backgrounded tool call marked as running until its task reports back. */
+  onTaskEvent(m) {
+    const t = m.tool_use_id && this.tools.get(m.tool_use_id);
+    if (m.subtype === 'task_started') {
+      if (t && m.is_backgrounded) t.item.classList.add('bg');
+      return;
+    }
+    // task_notification: the task is done, even if a background_tasks_changed was missed.
+    if (t) {
+      t.item.classList.remove('bg');
+      if (m.status === 'failed') t.item.classList.replace('ok', 'err');
+    }
+    if (this.bgTasks.some(x => x.id === m.task_id)) this.setBackground(this.bgTasks.filter(x => x.id !== m.task_id));
   }
 
   markUnread() {
@@ -571,7 +608,7 @@ class Cell {
     this.attachments = [];
     this.renderAttachments();
     this.stickToBottom = true;
-    this.append(userBubble(text, images.map(i => i.url)));
+    this.append(userBubble(text, images.map(i => i.url), Date.now()));
     if (!this.title) {
       this.firstPrompt = text.slice(0, 2000);
       this.setTitle(firstLine(text, 90) || 'Image');
@@ -607,10 +644,9 @@ class Cell {
   }
 
   requestClose(btn) {
-    const busy = this.status === 'running' || this.pending.size > 0;
-    if (busy && !btn.classList.contains('confirm')) {
+    if (this.busy() && !btn.classList.contains('confirm')) {
       btn.classList.add('confirm');
-      btn.title = 'Claude is working. Click again to close.';
+      btn.title = this.status === 'running' || this.pending.size ? 'Claude is working. Click again to close.' : 'Background tasks are still running. Click again to stop them and close.';
       btn.style.color = 'var(--error)';
       setTimeout(() => { btn.classList.remove('confirm'); btn.style.color = ''; btn.title = 'Close session'; }, 3000);
       return;
@@ -672,6 +708,10 @@ class Cell {
       if (this.status !== 'running') this.setStatus('running');
     } else if (m.subtype === 'compact_boundary') {
       this.notice('Conversation compacted');
+    } else if (m.subtype === 'background_tasks_changed') {
+      this.setBackground(sanitizeTasks(m.tasks)); // Claude's full list, sent whenever it changes
+    } else if (m.subtype === 'task_started' || m.subtype === 'task_notification') {
+      this.onTaskEvent(m);
     }
   }
 
@@ -751,14 +791,20 @@ class Cell {
     for (const block of msg.content || []) {
       if (block.type === 'text') {
         if (!block.text) continue;
+        // When the text was written, for the reply's time stamp.
+        const ts = String(replay ? Date.parse(m.timestamp) : Date.now());
         const live = !replay && !parent ? this.takeLiveText(msg.id) : null;
         if (live) {
           renderMarkdown(live.md, block.text);
+          live.item.dataset.ts = ts;
         } else {
           const md = h('div', { class: 'md' });
           renderMarkdown(md, block.text);
           const item = this.append(h('div', { class: parent ? 'item text narration' : 'item text' }, md), parent);
-          if (!parent) this.turnTexts.push(item);
+          if (!parent) {
+            item.dataset.ts = ts;
+            this.turnTexts.push(item);
+          }
         }
       } else if (block.type === 'thinking') {
         if (!block.thinking) continue;
@@ -786,10 +832,9 @@ class Cell {
       for (const item of items) item.classList.add('narration', 'tail');
       return;
     }
-    items.forEach((item, i) => {
-      item.classList.add('reply');
-      if (i === 0) item.prepend(h('div', { class: 'reply-head' }, icon('sparkle'), 'Claude'));
-    });
+    for (const item of items) item.classList.add('reply');
+    const time = stamp(Number(items[items.length - 1].dataset.ts));
+    if (time) items[0].prepend(time);
     const last = items[items.length - 1].querySelector('.md');
     const text = last ? last.textContent.trim() : '';
     if (text) {
@@ -801,6 +846,7 @@ class Cell {
   addTool(block, parent) {
     if (!parent) this.demoteTurnTexts();
     const name = block.name || 'tool';
+    if (name === 'AskUserQuestion' && !parent) return this.addQuestion(block);
     const summary = h('summary', null,
       h('span', { class: 'tname', text: name }),
       h('span', { class: 'targ', text: toolSummary(name, block.input, this.cwd) }));
@@ -809,6 +855,58 @@ class Cell {
     if (name === 'TodoWrite') item.open = true;
     this.tools.set(block.id, { item, body, name });
     this.append(item, parent);
+  }
+
+  /** Claude's questions and the answers given: a small collapsible record, shown even in the replies-only view. */
+  addQuestion(block) {
+    const questions = block.input && Array.isArray(block.input.questions) ? block.input.questions : [];
+    const first = questions[0] || {};
+    const more = questions.length > 1 ? `  (+${questions.length - 1} more)` : '';
+    const answerEl = h('span', { class: 'qa-a', text: 'Waiting for your answer…' });
+    const summary = h('summary', null, icon('comment-discussion'), h('span', { class: 'qa-q', text: (first.question || 'Question') + more }), answerEl);
+    const body = h('div', { class: 'qa-body' });
+    const t = { item: h('details', { class: 'item qa pending' }, summary, body), body, name: 'AskUserQuestion', qa: { questions, answerEl } };
+    this.renderQuestion(t, null);
+    this.tools.set(block.id, t);
+    this.append(t.item);
+  }
+
+  /** `result` is the tool's structured result ({ answers: { question: "label, label" } }) when Claude sent one. */
+  answerQuestion(t, block, result) {
+    t.item.classList.remove('pending');
+    let answers = result && result.answers && typeof result.answers === 'object' ? result.answers : null;
+    if (!answers && !block.is_error) answers = parseAnswers(toolResultText(block.content));
+    const given = answers ? t.qa.questions.map(q => answers[q.question]).filter(a => typeof a === 'string' && a) : [];
+    if (block.is_error || !given.length) {
+      t.item.classList.add('skipped');
+      t.qa.answerEl.textContent = 'Skipped';
+      return;
+    }
+    t.qa.answerEl.textContent = given.join(' · ');
+    this.renderQuestion(t, answers);
+  }
+
+  renderQuestion(t, answers) {
+    t.body.replaceChildren(...t.qa.questions.map(q => {
+      const options = Array.isArray(q.options) ? q.options : [];
+      const answer = answers && typeof answers[q.question] === 'string' ? answers[q.question] : null;
+      const { chosen, other } = answer == null ? { chosen: new Set(), other: '' } : splitAnswer(answer, options);
+      return h('div', { class: 'qa-block' },
+        q.header ? h('div', { class: 'qa-head', text: q.header }) : null,
+        h('div', { class: 'qa-question', text: q.question || '' }),
+        h('ul', { class: 'qa-options' }, options.map(opt => h('li', { class: chosen.has(opt.label) ? 'chosen' : '' },
+          icon(chosen.has(opt.label) ? 'pass-filled' : 'circle-large-outline'), opt.label,
+          opt.description ? h('span', { class: 'desc', text: ` — ${opt.description}` }) : null))),
+        other ? h('div', { class: 'qa-other' }, h('span', { class: 'desc', text: 'Other: ' }), other) : null);
+    }));
+  }
+
+  /** A finished turn has no tool calls left running. */
+  settleTools() {
+    for (const t of this.tools.values()) {
+      if (t.qa && t.item.classList.contains('pending')) t.qa.answerEl.textContent = 'No answer';
+      t.item.classList.remove('pending');
+    }
   }
 
   onUser(m, replay) {
@@ -821,10 +919,14 @@ class Cell {
     const content = typeof msg.content === 'string' ? [{ type: 'text', text: msg.content }] : msg.content || [];
     const texts = [];
     const images = [];
+    // The structured result is per message, so it can only be matched to a lone tool_result.
+    const lone = content.filter(b => b.type === 'tool_result').length === 1;
+    const structured = lone ? m.tool_use_result || m.toolUseResult : null;
     for (const block of content) {
       if (block.type === 'tool_result') {
         const t = this.tools.get(block.tool_use_id);
         if (!t) continue;
+        if (t.qa) { this.answerQuestion(t, block, structured); continue; }
         const text = toolResultText(block.content);
         t.item.classList.remove('pending');
         t.item.classList.add(block.is_error ? 'err' : 'ok');
@@ -843,7 +945,7 @@ class Cell {
     if (replay && !parent && (texts.length || images.length)) {
       this.closeTurn(true);
       const text = texts.join('\n');
-      this.append(userBubble(text, images));
+      this.append(userBubble(text, images, Date.parse(m.timestamp)));
       if (!this.title) this.title = firstLine(text, 90) || 'Image';
     }
   }
@@ -851,7 +953,7 @@ class Cell {
   onResult(m) {
     this.finishLive();
     this.closeTurn(m.subtype === 'success' && !m.is_error);
-    for (const t of this.tools.values()) t.item.classList.remove('pending');
+    this.settleTools();
     for (const id of [...this.pending.keys()]) this.dropPrompt(id); // a finished turn has nothing left to approve
     if (m.is_error && m.subtype !== 'error_during_execution') {
       const detail = m.result || (m.errors && m.errors.join('\n')) || m.subtype;
@@ -881,6 +983,9 @@ class Cell {
     this.finishLive();
     this.closeTurn(false);
     for (const id of [...this.pending.keys()]) this.dropPrompt(id);
+    this.settleTools();
+    for (const t of this.tools.values()) t.item.classList.remove('bg');
+    this.bgTasks = []; // they ran inside this claude, so they ended with it
     if (m.code !== 0 && m.code != null) {
       const tail = (m.stderr || []).slice(-8).join('\n');
       this.notice(`Claude exited with code ${m.code}${tail ? '\n' + tail : ''}`, true);
@@ -1041,7 +1146,7 @@ class Cell {
       try { this.handle(JSON.parse(line), true); } catch { /* skip malformed line */ }
     }
     this.closeTurn(true);
-    for (const t of this.tools.values()) t.item.classList.remove('pending');
+    this.settleTools();
     this.stickToBottom = prevStick;
     this.setTitle(this.title);
     saveState(); // keeps a title recovered from the transcript
@@ -1098,6 +1203,37 @@ function sanitizeModels(models) {
     resolvedModel: typeof m.resolvedModel === 'string' ? m.resolvedModel : null,
     supportsEffort: !!m.supportsEffort,
     supportedEffortLevels: Array.isArray(m.supportedEffortLevels) ? m.supportedEffortLevels.filter(l => typeof l === 'string') : [],
+  }));
+}
+
+/** Which of a question's options an answer ("label, label, typed text") picked, and any typed text left over. */
+function splitAnswer(answer, options) {
+  let rest = `, ${answer}, `;
+  const chosen = new Set();
+  const labels = options.map(o => o.label).filter(l => typeof l === 'string' && l).sort((a, b) => b.length - a.length);
+  for (const label of labels) {
+    if (rest.includes(`, ${label}, `)) {
+      chosen.add(label);
+      rest = rest.replace(`, ${label}, `, ', ');
+    }
+  }
+  return { chosen, other: rest.replace(/^(, )+|(, )+$/g, '').trim() };
+}
+
+/** Reads `"question"="answer"` pairs from the tool's text result, for transcripts without a structured one. */
+function parseAnswers(text) {
+  const answers = {};
+  for (const [, q, a] of String(text).matchAll(/"((?:[^"\\]|\\.)*)"="((?:[^"\\]|\\.)*)"/g)) answers[q] = a;
+  return Object.keys(answers).length ? answers : null;
+}
+
+const BG_LABELS = { local_agent: 'Agent', local_bash: 'Shell' };
+
+function sanitizeTasks(tasks) {
+  return (Array.isArray(tasks) ? tasks : []).filter(t => t && t.task_id).map(t => ({
+    id: String(t.task_id),
+    type: typeof t.task_type === 'string' ? t.task_type : '',
+    description: firstLine(t.description || '', 120),
   }));
 }
 
@@ -1178,6 +1314,7 @@ function addCell(opts, { restore = false } = {}) {
 
 function closeCell(cell) {
   cell.dispose();
+  if (peeked === cell) peeked = null;
   const i = app.cells.indexOf(cell);
   if (i >= 0) app.cells.splice(i, 1);
   cell.el.remove();
@@ -1286,8 +1423,9 @@ function layout() {
 }
 
 function updateSummary() {
-  let waiting = 0, running = 0, done = 0;
+  let waiting = 0, running = 0, done = 0, background = 0;
   for (const c of app.cells) {
+    background += c.bgTasks.length;
     if (c.pending.size) waiting++;
     else if (c.status === 'running') running++;
     else if (c.unread) done++;
@@ -1296,8 +1434,10 @@ function updateSummary() {
   if (waiting) pills.push(h('span', { class: 'pill waiting', text: `${waiting} waiting on you` }));
   if (done) pills.push(h('span', { class: 'pill done', text: `${done} finished` }));
   if (running) pills.push(h('span', { class: 'pill running', text: `${running} working` }));
+  if (background) pills.push(h('span', { class: 'pill background', text: `${background} background task${background === 1 ? '' : 's'}` }));
   $('#summary').replaceChildren(...pills);
-  document.title = waiting ? `(${waiting}) HQ` : 'HQ';
+  const name = build.profile ? `HQ (${build.profile})` : 'HQ';
+  document.title = waiting ? `(${waiting}) ${name}` : name;
   renderSidebar();
 }
 
@@ -1313,6 +1453,7 @@ let sidebarFrame = 0;
 function stateOf(cell) {
   if (cell.pending.size) return ['state-waiting', 'Waiting on you'];
   if (cell.status === 'running') return ['state-running', 'Working'];
+  if (cell.bgTasks.length) return ['state-bg', `${cell.bgTasks.length} in background`];
   if (cell.unread) return ['unread', 'Finished'];
   if (cell.status === 'exited') return ['state-exited', 'Stopped'];
   if (!cell.sessionId && cell.proc == null) return ['', 'New'];
@@ -1346,6 +1487,7 @@ function renderSidebar() {
           h('span', { class: 'session-path', text: cell.cwd })),
         i < 9 ? h('span', { class: 'session-key', text: `^${i + 1}` }) : null);
       row.style.setProperty('--proj', cell.color);
+      row.cell = cell;
       row.addEventListener('click', () => revealCell(cell));
       rows.push(row);
     });
@@ -1355,8 +1497,26 @@ function renderSidebar() {
   });
 }
 
+/** Lightly marks the cell a sessions-list row points at while the row is hovered or focused. */
+let peeked = null;
+function peekCell(cell) {
+  if (peeked === cell) return;
+  if (peeked) peeked.el.classList.remove('peek');
+  peeked = cell;
+  if (cell) cell.el.classList.add('peek');
+}
+const rowCell = e => {
+  const row = e.target.closest && e.target.closest('.session');
+  return (row && row.cell) || null;
+};
+sessionList.addEventListener('mouseover', e => peekCell(rowCell(e)));
+sessionList.addEventListener('mouseleave', () => peekCell(null));
+sessionList.addEventListener('focusin', e => peekCell(rowCell(e)));
+sessionList.addEventListener('focusout', () => peekCell(null));
+
 function setSidebar(open, focusSearch) {
   app.sidebarOpen = open;
+  if (!open) peekCell(null);
   sidebar.classList.toggle('hidden', !open);
   $('#toggle-sidebar').classList.toggle('on', open);
   if (open) {
@@ -1629,14 +1789,14 @@ function sanitizeUsage(r) {
   const rl = (r && r.rate_limits) || {};
   for (const [key, label] of Object.entries(LIMIT_LABELS)) {
     const l = rl[key];
-    if (l && typeof l.utilization === 'number') rows.push({ key, label, percent: l.utilization, resetsAt: Date.parse(l.resets_at) || null });
+    if (l && typeof l.utilization === 'number') rows.push({ key, label, percent: Math.round(l.utilization), resetsAt: Date.parse(l.resets_at) || null });
   }
   // Newer CLIs also list per-model weekly limits.
   for (const l of Array.isArray(r && r.limits) ? r.limits : []) {
     if (l.kind !== 'weekly_scoped' || typeof l.percent !== 'number') continue;
     const name = l.scope && l.scope.model && l.scope.model.display_name;
     if (!name || rows.some(x => x.label === `Weekly · ${name}`)) continue;
-    rows.push({ key: `scoped-${name}`, label: `Weekly · ${name}`, percent: l.percent, resetsAt: Date.parse(l.resets_at) || null });
+    rows.push({ key: `scoped-${name}`, label: `Weekly · ${name}`, percent: Math.round(l.percent), resetsAt: Date.parse(l.resets_at) || null });
   }
   return { plan: typeof (r && r.subscription_type) === 'string' ? r.subscription_type : null, available: !!(r && r.rate_limits_available), rows };
 }
@@ -1810,12 +1970,12 @@ async function checkForUpdate() {
 function safeToRestart() {
   if (Date.now() - updater.lastInput < (document.hasFocus() ? UPDATE_QUIET_FOCUSED_MS : UPDATE_QUIET_MS)) return false;
   if (!picker.classList.contains('hidden') || !resumer.classList.contains('hidden') || menuState.anchor) return false;
-  return app.cells.every(c => c.status !== 'running' && !c.spawning && !c.pending.size && !c.unread && !c.renaming
+  return app.cells.every(c => !c.busy() && !c.spawning && !c.unread && !c.renaming
     && !c.input.value.trim() && !c.attachments.length);
 }
 
 function busyCount() {
-  return app.cells.filter(c => c.status === 'running' || c.pending.size).length;
+  return app.cells.filter(c => c.busy()).length;
 }
 
 async function installUpdate() {
@@ -1877,6 +2037,12 @@ setInterval(() => {
 document.addEventListener('keydown', e => {
   const cell = app.focused;
   const typing = e.target.matches('input, textarea, select');
+  // Dev builds read the UI from disk, so a reload shows edits. It also stops every claude.
+  if (build.liveUi && (e.key === 'F5' || (e.ctrlKey && (e.key === 'r' || e.key === 'R')))) {
+    e.preventDefault();
+    flushState().then(() => location.reload());
+    return;
+  }
   if (e.key === 'Escape' && menuState.anchor) {
     e.preventDefault();
     closeMenu();
@@ -1959,6 +2125,14 @@ function flushState() {
 }
 
 async function restore() {
+  await invoke('kill_all_sessions').catch(() => {});
+  build = await invoke('build_info').catch(() => build);
+  if (build.profile) {
+    const tag = $('#profile');
+    tag.textContent = build.profile;
+    tag.title = `This copy keeps its own sessions, separate from the installed HQ (profile "${build.profile}", version ${build.version}).`;
+    tag.classList.remove('hidden');
+  }
   let state = null;
   try {
     const raw = await invoke('load_state');

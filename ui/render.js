@@ -145,11 +145,21 @@ function imageBlockUrl(source) {
   return `data:${source.media_type};base64,${source.data}`;
 }
 
-function userBubble(text, imageUrls) {
+function userBubble(text, imageUrls, ms) {
   return h('div', { class: 'item user' },
     h('div', { class: 'bubble' },
+      stamp(ms),
       imageUrls && imageUrls.length ? h('div', { class: 'bubble-images' }, imageUrls.map(src => h('img', { class: 'thumb', src, alt: 'image' }))) : null,
       text ? h('div', { text }) : null));
+}
+
+/** A small time in the corner of a prompt or reply; the date is added once it is not today. Null for a bad time. */
+function stamp(ms) {
+  if (!Number.isFinite(ms)) return null;
+  const d = new Date(ms);
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const text = d.toDateString() === new Date().toDateString() ? time : `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${time}`;
+  return h('span', { class: 'stamp', text, title: d.toLocaleString() });
 }
 
 // ---------- tools ----------

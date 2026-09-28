@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(debug_assertions)]
+mod dev;
 mod session;
 mod store;
 mod update;
@@ -132,13 +134,76 @@ fn request_attention(window: WebviewWindow) {
     }
 }
 
+/// A freshly loaded page owns no cells, so any `claude` still running belonged to a page that
+/// was reloaded (F5 in a dev build, or WebView2 recovering from a crash) and nobody can reach it.
+#[tauri::command]
+fn kill_all_sessions(sessions: State<'_, Sessions>) {
+    sessions.kill_all();
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BuildInfo {
+    profile: Option<String>,
+    version: String,
+    /// The UI is read from `ui/` on each load, so a reload shows edits without a rebuild.
+    live_ui: bool,
+}
+
+struct Profile(Option<String>);
+
+#[tauri::command]
+fn build_info(app: AppHandle, profile: State<'_, Profile>) -> BuildInfo {
+    BuildInfo {
+        profile: profile.0.clone(),
+        version: app.package_info().version.to_string(),
+        live_ui: cfg!(debug_assertions),
+    }
+}
+
+/// Which copy of HQ this is. The installed app is the default profile. Any other copy (a build
+/// under `target\`) is "dev", or whatever `HQ_PROFILE` names. A profile gets its own identifier,
+/// and with it its own board.json, WebView2 data folder and single-instance lock, so it runs
+/// next to the installed app without touching it. `HQ_PROFILE=default` opts back in.
+fn profile() -> Option<String> {
+    match std::env::var("HQ_PROFILE") {
+        Ok(p) if p.eq_ignore_ascii_case("default") => None,
+        Ok(p) if !p.is_empty() && p.len() <= 32 && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') => {
+            Some(p.to_ascii_lowercase())
+        }
+        _ if update::is_installed() => None,
+        _ => Some("dev".into()),
+    }
+}
+
 fn main() {
+    let profile = profile();
+    let mut context = tauri::generate_context!();
+    if let Some(name) = &profile {
+        let config = context.config_mut();
+        config.identifier = format!("{}.{name}", config.identifier);
+        for window in &mut config.app.windows {
+            window.title = format!("{} ({name})", window.title);
+        }
+    }
+    #[cfg(debug_assertions)]
+    dev::prepare(&mut context);
+
     tauri::Builder::default()
+        // Must come first: a second launch of the same profile hands over to the running copy.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Sessions::default())
         .manage(update::PendingUpdate::default())
+        .manage(Profile(profile))
         .invoke_handler(tauri::generate_handler![
             spawn_session,
             send_line,
@@ -156,8 +221,10 @@ fn main() {
             request_attention,
             check_update,
             install_update,
+            kill_all_sessions,
+            build_info,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("failed to start HQ")
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {

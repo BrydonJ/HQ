@@ -12,7 +12,7 @@
 <body>
   <header id="topbar">
     <button id="toggle-sidebar" class="icon-btn" title="Sessions list (Ctrl+B)"><span class="codicon codicon-layout-sidebar-left"></span></button>
-    <div class="brand"><span class="codicon codicon-layout"></span> HQ</div>
+    <span id="profile" class="profile-tag hidden"></span>
     <div id="summary" class="summary"></div>
     <div class="spacer"></div>
     <button id="update" class="update-pill hidden">
@@ -85,9 +85,10 @@
     <section class="cell" tabindex="-1">
       <div class="cell-head">
         <span class="status-dot"></span>
-        <span class="cell-project"></span>
+        <span class="cell-project"><span class="proj-name"></span><span class="sweep" aria-hidden="true"><span class="sweep-name"></span></span></span>
         <span class="cell-title" title="Rename session (F2)"></span>
         <span class="cell-path"></span>
+        <span class="bg-tasks hidden"><span class="codicon codicon-loading codicon-modifier-spin"></span><span class="bg-count"></span></span>
         <button class="icon-btn act-clean"><span class="codicon codicon-eye"></span></button>
         <button class="icon-btn act-code" title="Open folder in VS Code"><span class="codicon codicon-vscode"></span></button>
         <button class="icon-btn act-reveal" title="Open folder in Explorer"><span class="codicon codicon-folder"></span></button>

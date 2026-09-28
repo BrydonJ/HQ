@@ -33,7 +33,7 @@ body {
   font: 13px/1.5 var(--font);
   overflow: hidden;
 }
-button, select, textarea { font: inherit; color: inherit; }
+button, input, select, textarea { font: inherit; color: inherit; }
 .hidden { display: none !important; }
 .spacer { flex: 1; }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -47,14 +47,18 @@ button, select, textarea { font: inherit; color: inherit; }
   height: 36px; padding: 0 8px 0 12px; flex: none;
   background: var(--bg-alt); border-bottom: 1px solid var(--border);
 }
-.brand { display: flex; align-items: center; gap: 6px; font-weight: 600; color: var(--fg-strong); }
-.brand .codicon { color: var(--claude); }
+.profile-tag {
+  padding: 0 6px; border-radius: 3px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
+  background: var(--waiting); color: #1b1b1b; cursor: default;
+}
 .summary { display: flex; gap: 12px; color: var(--fg-muted); font-size: 12px; }
 .summary .pill { display: inline-flex; align-items: center; gap: 5px; }
 .summary .pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 .summary .pill.waiting { color: var(--waiting); }
 .summary .pill.running { color: var(--link); }
 .summary .pill.done { color: var(--done); }
+.summary .pill.background { color: var(--link); }
+.summary .pill.background::before { background: transparent; box-shadow: inset 0 0 0 1.5px currentColor; }
 
 .btn {
   display: inline-flex; align-items: center; gap: 6px;
@@ -103,6 +107,14 @@ button, select, textarea { font: inherit; color: inherit; }
 }
 .cell.unread { border-color: var(--done); box-shadow: 0 0 0 1px rgba(63, 185, 80, 0.5), 0 0 16px rgba(63, 185, 80, 0.25); }
 .cell.state-exited .status-dot, .cell.state-error .status-dot { background: var(--error); }
+/* Hovering the cell's row in the sessions list. An overlay, so it never fights the state borders. */
+.cell::before {
+  content: ""; position: absolute; inset: 0; z-index: 2; pointer-events: none; border-radius: 5px;
+  box-shadow: inset 0 0 0 1px var(--proj, var(--accent));
+  background: color-mix(in srgb, var(--proj, var(--accent)) 4%, transparent);
+  opacity: 0; transition: opacity 0.12s;
+}
+.cell.peek::before { opacity: 1; }
 
 /* Each project folder gets its own color (--proj) on the header stripe, tint and title. */
 .cell-head {
@@ -117,17 +129,27 @@ button, select, textarea { font: inherit; color: inherit; }
 .state-running .status-dot { background: var(--link); animation: pulse 1s ease-in-out infinite; }
 .state-waiting .status-dot { background: var(--waiting); animation: pulse 0.8s ease-in-out infinite; }
 .unread .status-dot { background: var(--done); }
+/* Idle, but background agents or shells are still running: a hollow dot. */
+.state-bg .status-dot { background: transparent; box-shadow: inset 0 0 0 2px var(--link); animation: pulse 1.6s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: 0.35; } }
-.cell-project { --proj-fg: color-mix(in srgb, var(--proj, var(--fg-strong)) 60%, var(--fg-strong)); flex: none; font-weight: 600; color: var(--proj-fg); white-space: nowrap; }
-/* Claude is working: a light sweeps across the project name and it glows. */
-.cell.state-running .cell-project {
-  color: transparent;
-  background: linear-gradient(90deg, var(--proj-fg) 0 35%, #fff 50%, var(--proj-fg) 65% 100%) 0 0 / 250% 100% no-repeat;
-  -webkit-background-clip: text; background-clip: text;
-  animation: shine 1.6s linear infinite, glow 1.6s ease-in-out infinite;
+.cell-project { --proj-fg: color-mix(in srgb, var(--proj, var(--fg-strong)) 60%, var(--fg-strong)); position: relative; flex: none; font-weight: 600; color: var(--proj-fg); white-space: nowrap; }
+/*
+ * Claude is working: a band of light sweeps across the project name, then rests. The band is a
+ * soft-edged window (45% of the name's width) over a bright copy of the name. The window slides
+ * right while the copy slides left by the same amount, so the copy stays put under the moving
+ * band. Only transforms animate, so the sweep stays smooth while a reply is being rendered.
+ * Window: -100% to 100/45 = 222.2% of its own width. Copy: +45% to -100% of the name's width.
+ */
+.sweep {
+  display: none; position: absolute; top: 0; bottom: 0; left: 0; width: 45%; overflow: hidden; pointer-events: none;
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 50%, transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 50%, transparent);
 }
-@keyframes shine { from { background-position: 100% 0; } to { background-position: 0 0; } }
-@keyframes glow { 50% { filter: drop-shadow(0 0 5px color-mix(in srgb, var(--proj, var(--link)) 85%, transparent)); } }
+.sweep-name { position: absolute; top: 0; left: 0; color: #fff; text-shadow: 0 0 6px color-mix(in srgb, var(--proj, var(--link)) 80%, transparent); }
+.cell.state-running .sweep { display: block; animation: sweep-band 2.2s ease-in-out infinite; }
+.cell.state-running .sweep-name { animation: sweep-name 2.2s ease-in-out infinite; }
+@keyframes sweep-band { 0% { transform: translateX(-100%); } 70%, 100% { transform: translateX(222.2%); } }
+@keyframes sweep-name { 0% { transform: translateX(45%); } 70%, 100% { transform: translateX(-100%); } }
 /* The session's name; click (or F2) to rename. The path only gets the space left after it. */
 .cell-title {
   flex: 0 1 auto; min-width: 0; padding: 1px 4px; border-radius: 3px;
@@ -152,6 +174,11 @@ button, select, textarea { font: inherit; color: inherit; }
   border: 2px dashed var(--accent); border-radius: 6px;
   background: rgba(0, 120, 212, 0.12); color: var(--fg-strong); font-weight: 600;
 }
+.bg-tasks {
+  display: inline-flex; align-items: center; gap: 3px; flex: none; height: 18px; padding: 0 7px 0 5px;
+  border-radius: 9px; background: rgba(77, 170, 252, 0.12); color: var(--link); font-size: 11px; cursor: default;
+}
+.bg-tasks .codicon { font-size: 12px; }
 .cell-path { flex: 1 1 0; color: var(--fg-faint); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; direction: rtl; text-align: left; }
 
 /* ---------- messages (timeline like the Claude Code extension) ---------- */
@@ -169,6 +196,7 @@ button, select, textarea { font: inherit; color: inherit; }
 .item.tool.ok::before { background: var(--done); }
 .item.tool.err::before { background: var(--error); }
 .item.tool.pending::before { background: var(--waiting); animation: pulse 1s infinite; }
+.item.tool.bg::before { background: var(--link); animation: pulse 1.6s infinite; } /* launched into the background, still running */
 .item.notice { color: var(--fg-muted); font-size: 12px; }
 .item.notice.error { color: var(--error); }
 .item.notice::before { background: transparent; }
@@ -187,11 +215,11 @@ button, select, textarea { font: inherit; color: inherit; }
   color: var(--fg-strong);
 }
 .item.text.reply::before { display: none; }
-.reply-head {
-  display: flex; align-items: center; gap: 5px; margin-bottom: 4px;
-  color: var(--claude); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
+/* When a prompt was sent or a reply was written; floats in the top-right corner. */
+.stamp {
+  float: right; margin-left: 10px; color: var(--fg-faint); font-size: 10.5px; line-height: 19px;
+  font-weight: 400; white-space: nowrap; user-select: none; cursor: default;
 }
-.reply-head .codicon { font-size: 12px; }
 
 .bubble {
   background: var(--input-bg); border: 1px solid var(--border-strong); border-radius: 6px;
@@ -200,6 +228,28 @@ button, select, textarea { font: inherit; color: inherit; }
 .bubble.queued { opacity: 0.6; border-style: dashed; }
 .bubble-images { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 4px; }
 .bubble-images .thumb { max-width: 160px; max-height: 120px; border-radius: 4px; border: 1px solid var(--border-strong); object-fit: contain; background: var(--bg-alt); }
+
+/* Claude's questions and the answers given. Not a .tool, so the replies-only view keeps it. */
+.item.qa::before { display: none; }
+.qa > summary { display: flex; align-items: baseline; gap: 6px; min-width: 0; cursor: pointer; list-style: none; font-size: 12.5px; }
+.qa > summary::-webkit-details-marker { display: none; }
+.qa > summary > .codicon { position: absolute; left: -1px; top: 3px; font-size: 12px; color: var(--claude); }
+.qa-q { flex: 0 1 auto; min-width: 0; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.qa-a { flex: 0 1 auto; min-width: 48px; color: var(--link); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.qa-a::before { content: "→ "; color: var(--fg-faint); }
+.qa.pending .qa-a { color: var(--waiting); }
+.qa.skipped .qa-a { color: var(--fg-faint); font-style: italic; }
+.qa-body { margin-top: 4px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; font-size: 12.5px; }
+.qa-block + .qa-block { margin-top: 8px; }
+.qa-head { color: var(--fg-muted); font-size: 11px; text-transform: uppercase; }
+.qa-question { color: var(--fg-strong); margin-bottom: 2px; }
+.qa-options { list-style: none; margin: 0; padding: 0; }
+.qa-options li { color: var(--fg-muted); }
+.qa-options li.chosen { color: var(--fg-strong); }
+.qa-options .codicon { font-size: 12px; margin-right: 5px; vertical-align: -1px; }
+.qa-options li.chosen .codicon { color: var(--link); }
+.qa-body .desc { color: var(--fg-faint); }
+.qa-other { color: var(--fg-strong); margin-top: 2px; }
 
 .thinking > summary { color: var(--fg-muted); font-style: italic; cursor: pointer; list-style: none; }
 .thinking > summary::-webkit-details-marker { display: none; }
@@ -424,6 +474,7 @@ button, select, textarea { font: inherit; color: inherit; }
 .session.state-waiting .session-state { color: var(--waiting); }
 .session.state-running .session-state { color: var(--link); }
 .session.unread .session-state { color: var(--done); }
+.session.state-bg .session-state { color: var(--link); }
 .session.state-exited .session-state { color: var(--error); }
 .session-title, .session-reply, .session-path { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
 .session-title { color: var(--fg); }

@@ -35,16 +35,19 @@ impl UpdateInfo {
 }
 
 /// The NSIS installer puts `uninstall.exe` next to the app; a build under `target\` has none.
+pub fn is_installed() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("uninstall.exe").is_file()))
+        .unwrap_or(false)
+}
+
 /// `HQ_NO_UPDATE` turns updates off; `HQ_UPDATE_ANY_COPY` allows them for a test build.
 fn updates_enabled() -> bool {
     if std::env::var_os("HQ_NO_UPDATE").is_some() {
         return false;
     }
-    let installed = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join("uninstall.exe").is_file()))
-        .unwrap_or(false);
-    installed || std::env::var_os("HQ_UPDATE_ANY_COPY").is_some()
+    is_installed() || std::env::var_os("HQ_UPDATE_ANY_COPY").is_some()
 }
 
 /// Checks for a newer release and downloads it. Returns the version that is ready to install.

@@ -29,6 +29,32 @@ build.cmd --release  :: release build -> target\release\hq.exe
 Studio on this machine does not include the desktop x64 CRT libraries (`msvcrt.lib`), and
 rustc would otherwise pick it.
 
+### One copy per profile
+
+Only one HQ runs per profile. Starting it again brings the open window to the front. Each
+profile has its own board, WebView2 data folder and lock, so copies in different profiles
+never touch each other's sessions.
+
+- The installed app uses the default profile.
+- Any other copy (a build under `target\`) uses the `dev` profile. Its window title and top
+  bar say so.
+- `HQ_PROFILE=<name>` picks another profile, for example to run a second test copy.
+  `HQ_PROFILE=default` makes a build share the installed app's board.
+
+### Local development
+
+```bat
+dev.cmd   :: stops the running dev copy, builds a debug build and starts it
+```
+
+The dev copy runs next to the installed HQ. A debug build also:
+
+- Reads `ui\` from disk, so F5 (or Ctrl+R) shows a UI edit without a rebuild. A reload stops
+  every `claude` in the dev copy; the cells come back from its board. Rust changes still need
+  `dev.cmd`.
+- Opens DevTools on port 9223 (`HQ_DEBUG_PORT` changes it), for CDP tools such as the Chrome
+  DevTools MCP server. Right-click > Inspect works too.
+
 ## Releases and updates
 
 An installed copy of HQ updates itself:
@@ -88,9 +114,12 @@ every installed copy must be reinstalled by hand.
 - Each project folder gets its own color. The cell header and its entry in the sessions list
   use it, so sessions in the same folder are easy to spot.
 - Status cues on each cell:
-  - The project name in the cell header lights up: Claude is working.
+  - A band of light sweeps across the project name in the cell header: Claude is working.
   - Pulsing amber glow: Claude is waiting on you (a permission, a question or a plan).
   - Green glow: the session finished while you were looking elsewhere.
+  - Spinner badge with a count, and a hollow status dot: background agents or shells that
+    Claude started are still running. Hover the badge to see them. Closing the cell, or an
+    update restart, would stop them, so HQ treats the cell as busy until they finish.
   - The top bar shows the totals. The taskbar button flashes when HQ is in the background.
 - **Session names:** the cell header shows the session's name after the project name.
   - Claude names a new session after its first reply, as the VS Code extension does.
@@ -101,14 +130,20 @@ every installed copy must be reinstalled by hand.
   last words of a turn you stopped, stay visible.
 - Claude's text comes in two styles:
   - **Narration:** muted grey text between tool calls, where Claude says what it is doing.
-  - **Reply:** the answer that ends a turn, shown in a card marked **Claude**.
+  - **Reply:** the answer that ends a turn, shown in a card with an orange edge.
 
-  A reply streams in as plain text and becomes a card when the turn finishes.
+  A reply streams in as plain text and becomes a card when the turn finishes. Prompts and
+  replies show the time they were sent in the top-right corner (with the date once it is not
+  today).
+- **Questions:** when Claude asks you something, the chat keeps a one-line record of the
+  question and your answer. Click it to see every option and which ones you picked. The eye
+  button never hides it.
 - **Sessions list** (Ctrl+B, or the button at the top left) shows every session in one column:
   - Each row has its status, first prompt and latest reply.
   - Type to search by folder, path, prompt or reply. Press Enter to jump to the first match.
   - Click a session to focus it and flash it. If another cell is maximized, the clicked
     session takes its place.
+  - Hover a session to highlight its cell.
 - **Images:** paste them (Ctrl+V), drop them on a cell, or use the image button. Images larger
   than 2000 px or 3.75 MB are scaled down before they are sent.
 - **Model and effort:** the model button in the composer opens a menu.
@@ -137,7 +172,8 @@ every installed copy must be reinstalled by hand.
   - Ctrl+B: show or hide the sessions list.
   - Ctrl+O: resume a session from VS Code or the terminal.
   - F2: rename the focused session.
-- The board is saved to `%APPDATA%\dev.brydon.hq\board.json`:
+- The board is saved to `%APPDATA%\dev.brydon.hq\board.json` (`dev.brydon.hq.<profile>` for
+  another profile):
   - It stores each cell's folder, session, mode, model, effort, name and view (all, or
     prompts and replies only).
   - On restart, each cell shows its history from Claude's own transcript.
@@ -151,8 +187,9 @@ Environment overrides:
 - `HQ_MODEL`: default model for HQ sessions that have no model picked.
 - `HQ_NO_UPDATE`: never check for updates.
 - `HQ_UPDATE_ANY_COPY`: check for updates even in a copy that was not installed (for testing).
-- `HQ_STATE_DIR`: folder for `board.json`, so a second copy (such as a test build) keeps its own
-  board.
+- `HQ_PROFILE`: run as a named profile (see [One copy per profile](#one-copy-per-profile)).
+- `HQ_DEBUG_PORT`: DevTools port for a debug build (default 9223).
+- `HQ_STATE_DIR`: folder for `board.json`, overriding the profile's own.
 
 ## Layout
 
@@ -161,12 +198,14 @@ src/session.rs   spawns one `claude -p --input-format stream-json ...` per cell;
                  object kills the whole process tree when a cell (or HQ) closes; usage probe
 src/store.rs     board.json persistence, transcript lookup and session list, VS Code lookup
 src/update.rs    self-update: checks and downloads signed releases; installs when told to
-src/main.rs      Tauri commands
+src/main.rs      Tauri commands, profiles, single-instance lock
+src/dev.rs       debug builds only: UI read from disk, DevTools port
 ui/app.js        cells, protocol handling, prompts, menus, sessions list, grid layout, persistence
 ui/render.js     markdown (raw HTML escaped, http(s) links only), tool rows, diffs, images,
                  project colors
 ui/style.css     VS Code Dark Modern look
 release.ps1      builds, signs and publishes a release
+dev.cmd          rebuilds and restarts the dev copy
 ```
 
 ## Known limits
