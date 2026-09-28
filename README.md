@@ -1,0 +1,78 @@
+# HQ
+
+A small desktop app that runs many Claude Code chat sessions side by side, each in its own
+folder, on any drive. It is inspired by HNA-Code, with these differences: the board starts
+empty, you add sessions one at a time, the grid lays itself out, and each cell is a chat view
+styled like the VS Code extension instead of a terminal.
+
+- **Rust + Tauri 2.** The app uses the WebView2 runtime that ships with Windows. The release
+  binary is about 3.5 MB. The shell (without Claude) uses about 180 MB of private memory.
+  Each session's `claude` process uses its own memory on top of that.
+- **Thin by design.** Each cell runs the installed `claude` CLI with the documented stream-json
+  protocol. The Agent SDKs and the VS Code extension use the same protocol. The Rust side
+  forwards raw JSON lines and never interprets them. The UI ignores message types it does not
+  know, so a Claude Code update hides a new feature instead of breaking the app. HQ adds no
+  hooks and does not change `~/.claude/settings.json`.
+
+## Build and run
+
+Prerequisites: the Rust toolchain (MSVC), and `claude` on `PATH`.
+
+```bat
+build.cmd            :: debug build   -> target\debug\hq.exe
+build.cmd --release  :: release build -> target\release\hq.exe
+```
+
+`build.cmd` runs `cargo build` inside the VS 2022 Build Tools environment. The newest Visual
+Studio on this machine does not include the desktop x64 CRT libraries (`msvcrt.lib`), and
+rustc would otherwise pick it. To build an installer (NSIS), install the Tauri CLI with
+`cargo install tauri-cli --version "^2"` and run `cargo tauri build`.
+
+## Using it
+
+- **New session** (Ctrl+N) lists recent folders. You can also browse to any folder on any drive.
+  A new cell starts `claude` only when you send its first message, so empty cells cost nothing.
+- Status cues on each cell:
+  - Blue progress bar: Claude is working.
+  - Pulsing amber glow: Claude is waiting on you (a permission, a question or a plan).
+  - Green glow: the session finished while you were looking elsewhere.
+  - The top bar shows the totals. The taskbar button flashes when HQ is in the background.
+- Permission cards work like the extension:
+  - **Yes**: allow this tool use once.
+  - **Yes, and don't ask again**: uses Claude's own suggested rule.
+  - **No**: deny, with optional feedback for Claude.
+  - Keys 1/2/3 answer the top card.
+- Permission mode selector per cell: ask before edits, edit automatically, plan, auto, bypass.
+  If Claude rejects a switch, the cell shows the reason and keeps the old mode. For example,
+  bypass can't be turned on mid-session, and auto isn't available on every model.
+- Keys: Esc stops the focused session. Ctrl+1…9 focuses a cell. Ctrl+M maximizes the focused
+  cell, or double-click its header. Ctrl+W closes the focused cell.
+- The board is saved to `%APPDATA%\dev.brydon.hq\board.json`. On restart, each cell shows its
+  history from Claude's own transcript. Claude starts again (`--resume`) only when you send a
+  message, so restored cells use no memory until you use them.
+- Header buttons open the cell's folder in VS Code or in Explorer.
+
+Environment overrides:
+
+- `HQ_CLAUDE`: path to the `claude` binary.
+- `HQ_MODEL`: pin a model for all HQ sessions.
+
+## Layout
+
+```
+src/session.rs   spawns one `claude -p --input-format stream-json ...` per cell; Windows job
+                 object kills the whole process tree when a cell (or HQ) closes
+src/store.rs     board.json persistence, transcript lookup, VS Code lookup
+src/main.rs      Tauri commands
+ui/app.js        cells, protocol handling, prompts, grid layout, persistence
+ui/render.js     markdown (raw HTML escaped, http(s) links only), tool rows, diffs
+ui/style.css     VS Code Dark Modern look
+```
+
+## Known limits
+
+- Sessions run in `-p` (print) mode, which skips Claude's workspace-trust dialog. Only open
+  folders you trust.
+- Slash commands that only work in the interactive terminal, such as `/model` and `/config`,
+  are not available. Skills, custom commands and `/compact` work.
+- Image paste and @-file mentions are not implemented yet.
