@@ -1782,7 +1782,10 @@ setInterval(() => {
 const updatePill = $('#update');
 const UPDATE_FIRST_CHECK_MS = 20 * 1000;
 const UPDATE_EVERY_MS = 4 * 60 * 60 * 1000;
-const UPDATE_QUIET_MS = 2 * 60 * 1000; // no clicks or keys for this long before HQ restarts itself
+// No clicks, keys or scrolling for this long before HQ restarts itself; longer while HQ is the
+// active window, since the user may be reading it.
+const UPDATE_QUIET_MS = 2 * 60 * 1000;
+const UPDATE_QUIET_FOCUSED_MS = 15 * 60 * 1000;
 const updater = { ready: null, checking: false, installing: false, lastInput: Date.now(), confirmTimer: null };
 
 async function checkForUpdate() {
@@ -1805,7 +1808,7 @@ async function checkForUpdate() {
  * input for a while. Cells come back from board.json and resume when next used.
  */
 function safeToRestart() {
-  if (Date.now() - updater.lastInput < UPDATE_QUIET_MS) return false;
+  if (Date.now() - updater.lastInput < (document.hasFocus() ? UPDATE_QUIET_FOCUSED_MS : UPDATE_QUIET_MS)) return false;
   if (!picker.classList.contains('hidden') || !resumer.classList.contains('hidden') || menuState.anchor) return false;
   return app.cells.every(c => c.status !== 'running' && !c.spawning && !c.pending.size && !c.unread && !c.renaming
     && !c.input.value.trim() && !c.attachments.length);

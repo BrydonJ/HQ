@@ -36,8 +36,9 @@ An installed copy of HQ updates itself:
 - It checks for a new release 20 seconds after it starts, then every 4 hours.
 - It downloads the new installer in the background and checks its signature.
 - It installs when nothing would be lost: no session is working or waiting on you, no draft
-  or unseen reply is left, and there has been no mouse or key input for 2 minutes. HQ then
-  restarts with the same board. Sessions resume when you next send them a message.
+  or unseen reply is left, and there has been no mouse or key input for 2 minutes (15 while
+  HQ is the active window). HQ then restarts with the same board. Sessions resume when you
+  next send them a message.
 - Until then, an **Update** button in the top bar installs it at once. If you close HQ
   first, the update installs as HQ closes.
 
