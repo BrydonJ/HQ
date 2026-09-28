@@ -19,9 +19,10 @@ fn spawn_session(
     resume: Option<String>,
     permission_mode: Option<String>,
     model: Option<String>,
+    effort: Option<String>,
     on_event: Channel<String>,
 ) -> Result<u64, String> {
-    sessions.spawn(&app, SpawnOptions { cwd, resume, permission_mode, model }, on_event)
+    sessions.spawn(&app, SpawnOptions { cwd, resume, permission_mode, model, effort }, on_event)
 }
 
 #[tauri::command]

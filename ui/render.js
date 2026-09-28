@@ -74,6 +74,84 @@ function baseName(p) {
   return i >= 0 ? np.slice(i + 1) || np : np;
 }
 
+/**
+ * A stable color per project folder, so cells and list entries for the same folder match.
+ * The palette avoids the amber, green and red that the status cues use.
+ */
+const PROJECT_COLORS = ['#569cd6', '#4ec9b0', '#c586c0', '#ce9178', '#d7ba7d', '#9cdcfe',
+  '#d16d9e', '#a78bfa', '#80cbc4', '#f78c6c', '#b5cea8', '#89ddff'];
+
+function projectColor(path) {
+  let hash = 0x811c9dc5; // FNV-1a
+  for (const ch of normPath(path).toLowerCase()) {
+    hash ^= ch.charCodeAt(0);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return PROJECT_COLORS[(hash >>> 0) % PROJECT_COLORS.length];
+}
+
+// ---------- images ----------
+
+const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+// 2000px is the API's per-image limit once a request holds many images; 3.75 MB of raw bytes
+// stays under the 5 MB base64 cap.
+const MAX_IMAGE_EDGE = 2000;
+const MAX_IMAGE_BYTES = 3.75 * 1024 * 1024;
+
+function readAsDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+function loadImage(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('not a readable image'));
+    img.src = url;
+  });
+}
+
+/** Reads an image file into an API image block, re-encoding it when it is too big or an unsupported type. */
+async function prepareImage(file) {
+  let url = await readAsDataUrl(file);
+  const img = await loadImage(url);
+  let type = file.type;
+  const edge = Math.max(img.naturalWidth, img.naturalHeight);
+  if (!IMAGE_TYPES.includes(type) || edge > MAX_IMAGE_EDGE || file.size > MAX_IMAGE_BYTES) {
+    const scale = Math.min(1, MAX_IMAGE_EDGE / edge);
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+    canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+    type = type === 'image/jpeg' ? 'image/jpeg' : 'image/png';
+    url = canvas.toDataURL(type, 0.9);
+    if (url.length * 0.75 > MAX_IMAGE_BYTES) {
+      type = 'image/jpeg';
+      url = canvas.toDataURL(type, 0.85);
+    }
+  }
+  return { mediaType: type, data: url.slice(url.indexOf(',') + 1), url };
+}
+
+/** A data: URL for an image block from a transcript, or null when the block is not a plain base64 image. */
+function imageBlockUrl(source) {
+  if (!source || source.type !== 'base64' || !IMAGE_TYPES.includes(source.media_type)) return null;
+  if (typeof source.data !== 'string' || !/^[A-Za-z0-9+/=]*$/.test(source.data)) return null;
+  return `data:${source.media_type};base64,${source.data}`;
+}
+
+function userBubble(text, imageUrls) {
+  return h('div', { class: 'item user' },
+    h('div', { class: 'bubble' },
+      imageUrls && imageUrls.length ? h('div', { class: 'bubble-images' }, imageUrls.map(src => h('img', { class: 'thumb', src, alt: 'image' }))) : null,
+      text ? h('div', { text }) : null));
+}
+
 // ---------- tools ----------
 
 function firstLine(s, max = 160) {

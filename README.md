@@ -12,7 +12,9 @@ styled like the VS Code extension instead of a terminal.
   protocol. The Agent SDKs and the VS Code extension use the same protocol. The Rust side
   forwards raw JSON lines and never interprets them. The UI ignores message types it does not
   know, so a Claude Code update hides a new feature instead of breaking the app. HQ adds no
-  hooks and does not change `~/.claude/settings.json`.
+  hooks and never writes Claude's settings files itself. The one exception is the MCP
+  menu: turning a server on or off asks Claude to do it, and Claude saves the choice for that
+  folder, just as `/mcp` does in the CLI.
 
 ## Build and run
 
@@ -32,11 +34,35 @@ rustc would otherwise pick it. To build an installer (NSIS), install the Tauri C
 
 - **New session** (Ctrl+N) lists recent folders. You can also browse to any folder on any drive.
   A new cell starts `claude` only when you send its first message, so empty cells cost nothing.
+- Each project folder gets its own color. The cell header and its entry in the sessions list
+  use it, so sessions in the same folder are easy to spot.
 - Status cues on each cell:
   - Blue progress bar: Claude is working.
   - Pulsing amber glow: Claude is waiting on you (a permission, a question or a plan).
   - Green glow: the session finished while you were looking elsewhere.
   - The top bar shows the totals. The taskbar button flashes when HQ is in the background.
+- Claude's text comes in two styles:
+  - **Narration:** muted grey text between tool calls, where Claude says what it is doing.
+  - **Reply:** the answer that ends a turn, shown in a card marked **Claude**.
+
+  A reply streams in as plain text and becomes a card when the turn finishes.
+- **Sessions list** (Ctrl+B, or the button at the top left) shows every session in one column:
+  - Each row has its status, first prompt and latest reply.
+  - Type to search by folder, path, prompt or reply. Press Enter to jump to the first match.
+  - Click a session to focus it and flash it. If another cell is maximized, the clicked
+    session takes its place.
+- **Images:** paste them (Ctrl+V), drop them on a cell, or use the image button. Images larger
+  than 2000 px or 3.75 MB are scaled down before they are sent.
+- **Model and effort:** the model button in the composer opens a menu.
+  - Pick a model, then an effort level (low to max). Only the levels that model supports are
+    shown.
+  - The list comes from Claude itself. A change applies at once to a running session, or at
+    start for a new one.
+- **MCP servers:** the plug button lists the servers for that session with their status.
+  - Turn a server on or off, or reconnect it. Opening the menu starts Claude if it is not
+    running yet.
+  - The button turns amber when a server has failed or needs sign-in.
+  - Server settings (which can hold tokens) are never shown or stored by HQ.
 - Permission cards work like the extension:
   - **Yes**: allow this tool use once.
   - **Yes, and don't ask again**: uses Claude's own suggested rule.
@@ -45,17 +71,23 @@ rustc would otherwise pick it. To build an installer (NSIS), install the Tauri C
 - Permission mode selector per cell: ask before edits, edit automatically, plan, auto, bypass.
   If Claude rejects a switch, the cell shows the reason and keeps the old mode. For example,
   bypass can't be turned on mid-session, and auto isn't available on every model.
-- Keys: Esc stops the focused session. Ctrl+1…9 focuses a cell. Ctrl+M maximizes the focused
-  cell, or double-click its header. Ctrl+W closes the focused cell.
-- The board is saved to `%APPDATA%\dev.brydon.hq\board.json`. On restart, each cell shows its
-  history from Claude's own transcript. Claude starts again (`--resume`) only when you send a
-  message, so restored cells use no memory until you use them.
+- Keys:
+  - Esc: stop the focused session.
+  - Ctrl+1…9: focus a cell.
+  - Ctrl+M: maximize the focused cell. You can also double-click its header.
+  - Ctrl+W: close the focused cell.
+  - Ctrl+B: show or hide the sessions list.
+- The board is saved to `%APPDATA%\dev.brydon.hq\board.json`:
+  - It stores each cell's folder, session, mode, model, effort and first prompt.
+  - On restart, each cell shows its history from Claude's own transcript.
+  - Claude starts again (`--resume`) only when you send a message, so restored cells use no
+    memory until you use them.
 - Header buttons open the cell's folder in VS Code or in Explorer.
 
 Environment overrides:
 
 - `HQ_CLAUDE`: path to the `claude` binary.
-- `HQ_MODEL`: pin a model for all HQ sessions.
+- `HQ_MODEL`: default model for HQ sessions that have no model picked.
 
 ## Layout
 
@@ -64,8 +96,9 @@ src/session.rs   spawns one `claude -p --input-format stream-json ...` per cell;
                  object kills the whole process tree when a cell (or HQ) closes
 src/store.rs     board.json persistence, transcript lookup, VS Code lookup
 src/main.rs      Tauri commands
-ui/app.js        cells, protocol handling, prompts, grid layout, persistence
-ui/render.js     markdown (raw HTML escaped, http(s) links only), tool rows, diffs
+ui/app.js        cells, protocol handling, prompts, menus, sessions list, grid layout, persistence
+ui/render.js     markdown (raw HTML escaped, http(s) links only), tool rows, diffs, images,
+                 project colors
 ui/style.css     VS Code Dark Modern look
 ```
 
@@ -73,6 +106,7 @@ ui/style.css     VS Code Dark Modern look
 
 - Sessions run in `-p` (print) mode, which skips Claude's workspace-trust dialog. Only open
   folders you trust.
-- Slash commands that only work in the interactive terminal, such as `/model` and `/config`,
-  are not available. Skills, custom commands and `/compact` work.
-- Image paste and @-file mentions are not implemented yet.
+- Slash commands that only work in the interactive terminal, such as `/config`, are not
+  available. Use the composer menus for model, effort and MCP servers. Skills, custom commands
+  and `/compact` work.
+- @-file mentions are not implemented yet.

@@ -11,6 +11,7 @@
 </head>
 <body>
   <header id="topbar">
+    <button id="toggle-sidebar" class="icon-btn" title="Sessions list (Ctrl+B)"><span class="codicon codicon-layout-sidebar-left"></span></button>
     <div class="brand"><span class="codicon codicon-layout"></span> HQ</div>
     <div id="summary" class="summary"></div>
     <div class="spacer"></div>
@@ -19,15 +20,29 @@
     </button>
   </header>
 
-  <main id="board">
-    <div id="empty" class="empty">
-      <div class="empty-title">No sessions yet</div>
-      <div class="empty-sub">Each session runs Claude Code in its own folder, on any drive.</div>
-      <button id="empty-new" class="btn primary"><span class="codicon codicon-add"></span> New session</button>
-      <div class="empty-keys">Ctrl+N new &middot; Ctrl+1&hellip;9 focus &middot; Ctrl+M maximize &middot; Esc stop</div>
-    </div>
-    <div id="grid"></div>
-  </main>
+  <div id="workspace">
+    <aside id="sidebar" class="hidden" aria-label="Sessions">
+      <div class="sidebar-head">
+        <span class="sidebar-title">Sessions</span>
+        <span id="session-count" class="sidebar-count"></span>
+      </div>
+      <label class="sidebar-search">
+        <span class="codicon codicon-search"></span>
+        <input id="session-search" type="text" placeholder="Search sessions" spellcheck="false" autocomplete="off" />
+      </label>
+      <div id="session-list" class="session-list"></div>
+    </aside>
+
+    <main id="board">
+      <div id="empty" class="empty">
+        <div class="empty-title">No sessions yet</div>
+        <div class="empty-sub">Each session runs Claude Code in its own folder, on any drive.</div>
+        <button id="empty-new" class="btn primary"><span class="codicon codicon-add"></span> New session</button>
+        <div class="empty-keys">Ctrl+N new &middot; Ctrl+B sessions list &middot; Ctrl+1&hellip;9 focus &middot; Ctrl+M maximize &middot; Esc stop</div>
+      </div>
+      <div id="grid"></div>
+    </main>
+  </div>
 
   <div id="picker" class="picker hidden" role="dialog" aria-label="New session">
     <div class="picker-title">New session in&hellip;</div>
@@ -36,6 +51,8 @@
       <span class="codicon codicon-folder-opened"></span> Browse for a folder&hellip;
     </button>
   </div>
+
+  <div id="menu" class="menu hidden" role="menu"></div>
 
   <template id="cell-template">
     <section class="cell" tabindex="-1">
@@ -52,6 +69,7 @@
       <div class="messages"></div>
       <div class="prompts"></div>
       <div class="composer">
+        <div class="attachments"></div>
         <textarea rows="1" placeholder="Ask Claude…  (Enter to send, Shift+Enter for new line)"></textarea>
         <div class="composer-bar">
           <select class="mode" title="Permission mode">
@@ -61,7 +79,10 @@
             <option value="auto">Auto</option>
             <option value="bypassPermissions">Bypass permissions</option>
           </select>
-          <span class="model"></span>
+          <button class="chip act-model" title="Model and effort"><span class="label"></span><span class="codicon codicon-chevron-down"></span></button>
+          <button class="icon-btn act-mcp" title="MCP servers"><span class="codicon codicon-plug"></span></button>
+          <button class="icon-btn act-attach" title="Attach images (you can also paste or drop them)"><span class="codicon codicon-file-media"></span></button>
+          <input type="file" class="file-input hidden" accept="image/png,image/jpeg,image/gif,image/webp" multiple />
           <span class="spacer"></span>
           <span class="meta"></span>
           <button class="icon-btn act-stop hidden" title="Stop (Esc)"><span class="codicon codicon-debug-stop"></span></button>

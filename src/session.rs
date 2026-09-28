@@ -36,6 +36,7 @@ pub struct SpawnOptions {
     pub resume: Option<String>,
     pub permission_mode: Option<String>,
     pub model: Option<String>,
+    pub effort: Option<String>,
 }
 
 fn claude_program() -> String {
@@ -68,6 +69,9 @@ impl Sessions {
         let model = opts.model.filter(|s| !s.is_empty()).or_else(|| std::env::var("HQ_MODEL").ok());
         if let Some(model) = model.as_deref().filter(|s| !s.is_empty()) {
             cmd.args(["--model", model]);
+        }
+        if let Some(effort) = opts.effort.as_deref().filter(|s| !s.is_empty()) {
+            cmd.args(["--effort", effort]);
         }
         cmd.current_dir(&opts.cwd)
             .env_remove("CLAUDECODE")
