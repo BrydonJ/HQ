@@ -27,8 +27,41 @@ build.cmd --release  :: release build -> target\release\hq.exe
 
 `build.cmd` runs `cargo build` inside the VS 2022 Build Tools environment. The newest Visual
 Studio on this machine does not include the desktop x64 CRT libraries (`msvcrt.lib`), and
-rustc would otherwise pick it. To build an installer (NSIS), install the Tauri CLI with
-`cargo install tauri-cli --version "^2"` and run `cargo tauri build`.
+rustc would otherwise pick it.
+
+## Releases and updates
+
+An installed copy of HQ updates itself:
+
+- It checks for a new release 20 seconds after it starts, then every 4 hours.
+- It downloads the new installer in the background and checks its signature.
+- It installs when nothing would be lost: no session is working or waiting on you, no draft
+  or unseen reply is left, and there has been no mouse or key input for 2 minutes. HQ then
+  restarts with the same board. Sessions resume when you next send them a message.
+- Until then, an **Update** button in the top bar installs it at once. If you close HQ
+  first, the update installs as HQ closes.
+
+Only a copy installed with the setup program updates itself. A build under `target\` never
+does. Set `HQ_NO_UPDATE=1` to turn updates off.
+
+To publish a release, commit your changes and run:
+
+```powershell
+.\release.ps1 0.2.1          # notes default to the commit subjects since the last tag
+```
+
+The script does these steps:
+
+1. Sets the version.
+2. Builds the NSIS installer in `target\dist` with the Tauri CLI (through `npx`, in the same
+   VS 2022 environment as `build.cmd`).
+3. Signs the installer with `%USERPROFILE%\.tauri\hq-updater.key`.
+4. Commits, tags and pushes.
+5. Publishes the installer, its signature and `latest.json` as a GitHub release.
+
+Installed copies read `latest.json` from the newest release at the endpoint in
+`tauri.conf.json`. **Back up the private key.** Without it, no new release can be signed, and
+every installed copy must be reinstalled by hand.
 
 ## Using it
 
@@ -54,10 +87,17 @@ rustc would otherwise pick it. To build an installer (NSIS), install the Tauri C
 - Each project folder gets its own color. The cell header and its entry in the sessions list
   use it, so sessions in the same folder are easy to spot.
 - Status cues on each cell:
-  - Blue progress bar: Claude is working.
+  - The project name in the cell header lights up: Claude is working.
   - Pulsing amber glow: Claude is waiting on you (a permission, a question or a plan).
   - Green glow: the session finished while you were looking elsewhere.
   - The top bar shows the totals. The taskbar button flashes when HQ is in the background.
+- **Session names:** the cell header shows the session's name after the project name.
+  - Claude names a new session after its first reply, as the VS Code extension does.
+  - Click the name (or press F2) to rename it. The new name is saved in Claude's own
+    transcript, so VS Code and `claude --resume` show it too.
+- **Prompts and replies only:** the eye button in the cell header hides tool calls, thinking,
+  narration and status notes. It is set per cell and kept across restarts. Errors, and the
+  last words of a turn you stopped, stay visible.
 - Claude's text comes in two styles:
   - **Narration:** muted grey text between tool calls, where Claude says what it is doing.
   - **Reply:** the answer that ends a turn, shown in a card marked **Claude**.
@@ -95,8 +135,10 @@ rustc would otherwise pick it. To build an installer (NSIS), install the Tauri C
   - Ctrl+W: close the focused cell.
   - Ctrl+B: show or hide the sessions list.
   - Ctrl+O: resume a session from VS Code or the terminal.
+  - F2: rename the focused session.
 - The board is saved to `%APPDATA%\dev.brydon.hq\board.json`:
-  - It stores each cell's folder, session, mode, model, effort and first prompt.
+  - It stores each cell's folder, session, mode, model, effort, name and view (all, or
+    prompts and replies only).
   - On restart, each cell shows its history from Claude's own transcript.
   - Claude starts again (`--resume`) only when you send a message, so restored cells use no
     memory until you use them.
@@ -106,6 +148,8 @@ Environment overrides:
 
 - `HQ_CLAUDE`: path to the `claude` binary.
 - `HQ_MODEL`: default model for HQ sessions that have no model picked.
+- `HQ_NO_UPDATE`: never check for updates.
+- `HQ_UPDATE_ANY_COPY`: check for updates even in a copy that was not installed (for testing).
 - `HQ_STATE_DIR`: folder for `board.json`, so a second copy (such as a test build) keeps its own
   board.
 
@@ -115,11 +159,13 @@ Environment overrides:
 src/session.rs   spawns one `claude -p --input-format stream-json ...` per cell; Windows job
                  object kills the whole process tree when a cell (or HQ) closes; usage probe
 src/store.rs     board.json persistence, transcript lookup and session list, VS Code lookup
+src/update.rs    self-update: checks and downloads signed releases; installs when told to
 src/main.rs      Tauri commands
 ui/app.js        cells, protocol handling, prompts, menus, sessions list, grid layout, persistence
 ui/render.js     markdown (raw HTML escaped, http(s) links only), tool rows, diffs, images,
                  project colors
 ui/style.css     VS Code Dark Modern look
+release.ps1      builds, signs and publishes a release
 ```
 
 ## Known limits

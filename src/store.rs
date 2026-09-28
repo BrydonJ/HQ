@@ -48,9 +48,9 @@ fn claude_config_dir() -> Option<PathBuf> {
     Some(PathBuf::from(home).join(".claude"))
 }
 
-/// Returns the user/assistant lines of a session's transcript so a restored cell can show
-/// its history. Finds the file by name under every project folder instead of re-deriving
-/// Claude's folder-name encoding, which is an internal detail that may change.
+/// Returns the user/assistant and title lines of a session's transcript so a restored cell can
+/// show its history and name. Finds the file by name under every project folder instead of
+/// re-deriving Claude's folder-name encoding, which is an internal detail that may change.
 pub fn load_transcript(session_id: &str) -> Result<Vec<String>, String> {
     if session_id.is_empty() || !session_id.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
         return Err("invalid session id".into());
@@ -69,9 +69,12 @@ pub fn load_transcript(session_id: &str) -> Result<Vec<String>, String> {
         .lines()
         .filter(|line| {
             let Ok(v) = serde_json::from_str::<Value>(line) else { return false };
-            let kind = v.get("type").and_then(Value::as_str);
-            matches!(kind, Some("user" | "assistant"))
-                && v.get("isSidechain").and_then(Value::as_bool) != Some(true)
+            match v.get("type").and_then(Value::as_str) {
+                Some("user" | "assistant") => v.get("isSidechain").and_then(Value::as_bool) != Some(true),
+                // The session's name: a rename made anywhere, or the title Claude gave it.
+                Some("custom-title" | "ai-title") => true,
+                _ => false,
+            }
         })
         .map(str::to_owned)
         .collect();

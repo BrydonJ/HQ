@@ -27,6 +27,14 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
-    "icon": ["icons/icon.png", "icons/icon.ico"]
+    "icon": ["icons/icon.png", "icons/icon.ico"],
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNFNzUzQUJFMzM0MDdFNzUKUldSMWZrQXp2anAxUHQveVVMSDRoNTJpdjNWS0VJMnBlL20zdWdVVU4rWG1RQUd2c1I1ejh2dC8K",
+      "endpoints": ["https://github.com/BrydonJ/HQ-releases/releases/latest/download/latest.json"],
+      "windows": { "installMode": "passive" }
+    }
   }
 }

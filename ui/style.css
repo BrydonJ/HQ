@@ -96,13 +96,6 @@ button, select, textarea { font: inherit; color: inherit; }
   transition: border-color 0.2s, box-shadow 0.2s;
 }
 .cell.focused { border-color: var(--accent); }
-.cell.state-running::before {
-  content: ""; position: absolute; top: 0; left: 0; right: 0; height: 2px; z-index: 2;
-  background: linear-gradient(90deg, transparent, var(--link), transparent);
-  background-size: 40% 100%; background-repeat: no-repeat;
-  animation: progress 1.4s linear infinite;
-}
-@keyframes progress { from { background-position: -40% 0; } to { background-position: 140% 0; } }
 .cell.state-waiting { border-color: var(--waiting); animation: glow-wait 1.6s ease-in-out infinite; }
 @keyframes glow-wait {
   0%, 100% { box-shadow: 0 0 0 1px rgba(229, 165, 10, 0.35), 0 0 12px rgba(229, 165, 10, 0.15); }
@@ -125,7 +118,28 @@ button, select, textarea { font: inherit; color: inherit; }
 .state-waiting .status-dot { background: var(--waiting); animation: pulse 0.8s ease-in-out infinite; }
 .unread .status-dot { background: var(--done); }
 @keyframes pulse { 50% { opacity: 0.35; } }
-.cell-title { font-weight: 600; color: color-mix(in srgb, var(--proj, var(--fg-strong)) 60%, var(--fg-strong)); white-space: nowrap; }
+.cell-project { --proj-fg: color-mix(in srgb, var(--proj, var(--fg-strong)) 60%, var(--fg-strong)); flex: none; font-weight: 600; color: var(--proj-fg); white-space: nowrap; }
+/* Claude is working: a light sweeps across the project name and it glows. */
+.cell.state-running .cell-project {
+  color: transparent;
+  background: linear-gradient(90deg, var(--proj-fg) 0 35%, #fff 50%, var(--proj-fg) 65% 100%) 0 0 / 250% 100% no-repeat;
+  -webkit-background-clip: text; background-clip: text;
+  animation: shine 1.6s linear infinite, glow 1.6s ease-in-out infinite;
+}
+@keyframes shine { from { background-position: 100% 0; } to { background-position: 0 0; } }
+@keyframes glow { 50% { filter: drop-shadow(0 0 5px color-mix(in srgb, var(--proj, var(--link)) 85%, transparent)); } }
+/* The session's name; click (or F2) to rename. The path only gets the space left after it. */
+.cell-title {
+  flex: 0 1 auto; min-width: 0; padding: 1px 4px; border-radius: 3px;
+  color: var(--fg); cursor: text; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.cell-title.placeholder { color: var(--fg-faint); font-style: italic; }
+.cell-title:hover { background: rgba(90, 93, 94, 0.31); }
+.cell-rename {
+  flex: 0 1 260px; min-width: 60px; padding: 1px 4px; font: inherit; color: var(--fg-strong);
+  background: var(--input-bg); border: 1px solid var(--accent); border-radius: 3px; outline: none;
+}
+.act-clean.on { color: var(--link); }
 .cell.flash::after {
   content: ""; position: absolute; inset: 0; z-index: 3; pointer-events: none;
   border: 2px solid var(--proj, var(--accent)); border-radius: 6px;
@@ -138,7 +152,7 @@ button, select, textarea { font: inherit; color: inherit; }
   border: 2px dashed var(--accent); border-radius: 6px;
   background: rgba(0, 120, 212, 0.12); color: var(--fg-strong); font-weight: 600;
 }
-.cell-path { color: var(--fg-faint); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; direction: rtl; text-align: left; }
+.cell-path { flex: 1 1 0; color: var(--fg-faint); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; direction: rtl; text-align: left; }
 
 /* ---------- messages (timeline like the Claude Code extension) ---------- */
 .messages {
@@ -158,6 +172,9 @@ button, select, textarea { font: inherit; color: inherit; }
 .item.notice { color: var(--fg-muted); font-size: 12px; }
 .item.notice.error { color: var(--error); }
 .item.notice::before { background: transparent; }
+/* Prompts and replies only (the eye button). The last words of a stopped turn stay. */
+.cell.clean .item.tool, .cell.clean .item.thinking, .cell.clean .item.notice:not(.error),
+.cell.clean .item.text.narration:not(.tail) { display: none; }
 
 /* Claude's text: narration while it works is muted; the reply that ends a turn is a card. */
 .item.text.narration { color: var(--fg-muted); font-size: 12.5px; }
@@ -414,6 +431,15 @@ button, select, textarea { font: inherit; color: inherit; }
 .session-path { color: var(--fg-faint); font-size: 11px; }
 .session-key { flex: none; color: var(--fg-faint); font-size: 10px; font-family: var(--mono); margin-top: 3px; }
 .session-empty { color: var(--fg-faint); font-size: 12px; padding: 8px 10px; }
+
+/* ---------- update pill ---------- */
+.update-pill {
+  display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px;
+  border: 1px solid var(--accent); border-radius: 3px; cursor: pointer; font-size: 12px; white-space: nowrap;
+  background: rgba(0, 120, 212, 0.18); color: var(--fg-strong);
+}
+.update-pill:hover { background: rgba(0, 120, 212, 0.3); }
+.update-pill .codicon { font-size: 13px; color: var(--link); }
 
 /* ---------- plan usage pill + popup ---------- */
 .usage {

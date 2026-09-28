@@ -37,7 +37,8 @@ const nextRequestId = () => `hq-${Date.now().toString(36)}-${++reqSeq}`;
 // ======================================================================================
 
 class Cell {
-  constructor({ cwd, sessionId = null, permissionMode = 'default', model = null, effort = null, title = '', fork = false }) {
+  constructor({ cwd, sessionId = null, permissionMode = 'default', model = null, effort = null, title = '', aiTitle = false,
+    customTitle = null, renamePending = false, clean = false, fork = false }) {
     this.cwd = cwd;
     this.sessionId = sessionId;
     this.fork = !!(fork && sessionId); // resume into a new session ID, leaving the original alone
@@ -46,7 +47,14 @@ class Cell {
     this.effort = effort || null;  // null = Claude's default
     this.resolvedModel = null;     // what Claude reports it is running
     this.appliedEffort = null;
-    this.title = title || '';      // first prompt, shown in the sessions list
+    this.title = title || '';      // Claude's title for the session, or else its first prompt
+    this.aiTitle = !!aiTitle;      // true once `title` is Claude's own title
+    this.customTitle = customTitle || null; // the user's rename, shown instead of `title`
+    this.renamePending = !!(renamePending && customTitle); // rename not yet saved in Claude's transcript
+    this.titleAsked = false;       // Claude was asked for a title by this process
+    this.firstPrompt = '';         // full first prompt, which Claude titles the session from
+    this.renaming = false;
+    this.clean = !!clean;          // prompts and replies only (the eye button)
     this.lastReply = '';
     this.color = projectColor(cwd);
     this.attachments = [];         // images waiting to be sent: { mediaType, data, url }
@@ -82,18 +90,23 @@ class Cell {
     this.fileInput = el.querySelector('.file-input');
     this.metaEl = el.querySelector('.meta');
     this.stopBtn = el.querySelector('.act-stop');
+    this.titleEl = el.querySelector('.cell-title');
+    this.cleanBtn = el.querySelector('.act-clean');
 
     el.style.setProperty('--proj', this.color);
-    el.querySelector('.cell-title').textContent = baseName(this.cwd) || this.cwd;
+    el.querySelector('.cell-project').textContent = baseName(this.cwd) || this.cwd;
     el.querySelector('.cell-path').textContent = this.cwd;
     this.modeSel.value = this.permissionMode;
     this.setTitle(this.title);
+    this.applyClean();
     this.updateModelLabel();
 
     el.addEventListener('mousedown', () => focusCell(this, false));
     el.querySelector('.cell-head').addEventListener('dblclick', e => {
-      if (!e.target.closest('button')) toggleMaximize(this);
+      if (!e.target.closest('button, .cell-title, .cell-rename')) toggleMaximize(this);
     });
+    this.titleEl.addEventListener('click', () => this.startRename());
+    this.cleanBtn.addEventListener('click', () => this.setClean(!this.clean));
     el.querySelector('.act-max').addEventListener('click', () => toggleMaximize(this));
     el.querySelector('.act-close').addEventListener('click', e => this.requestClose(e.currentTarget));
     el.querySelector('.act-reveal').addEventListener('click', () => invoke('reveal_folder', { path: this.cwd }).catch(err => this.notice(String(err), true)));
@@ -164,10 +177,113 @@ class Cell {
     return this.append(h('div', { class: `item notice${isError ? ' error' : ''}`, text }));
   }
 
+  // ---------- title and view ----------
+
+  /** The name shown for the session: the user's rename, else Claude's title or the first prompt. */
+  displayTitle() {
+    return this.customTitle || this.title;
+  }
+
   setTitle(title) {
     this.title = title || '';
-    this.el.querySelector('.cell-head').title = this.title ? `${this.cwd}\n${this.title}` : this.cwd;
+    this.renderTitle();
+  }
+
+  renderTitle() {
+    const name = this.displayTitle();
+    this.titleEl.textContent = name || 'New session';
+    this.titleEl.classList.toggle('placeholder', !name);
+    this.el.querySelector('.cell-head').title = name ? `${this.cwd}\n${name}` : this.cwd;
     renderSidebar();
+  }
+
+  startRename() {
+    if (this.renaming || !this.titleEl.isConnected) return;
+    this.renaming = true;
+    const field = h('input', { class: 'cell-rename', type: 'text', value: this.displayTitle(), placeholder: 'Session name', spellcheck: 'false', maxlength: '120' });
+    this.titleEl.replaceWith(field);
+    field.focus();
+    field.select();
+    let done = false;
+    const finish = save => {
+      if (done) return;
+      done = true;
+      this.renaming = false;
+      field.replaceWith(this.titleEl);
+      if (save) this.rename(field.value);
+    };
+    field.addEventListener('keydown', e => {
+      e.stopPropagation(); // keeps Esc from stopping Claude and Ctrl+W from closing the cell
+      if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+      else if (e.key === 'Escape') { e.preventDefault(); finish(false); this.input.focus(); }
+    });
+    field.addEventListener('blur', () => finish(true));
+  }
+
+  /** An empty name keeps the old one: Claude has no way to clear a session's name. */
+  rename(text) {
+    const name = text.replace(/\s+/g, ' ').trim();
+    if (!name || name === this.displayTitle()) return;
+    this.customTitle = name;
+    this.renamePending = true;
+    this.renderTitle();
+    saveState();
+    this.syncTitle();
+  }
+
+  /**
+   * Saves a rename in Claude's transcript, so VS Code and `claude --resume` show it too, or asks
+   * Claude to title a session that only has its first prompt as a name. Both need a running
+   * process and a session Claude has written to disk, so anything not sent yet is retried after
+   * each turn.
+   */
+  async syncTitle() {
+    if (this.proc == null || !this.sessionId || this.fork) return;
+    if (this.renamePending) {
+      const name = this.customTitle;
+      const reply = await this.control({ subtype: 'rename_session', title: name, source: 'host', session_id: this.sessionId });
+      if (reply && reply.subtype === 'success' && this.customTitle === name) {
+        this.renamePending = false;
+        saveState();
+      }
+      return;
+    }
+    if (this.customTitle || this.aiTitle || this.titleAsked) return;
+    const description = this.firstPrompt || this.title;
+    if (!description) return;
+    this.titleAsked = true;
+    const reply = await this.control({ subtype: 'generate_session_title', description, persist: true });
+    const title = reply && reply.subtype === 'success' && reply.response && reply.response.title;
+    if (typeof title === 'string' && title.trim()) {
+      this.aiTitle = true;
+      this.setTitle(firstLine(title.trim(), 120));
+      saveState();
+    }
+  }
+
+  /** Title lines replayed from Claude's transcript: a rename made anywhere, or Claude's own title. */
+  onTitleLine(m) {
+    if (m.type === 'custom-title' && typeof m.customTitle === 'string' && m.customTitle.trim()) {
+      if (!this.renamePending) this.customTitle = m.customTitle.trim();
+    } else if (m.type === 'ai-title' && typeof m.aiTitle === 'string' && m.aiTitle.trim()) {
+      this.title = m.aiTitle.trim();
+      this.aiTitle = true;
+    }
+  }
+
+  /** Prompts and replies only: hides tool calls, thinking, narration and status notes. */
+  setClean(on) {
+    this.clean = on;
+    this.applyClean();
+    this.scroll();
+    saveState();
+  }
+
+  applyClean() {
+    this.el.classList.toggle('clean', this.clean);
+    this.cleanBtn.classList.toggle('on', this.clean);
+    this.cleanBtn.querySelector('.codicon').className = `codicon codicon-${this.clean ? 'eye-closed' : 'eye'}`;
+    this.cleanBtn.title = this.clean ? 'Show tools, thinking and narration' : 'Show only prompts and replies';
   }
 
   // ---------- images ----------
@@ -457,6 +573,7 @@ class Cell {
     this.stickToBottom = true;
     this.append(userBubble(text, images.map(i => i.url)));
     if (!this.title) {
+      this.firstPrompt = text.slice(0, 2000);
       this.setTitle(firstLine(text, 90) || 'Image');
       saveState();
     }
@@ -534,6 +651,8 @@ class Cell {
       case 'control_response': return this.onControlResponse(m);
       case 'hq_exit': return this.onExit(m);
       case 'rate_limit_event': return scheduleUsageRefresh(this);
+      case 'custom-title':
+      case 'ai-title': return this.onTitleLine(m);
       default: return; // keep_alive, future types
     }
   }
@@ -663,7 +782,8 @@ class Cell {
     const items = this.turnTexts;
     this.turnTexts = [];
     if (!isReply || !items.length) {
-      for (const item of items) item.classList.add('narration');
+      // `tail`: the last words of a stopped or failed turn stay visible when only replies are shown.
+      for (const item of items) item.classList.add('narration', 'tail');
       return;
     }
     items.forEach((item, i) => {
@@ -742,6 +862,7 @@ class Cell {
     this.markUnread();
     this.refreshState();
     scheduleUsageRefresh(this);
+    this.syncTitle();
   }
 
   onControlResponse(m) {
@@ -1200,7 +1321,7 @@ function stateOf(cell) {
 
 function matchesQuery(cell, terms) {
   if (!terms.length) return true;
-  const hay = [baseName(cell.cwd), cell.cwd, cell.title, cell.lastReply].join('\n').toLowerCase();
+  const hay = [baseName(cell.cwd), cell.cwd, cell.customTitle, cell.title, cell.lastReply].join('\n').toLowerCase();
   return terms.every(t => hay.includes(t));
 }
 
@@ -1220,7 +1341,7 @@ function renderSidebar() {
           h('span', { class: 'session-line' },
             h('span', { class: 'session-name', text: baseName(cell.cwd) || cell.cwd }),
             h('span', { class: 'session-state', text: label })),
-          h('span', { class: 'session-title', text: cell.title || 'No messages yet' }),
+          h('span', { class: 'session-title', text: cell.displayTitle() || 'No messages yet' }),
           cell.lastReply ? h('span', { class: 'session-reply', text: cell.lastReply }) : null,
           h('span', { class: 'session-path', text: cell.cwd })),
         i < 9 ? h('span', { class: 'session-key', text: `^${i + 1}` }) : null);
@@ -1655,6 +1776,98 @@ setInterval(() => {
 }, 30000);
 
 // ======================================================================================
+// Self-update: download in the background, install when nothing would be interrupted
+// ======================================================================================
+
+const updatePill = $('#update');
+const UPDATE_FIRST_CHECK_MS = 20 * 1000;
+const UPDATE_EVERY_MS = 4 * 60 * 60 * 1000;
+const UPDATE_QUIET_MS = 2 * 60 * 1000; // no clicks or keys for this long before HQ restarts itself
+const updater = { ready: null, checking: false, installing: false, lastInput: Date.now(), confirmTimer: null };
+
+async function checkForUpdate() {
+  if (updater.checking || updater.installing) return;
+  updater.checking = true;
+  try {
+    const info = await invoke('check_update');
+    if (info) updater.ready = info;
+  } catch (err) {
+    console.warn('update check failed', err); // offline, or no release yet: the next check tries again
+  } finally {
+    updater.checking = false;
+  }
+  renderUpdate();
+}
+
+/**
+ * Installing closes HQ, which ends every claude process, so it waits until that loses nothing:
+ * no turn running, nothing to answer, no draft, no reply the user has not seen yet, and no
+ * input for a while. Cells come back from board.json and resume when next used.
+ */
+function safeToRestart() {
+  if (Date.now() - updater.lastInput < UPDATE_QUIET_MS) return false;
+  if (!picker.classList.contains('hidden') || !resumer.classList.contains('hidden') || menuState.anchor) return false;
+  return app.cells.every(c => c.status !== 'running' && !c.spawning && !c.pending.size && !c.unread && !c.renaming
+    && !c.input.value.trim() && !c.attachments.length);
+}
+
+function busyCount() {
+  return app.cells.filter(c => c.status === 'running' || c.pending.size).length;
+}
+
+async function installUpdate() {
+  if (!updater.ready || updater.installing) return;
+  updater.installing = true;
+  renderUpdate();
+  await flushState();
+  try {
+    await invoke('install_update'); // on success HQ exits here and the installer restarts it
+  } catch (err) {
+    console.error('update failed', err);
+    updater.installing = false;
+    updater.ready = null; // the download is used up; the next check fetches it again
+    renderUpdate();
+  }
+}
+
+function renderUpdate() {
+  const text = updatePill.querySelector('.update-text');
+  updatePill.classList.toggle('hidden', !updater.ready);
+  if (!updater.ready) return;
+  const { version, currentVersion } = updater.ready;
+  if (updater.installing) {
+    text.textContent = 'Updating…';
+    updatePill.title = `Installing HQ ${version}. HQ restarts when it is done.`;
+  } else if (updater.confirmTimer) {
+    const n = busyCount();
+    text.textContent = `Click again to stop ${n} session${n === 1 ? '' : 's'} and update`;
+    updatePill.title = 'Claude is working. Updating now stops it; the sessions can be resumed afterwards.';
+  } else {
+    text.textContent = `Update to ${version}`;
+    updatePill.title = `HQ ${version} is ready (you have ${currentVersion}). It installs by itself when no session is busy, or when you close HQ. Click to install now.`;
+  }
+}
+
+updatePill.addEventListener('click', () => {
+  if (busyCount() && !updater.confirmTimer) {
+    updater.confirmTimer = setTimeout(() => { updater.confirmTimer = null; renderUpdate(); }, 4000);
+    renderUpdate();
+    return;
+  }
+  clearTimeout(updater.confirmTimer);
+  updater.confirmTimer = null;
+  installUpdate();
+});
+
+for (const type of ['keydown', 'pointerdown', 'wheel']) {
+  document.addEventListener(type, () => { updater.lastInput = Date.now(); }, { capture: true, passive: true });
+}
+setInterval(checkForUpdate, UPDATE_EVERY_MS);
+setInterval(() => {
+  if (updater.ready && !updater.installing && safeToRestart()) installUpdate();
+}, 30 * 1000);
+
+// ======================================================================================
 // Keyboard
 // ======================================================================================
 
@@ -1683,6 +1896,11 @@ document.addEventListener('keydown', e => {
     }
   }
   if (!cell) return;
+  if (e.key === 'F2') {
+    e.preventDefault();
+    cell.startRename();
+    return;
+  }
   if (e.key === 'Escape' && picker.classList.contains('hidden') && resumer.classList.contains('hidden') && (cell.status === 'running' || cell.pending.size)) {
     e.preventDefault();
     cell.interrupt();
@@ -1709,24 +1927,32 @@ document.addEventListener('drop', e => e.preventDefault());
 let saveTimer = null;
 function saveState() {
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    const state = {
-      version: 2,
-      cells: app.cells.map(c => ({
-        cwd: c.cwd,
-        sessionId: c.sessionId,
-        permissionMode: c.permissionMode,
-        model: c.modelChoice,
-        effort: c.effort,
-        title: c.title,
-        fork: c.fork || undefined,
-      })),
-      recent: app.recent,
-      models: app.models,
-      sidebarOpen: app.sidebarOpen,
-    };
-    invoke('save_state', { json: JSON.stringify(state) }).catch(err => console.error('save failed', err));
-  }, 300);
+  saveTimer = setTimeout(flushState, 300);
+}
+
+/** Saves now instead of after the debounce; returns once the board is on disk. */
+function flushState() {
+  clearTimeout(saveTimer);
+  const state = {
+    version: 2,
+    cells: app.cells.map(c => ({
+      cwd: c.cwd,
+      sessionId: c.sessionId,
+      permissionMode: c.permissionMode,
+      model: c.modelChoice,
+      effort: c.effort,
+      title: c.title,
+      aiTitle: c.aiTitle || undefined,
+      customTitle: c.customTitle || undefined,
+      renamePending: c.renamePending || undefined,
+      clean: c.clean || undefined,
+      fork: c.fork || undefined,
+    })),
+    recent: app.recent,
+    models: app.models,
+    sidebarOpen: app.sidebarOpen,
+  };
+  return invoke('save_state', { json: JSON.stringify(state) }).catch(err => console.error('save failed', err));
 }
 
 async function restore() {
@@ -1754,6 +1980,7 @@ async function restore() {
   updateSummary();
   renderSidebar();
   setTimeout(() => refreshUsage(), 1500);
+  setTimeout(checkForUpdate, UPDATE_FIRST_CHECK_MS);
 }
 
 restore();

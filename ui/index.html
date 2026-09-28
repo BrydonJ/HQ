@@ -15,6 +15,9 @@
     <div class="brand"><span class="codicon codicon-layout"></span> HQ</div>
     <div id="summary" class="summary"></div>
     <div class="spacer"></div>
+    <button id="update" class="update-pill hidden">
+      <span class="codicon codicon-cloud-download"></span><span class="update-text"></span>
+    </button>
     <button id="usage" class="usage empty" title="Plan usage">
       <span class="codicon codicon-dashboard"></span><span class="usage-text">&hellip;</span>
     </button>
@@ -44,7 +47,7 @@
         <div class="empty-title">No sessions yet</div>
         <div class="empty-sub">Each session runs Claude Code in its own folder, on any drive.</div>
         <button id="empty-new" class="btn primary"><span class="codicon codicon-add"></span> New session</button>
-        <div class="empty-keys">Ctrl+N new &middot; Ctrl+O resume &middot; Ctrl+B sessions list &middot; Ctrl+1&hellip;9 focus &middot; Ctrl+M maximize &middot; Esc stop</div>
+        <div class="empty-keys">Ctrl+N new &middot; Ctrl+O resume &middot; Ctrl+B sessions list &middot; Ctrl+1&hellip;9 focus &middot; Ctrl+M maximize &middot; F2 rename &middot; Esc stop</div>
       </div>
       <div id="grid"></div>
     </main>
@@ -82,9 +85,10 @@
     <section class="cell" tabindex="-1">
       <div class="cell-head">
         <span class="status-dot"></span>
-        <span class="cell-title"></span>
+        <span class="cell-project"></span>
+        <span class="cell-title" title="Rename session (F2)"></span>
         <span class="cell-path"></span>
-        <span class="spacer"></span>
+        <button class="icon-btn act-clean"><span class="codicon codicon-eye"></span></button>
         <button class="icon-btn act-code" title="Open folder in VS Code"><span class="codicon codicon-vscode"></span></button>
         <button class="icon-btn act-reveal" title="Open folder in Explorer"><span class="codicon codicon-folder"></span></button>
         <button class="icon-btn act-max" title="Maximize (Ctrl+M)"><span class="codicon codicon-screen-full"></span></button>

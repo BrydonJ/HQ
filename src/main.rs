@@ -2,6 +2,7 @@
 
 mod session;
 mod store;
+mod update;
 
 use std::path::Path;
 
@@ -115,6 +116,16 @@ fn open_in_vscode(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn check_update(app: AppHandle) -> Result<Option<update::UpdateInfo>, String> {
+    update::check(&app).await
+}
+
+#[tauri::command]
+fn install_update(app: AppHandle) -> Result<(), String> {
+    update::install(&app, true)
+}
+
+#[tauri::command]
 fn request_attention(window: WebviewWindow) {
     if !window.is_focused().unwrap_or(false) {
         let _ = window.request_user_attention(Some(UserAttentionType::Informational));
@@ -125,7 +136,9 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Sessions::default())
+        .manage(update::PendingUpdate::default())
         .invoke_handler(tauri::generate_handler![
             spawn_session,
             send_line,
@@ -141,12 +154,18 @@ fn main() {
             reveal_folder,
             open_in_vscode,
             request_attention,
+            check_update,
+            install_update,
         ])
         .build(tauri::generate_context!())
         .expect("failed to start HQ")
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
                 app.state::<Sessions>().kill_all();
+                // An update that never found an idle moment installs as HQ closes.
+                if update::is_ready(app) {
+                    let _ = update::install(app, false);
+                }
             }
         });
 }
