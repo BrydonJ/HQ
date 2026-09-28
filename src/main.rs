@@ -20,9 +20,11 @@ fn spawn_session(
     permission_mode: Option<String>,
     model: Option<String>,
     effort: Option<String>,
+    fork: Option<bool>,
     on_event: Channel<String>,
 ) -> Result<u64, String> {
-    sessions.spawn(&app, SpawnOptions { cwd, resume, permission_mode, model, effort }, on_event)
+    let fork = fork.unwrap_or(false);
+    sessions.spawn(&app, SpawnOptions { cwd, resume, permission_mode, model, effort, fork }, on_event)
 }
 
 #[tauri::command]
@@ -75,6 +77,19 @@ async fn load_transcript(session_id: String) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
+async fn list_sessions(limit: Option<usize>) -> Result<Vec<store::SessionInfo>, String> {
+    let limit = limit.unwrap_or(80).min(500);
+    tauri::async_runtime::spawn_blocking(move || store::list_sessions(limit))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn probe_usage() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(session::probe_usage).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 fn open_url(app: AppHandle, url: String) -> Result<(), String> {
     if !(url.starts_with("https://") || url.starts_with("http://")) {
         return Err("only http(s) links can be opened".into());
@@ -120,6 +135,8 @@ fn main() {
             load_state,
             save_state,
             load_transcript,
+            list_sessions,
+            probe_usage,
             open_url,
             reveal_folder,
             open_in_vscode,

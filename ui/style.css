@@ -414,3 +414,61 @@ button, select, textarea { font: inherit; color: inherit; }
 .session-path { color: var(--fg-faint); font-size: 11px; }
 .session-key { flex: none; color: var(--fg-faint); font-size: 10px; font-family: var(--mono); margin-top: 3px; }
 .session-empty { color: var(--fg-faint); font-size: 12px; padding: 8px 10px; }
+
+/* ---------- plan usage pill + popup ---------- */
+.usage {
+  display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px;
+  border: 0; border-radius: 3px; cursor: pointer; font-size: 12px; font-weight: 600;
+  background: var(--input-bg); color: var(--fg-muted); white-space: nowrap;
+}
+.usage.empty { font-weight: 400; }
+.usage .codicon { font-size: 13px; }
+.usage.loading .codicon { animation: pulse 1s infinite; }
+.usage-pop {
+  position: fixed; z-index: 40; width: 280px; padding: 8px 10px;
+  background: var(--bg-raised); border: 1px solid var(--border-strong); border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); font-size: 12px;
+}
+.usage-head { display: flex; justify-content: space-between; color: var(--fg-muted); font-size: 11px; text-transform: uppercase; margin-bottom: 6px; }
+.usage-plan { color: var(--fg-faint); }
+.usage-row { margin-bottom: 8px; }
+.usage-line { display: flex; justify-content: space-between; color: var(--fg-strong); }
+.usage-pct { font-weight: 600; }
+.usage-bar { height: 6px; margin: 3px 0 2px; border-radius: 3px; background: var(--input-bg); overflow: hidden; }
+.usage-bar > span { display: block; height: 100%; border-radius: 3px; }
+.usage-reset { color: var(--fg-faint); font-size: 11px; }
+.usage-note { color: var(--fg-muted); margin-bottom: 6px; }
+.usage-note.error { color: var(--error); }
+.usage-foot { color: var(--fg-faint); font-size: 11px; border-top: 1px solid var(--border); padding-top: 5px; }
+
+/* ---------- resume a session ---------- */
+.resumer { width: 620px; }
+.resumer .sidebar-search { margin: 0 2px 6px; }
+.filters { display: flex; gap: 4px; padding: 0 2px 6px; }
+.filters button {
+  padding: 1px 8px; border: 1px solid var(--border-strong); border-radius: 10px;
+  background: transparent; color: var(--fg-muted); font-size: 12px; cursor: pointer;
+}
+.filters button:hover { color: var(--fg); }
+.filters button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.resume-list { max-height: 60vh; }
+.resume-item {
+  display: flex; align-items: center; gap: 8px; width: 100%; margin: 1px 0;
+  padding: 6px 8px 6px 10px; border: 0; border-radius: 4px; background: transparent; cursor: pointer; text-align: left;
+  box-shadow: inset 3px 0 0 var(--proj, transparent);
+}
+.resume-item:hover, .resume-item:focus-visible { background: rgba(0, 120, 212, 0.2); outline: none; }
+.resume-item[disabled] { opacity: 0.5; cursor: default; }
+.resume-main { display: flex; flex-direction: column; min-width: 0; flex: 1; gap: 1px; }
+.resume-line { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.resume-title { color: var(--fg-strong); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
+.resume-time { color: var(--fg-faint); font-size: 11px; flex: none; }
+.resume-prompt { color: var(--fg-muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.resume-path { color: color-mix(in srgb, var(--proj, var(--fg-faint)) 55%, var(--fg-faint)); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
+.badge { flex: none; font-size: 10px; padding: 0 5px; border-radius: 8px; border: 1px solid var(--border-strong); color: var(--fg-muted); }
+.badge.on { border-color: var(--accent); color: var(--link); }
+.badge.warn { border-color: var(--waiting); color: var(--waiting); }
+.badge.err { border-color: var(--error); color: var(--error); }
+.resume-item .fork { visibility: hidden; flex: none; }
+.resume-item:hover .fork, .resume-item:focus-visible .fork { visibility: visible; }
+.session-empty.error { color: var(--error); }

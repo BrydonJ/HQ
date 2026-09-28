@@ -34,6 +34,23 @@ rustc would otherwise pick it. To build an installer (NSIS), install the Tauri C
 
 - **New session** (Ctrl+N) lists recent folders. You can also browse to any folder on any drive.
   A new cell starts `claude` only when you send its first message, so empty cells cost nothing.
+- **Resume** (Ctrl+O) continues a session started elsewhere, such as a VS Code tab, a terminal
+  or the desktop app:
+  - It lists the 80 most recent sessions from Claude's own transcripts, newest first.
+  - Search by title, prompt or folder, or filter by where the session was last used.
+  - Click a session to open it in a cell with its history. Claude resumes it (`--resume`) when
+    you send a message.
+  - A session changed in the last 5 minutes is marked **Active**. Close it in VS Code first,
+    because two windows writing to one session make a mess of it.
+  - Alternatively, **Fork** it (the branch icon): your first message starts a copy
+    (`--fork-session`) and leaves the original alone.
+- **Plan usage** sits in the top bar: the 5-hour usage and the time until it resets.
+  - It is colored on a heat scale: green at 0%, yellow at 60%, red at 100%.
+  - Hover it for the 5-hour and weekly limits with their reset times. Click it to refresh.
+  - The numbers come from Claude's own `get_usage` request, the same data `/usage` shows.
+    HQ asks a running session when there is one. Otherwise it starts a short-lived `claude`
+    that skips MCP servers and hooks and saves no transcript.
+  - It refreshes after each finished turn, and every 5 minutes (15 when no session is running).
 - Each project folder gets its own color. The cell header and its entry in the sessions list
   use it, so sessions in the same folder are easy to spot.
 - Status cues on each cell:
@@ -77,6 +94,7 @@ rustc would otherwise pick it. To build an installer (NSIS), install the Tauri C
   - Ctrl+M: maximize the focused cell. You can also double-click its header.
   - Ctrl+W: close the focused cell.
   - Ctrl+B: show or hide the sessions list.
+  - Ctrl+O: resume a session from VS Code or the terminal.
 - The board is saved to `%APPDATA%\dev.brydon.hq\board.json`:
   - It stores each cell's folder, session, mode, model, effort and first prompt.
   - On restart, each cell shows its history from Claude's own transcript.
@@ -88,13 +106,15 @@ Environment overrides:
 
 - `HQ_CLAUDE`: path to the `claude` binary.
 - `HQ_MODEL`: default model for HQ sessions that have no model picked.
+- `HQ_STATE_DIR`: folder for `board.json`, so a second copy (such as a test build) keeps its own
+  board.
 
 ## Layout
 
 ```
 src/session.rs   spawns one `claude -p --input-format stream-json ...` per cell; Windows job
-                 object kills the whole process tree when a cell (or HQ) closes
-src/store.rs     board.json persistence, transcript lookup, VS Code lookup
+                 object kills the whole process tree when a cell (or HQ) closes; usage probe
+src/store.rs     board.json persistence, transcript lookup and session list, VS Code lookup
 src/main.rs      Tauri commands
 ui/app.js        cells, protocol handling, prompts, menus, sessions list, grid layout, persistence
 ui/render.js     markdown (raw HTML escaped, http(s) links only), tool rows, diffs, images,

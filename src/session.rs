@@ -10,9 +10,10 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::Duration;
 
-use serde_json::json;
+use serde_json::{json, Value};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager};
 
@@ -37,10 +38,81 @@ pub struct SpawnOptions {
     pub permission_mode: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
+    /// With `resume`: continue in a new session ID, leaving the original untouched.
+    pub fork: bool,
 }
 
 fn claude_program() -> String {
     std::env::var("HQ_CLAUDE").unwrap_or_else(|_| "claude".into())
+}
+
+fn hide_console(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = cmd;
+}
+
+/// Asks a short-lived `claude` for the account's plan usage (the same numbers `/usage` shows)
+/// and returns the reply's JSON. Used when no session is running to ask instead.
+///
+/// The probe skips MCP servers, claude.ai connectors and hooks, and saves no transcript, so it
+/// starts quickly and leaves nothing behind.
+pub fn probe_usage() -> Result<String, String> {
+    let dir = std::env::temp_dir().join("hq-usage");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mut cmd = Command::new(claude_program());
+    cmd.args([
+        "-p",
+        "--input-format", "stream-json",
+        "--output-format", "stream-json",
+        "--verbose",
+        "--strict-mcp-config",
+        "--no-session-persistence",
+        "--settings", r#"{"disableAllHooks":true,"disableClaudeAiConnectors":true}"#,
+    ]);
+    cmd.current_dir(&dir)
+        .env_remove("CLAUDECODE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    hide_console(&mut cmd);
+    let mut child = cmd.spawn().map_err(|e| format!("Could not start `{}` ({e})", claude_program()))?;
+    #[cfg(windows)]
+    let _job = job::Job::new().filter(|j| j.assign(&child));
+
+    let mut stdin = child.stdin.take().ok_or("claude stdin unavailable")?;
+    let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
+    let (tx, rx) = mpsc::channel::<Value>();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+            if v["type"] == "control_response" && v["response"]["request_id"] == "hq-usage" {
+                let _ = tx.send(v["response"].clone());
+                break;
+            }
+        }
+    });
+
+    let request = |id: &str, subtype: &str| json!({ "type": "control_request", "request_id": id, "request": { "subtype": subtype } }).to_string();
+    let result = writeln!(stdin, "{}", request("hq-init", "initialize"))
+        .and_then(|_| writeln!(stdin, "{}", request("hq-usage", "get_usage")))
+        .and_then(|_| stdin.flush())
+        .map_err(|e| format!("write to claude failed: {e}"))
+        .and_then(|_| rx.recv_timeout(Duration::from_secs(30)).map_err(|_| "Claude did not report usage in time".to_string()));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let response = result?;
+    if response["subtype"] == "error" {
+        return Err(response["error"].as_str().unwrap_or("usage request failed").to_owned());
+    }
+    Ok(response["response"].to_string())
 }
 
 impl Sessions {
@@ -60,6 +132,9 @@ impl Sessions {
         ]);
         if let Some(id) = opts.resume.as_deref().filter(|s| !s.is_empty()) {
             cmd.args(["--resume", id]);
+            if opts.fork {
+                cmd.arg("--fork-session");
+            }
         }
         // "default" is left to Claude's own settings rather than passed as a flag value.
         if let Some(mode) = opts.permission_mode.as_deref().filter(|s| !s.is_empty() && *s != "default") {
@@ -78,13 +153,7 @@ impl Sessions {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
+        hide_console(&mut cmd);
 
         let mut child = cmd.spawn().map_err(|e| {
             format!("Could not start `{}` ({e}). Is Claude Code installed and on PATH?", claude_program())

@@ -37,9 +37,10 @@ const nextRequestId = () => `hq-${Date.now().toString(36)}-${++reqSeq}`;
 // ======================================================================================
 
 class Cell {
-  constructor({ cwd, sessionId = null, permissionMode = 'default', model = null, effort = null, title = '' }) {
+  constructor({ cwd, sessionId = null, permissionMode = 'default', model = null, effort = null, title = '', fork = false }) {
     this.cwd = cwd;
     this.sessionId = sessionId;
+    this.fork = !!(fork && sessionId); // resume into a new session ID, leaving the original alone
     this.permissionMode = permissionMode || 'default';
     this.modelChoice = model && model !== 'default' ? model : null; // null = Claude's default
     this.effort = effort || null;  // null = Claude's default
@@ -397,6 +398,7 @@ class Cell {
           permissionMode: this.permissionMode,
           model: this.modelChoice,
           effort: this.effortLevels().length ? this.effort : null,
+          fork: this.fork,
           onEvent: channel,
         });
       } catch (err) {
@@ -531,7 +533,8 @@ class Cell {
       case 'control_cancel_request': return this.dropPrompt(m.request_id);
       case 'control_response': return this.onControlResponse(m);
       case 'hq_exit': return this.onExit(m);
-      default: return; // rate_limit_event, keep_alive, future types
+      case 'rate_limit_event': return scheduleUsageRefresh(this);
+      default: return; // keep_alive, future types
     }
   }
 
@@ -539,6 +542,7 @@ class Cell {
     if (m.subtype === 'init') {
       const changed = this.sessionId !== m.session_id;
       this.sessionId = m.session_id || this.sessionId;
+      if (changed) this.fork = false; // the fork now has its own ID
       if (m.model) { this.resolvedModel = m.model; this.updateModelLabel(); }
       if (Array.isArray(m.mcp_servers)) this.setMcpBadge(sanitizeMcp(m.mcp_servers));
       if (m.permissionMode && m.permissionMode !== this.permissionMode) {
@@ -708,7 +712,7 @@ class Cell {
       } else if (block.type === 'text' && block.text) {
         const text = block.text;
         if (text.startsWith('[Request interrupted')) this.notice('Interrupted');
-        else if (/^\s*<(command-|local-command-|system-reminder|task-notification)/.test(text)) continue;
+        else if (/^\s*<(command-|local-command-|system-reminder|task-notification|ide_)/.test(text)) continue;
         else texts.push(text);
       } else if (block.type === 'image') {
         const url = imageBlockUrl(block.source);
@@ -737,6 +741,7 @@ class Cell {
     this.setStatus('idle');
     this.markUnread();
     this.refreshState();
+    scheduleUsageRefresh(this);
   }
 
   onControlResponse(m) {
@@ -1276,6 +1281,7 @@ const picker = $('#picker');
 let pickerIndex = -1;
 
 async function openPicker() {
+  closeResumer();
   const list = $('#picker-recent');
   list.replaceChildren();
   const exists = await Promise.all(app.recent.map(p => invoke('folder_exists', { path: p }).catch(() => false)));
@@ -1329,6 +1335,313 @@ $('#new-session').addEventListener('click', () => (picker.classList.contains('hi
 $('#empty-new').addEventListener('click', openPicker);
 
 // ======================================================================================
+// Resume a session started elsewhere (VS Code, the terminal, or an earlier HQ cell)
+// ======================================================================================
+
+const resumer = $('#resumer');
+const resumeList = $('#resume-list');
+const resumeSearch = $('#resume-search');
+const SOURCE_LABELS = { 'claude-vscode': 'VS Code', cli: 'Terminal', 'sdk-cli': 'HQ', 'claude-desktop': 'Desktop' };
+// A transcript written this recently may still be open somewhere else.
+const RECENTLY_ACTIVE_MS = 5 * 60 * 1000;
+const resumeState = { sessions: [], source: '', loading: false, error: null };
+
+async function openResumer() {
+  closePicker();
+  closeMenu();
+  resumer.classList.remove('hidden');
+  resumeSearch.value = '';
+  resumeSearch.focus();
+  resumeState.loading = true;
+  resumeState.error = null;
+  renderResumeList();
+  try {
+    resumeState.sessions = await invoke('list_sessions', { limit: 80 });
+  } catch (err) {
+    resumeState.error = String(err);
+  }
+  resumeState.loading = false;
+  renderResumeList();
+}
+
+function closeResumer() {
+  resumer.classList.add('hidden');
+}
+
+function timeAgo(ms) {
+  const s = Math.max(0, (Date.now() - ms) / 1000);
+  if (s < 60) return 'just now';
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  if (s < 7 * 86400) return `${Math.floor(s / 86400)}d ago`;
+  return new Date(ms).toLocaleDateString();
+}
+
+function renderResumeList() {
+  if (resumeState.loading && !resumeState.sessions.length) {
+    resumeList.replaceChildren(h('div', { class: 'session-empty', text: 'Reading sessions…' }));
+    return;
+  }
+  if (resumeState.error) {
+    resumeList.replaceChildren(h('div', { class: 'session-empty error', text: resumeState.error }));
+    return;
+  }
+  const terms = resumeSearch.value.toLowerCase().split(/\s+/).filter(Boolean);
+  const rows = [];
+  for (const info of resumeState.sessions) {
+    if (resumeState.source && info.entrypoint !== resumeState.source) continue;
+    const title = info.title || info.lastPrompt || '(no prompt)';
+    const hay = [title, info.lastPrompt, info.cwd].join('\n').toLowerCase();
+    if (!terms.every(t => hay.includes(t))) continue;
+
+    const open = app.cells.find(c => c.sessionId === info.sessionId);
+    const recent = Date.now() - info.modifiedMs < RECENTLY_ACTIVE_MS;
+    const source = SOURCE_LABELS[info.entrypoint] || info.entrypoint || '';
+    const badges = [
+      source ? h('span', { class: 'badge', text: source }) : null,
+      open ? h('span', { class: 'badge on', text: 'Open in HQ' }) : null,
+      recent && !open ? h('span', { class: 'badge warn', text: 'Active', title: 'Changed in the last few minutes. If it is still open in VS Code or a terminal, close it there first, or fork it instead.' }) : null,
+      !info.cwdExists ? h('span', { class: 'badge err', text: 'Folder missing' }) : null,
+    ];
+    const fork = h('button', { class: 'icon-btn fork', title: 'Fork: continue in a copy and leave the original untouched' }, icon('repo-forked'));
+    fork.addEventListener('click', e => { e.stopPropagation(); resumeSession(info, true); });
+    const row = h('button', { class: 'resume-item', disabled: !info.cwdExists, title: `${info.cwd}\n${info.sessionId}` },
+      h('span', { class: 'resume-main' },
+        h('span', { class: 'resume-line' }, h('span', { class: 'resume-title', text: title }), h('span', { class: 'resume-time', text: timeAgo(info.modifiedMs) })),
+        info.title && info.lastPrompt ? h('span', { class: 'resume-prompt', text: info.lastPrompt }) : null,
+        h('span', { class: 'resume-line' }, h('span', { class: 'resume-path', text: info.cwd }), badges)),
+      open || !info.cwdExists ? null : fork);
+    row.style.setProperty('--proj', projectColor(info.cwd));
+    row.addEventListener('click', () => resumeSession(info, false));
+    rows.push(row);
+  }
+  if (!rows.length) rows.push(h('div', { class: 'session-empty', text: resumeState.sessions.length ? 'No sessions match.' : 'No sessions found.' }));
+  resumeList.replaceChildren(...rows);
+}
+
+function resumeSession(info, fork) {
+  closeResumer();
+  const open = app.cells.find(c => c.sessionId === info.sessionId);
+  if (open && !fork) { revealCell(open); return; }
+  rememberFolder(info.cwd);
+  const cell = addCell({ cwd: info.cwd, sessionId: info.sessionId, title: info.title || info.lastPrompt || '', fork }, { restore: true });
+  if (fork) cell.notice('Forked: your first message starts a copy of this session. The original is left as it was.');
+  revealCell(cell);
+}
+
+resumeSearch.addEventListener('input', renderResumeList);
+$('#resume-filters').addEventListener('click', e => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  resumeState.source = btn.dataset.source;
+  for (const b of $('#resume-filters').children) b.classList.toggle('on', b === btn);
+  renderResumeList();
+});
+resumer.addEventListener('keydown', e => {
+  const items = [...resumeList.querySelectorAll('.resume-item:not([disabled])')];
+  if (e.key === 'Escape') { e.stopPropagation(); closeResumer(); return; }
+  if (e.key === 'Enter' && document.activeElement === resumeSearch) {
+    e.preventDefault();
+    if (items[0]) items[0].click();
+  } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    const cur = items.indexOf(document.activeElement);
+    if (e.key === 'ArrowUp' && cur <= 0) { resumeSearch.focus(); return; }
+    const next = items[e.key === 'ArrowDown' ? Math.min(cur + 1, items.length - 1) : cur - 1];
+    if (next) next.focus();
+  }
+});
+document.addEventListener('mousedown', e => {
+  if (!resumer.classList.contains('hidden') && !resumer.contains(e.target) && !e.target.closest('#resume-session')) closeResumer();
+});
+$('#resume-session').addEventListener('click', () => (resumer.classList.contains('hidden') ? openResumer() : closeResumer()));
+
+// ======================================================================================
+// Plan usage (5-hour and weekly limits)
+// ======================================================================================
+
+const usagePill = $('#usage');
+const usagePop = $('#usage-pop');
+const usage = { data: null, fetchedAt: 0, loading: null, error: null, timer: null };
+const USAGE_EVERY_MS = 5 * 60 * 1000;       // while a session is running, asking it is free
+const USAGE_PROBE_EVERY_MS = 15 * 60 * 1000; // otherwise a short-lived claude is started to ask
+const USAGE_STALE_MS = 2 * 60 * 1000;
+
+/** Green at 0%, yellow at 60%, red at 100%. */
+const HEAT_STOPS = [[0, [76, 255, 46]], [60, [245, 239, 71]], [100, [240, 14, 14]]];
+
+function heat(percent) {
+  const p = Math.max(0, Math.min(100, percent));
+  let i = 0;
+  while (i < HEAT_STOPS.length - 2 && p > HEAT_STOPS[i + 1][0]) i++;
+  const [p0, c0] = HEAT_STOPS[i];
+  const [p1, c1] = HEAT_STOPS[i + 1];
+  const t = (p - p0) / (p1 - p0);
+  return c0.map((v, k) => Math.round(v + (c1[k] - v) * t));
+}
+
+function heatCss(percent) {
+  return `rgb(${heat(percent).join(',')})`;
+}
+
+/** Dark text on the bright end of the scale, white on the red end. */
+function heatText(percent) {
+  const [r, g, b] = heat(percent);
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b > 140 ? '#1b1b1b' : '#ffffff';
+}
+
+const LIMIT_LABELS = {
+  five_hour: '5-hour session',
+  seven_day: 'Weekly · all models',
+  seven_day_opus: 'Weekly · Opus',
+  seven_day_sonnet: 'Weekly · Sonnet',
+};
+
+/** Keeps only the limits HQ shows. Unknown or missing fields are skipped, never guessed. */
+function sanitizeUsage(r) {
+  const rows = [];
+  const rl = (r && r.rate_limits) || {};
+  for (const [key, label] of Object.entries(LIMIT_LABELS)) {
+    const l = rl[key];
+    if (l && typeof l.utilization === 'number') rows.push({ key, label, percent: l.utilization, resetsAt: Date.parse(l.resets_at) || null });
+  }
+  // Newer CLIs also list per-model weekly limits.
+  for (const l of Array.isArray(r && r.limits) ? r.limits : []) {
+    if (l.kind !== 'weekly_scoped' || typeof l.percent !== 'number') continue;
+    const name = l.scope && l.scope.model && l.scope.model.display_name;
+    if (!name || rows.some(x => x.label === `Weekly · ${name}`)) continue;
+    rows.push({ key: `scoped-${name}`, label: `Weekly · ${name}`, percent: l.percent, resetsAt: Date.parse(l.resets_at) || null });
+  }
+  return { plan: typeof (r && r.subscription_type) === 'string' ? r.subscription_type : null, available: !!(r && r.rate_limits_available), rows };
+}
+
+function withTimeout(promise, ms) {
+  return Promise.race([promise, new Promise(resolve => setTimeout(() => resolve(null), ms))]);
+}
+
+/** Asks a running session for usage when there is one, otherwise starts a short-lived probe. */
+function refreshUsage(preferred) {
+  if (usage.loading) return usage.loading;
+  renderUsage();
+  usage.loading = (async () => {
+    let reply = null;
+    const cell = [preferred, ...app.cells].find(c => c && c.proc != null && !c.closing);
+    if (cell) {
+      const r = await withTimeout(cell.control({ subtype: 'get_usage' }), 15000);
+      if (r && r.subtype === 'success') reply = r.response;
+    }
+    if (!reply) reply = JSON.parse(await invoke('probe_usage'));
+    usage.data = sanitizeUsage(reply);
+    usage.error = null;
+    usage.fetchedAt = Date.now();
+  })().catch(err => {
+    usage.error = String(err);
+  }).finally(() => {
+    usage.loading = null;
+    renderUsage();
+    scheduleNextUsage();
+  });
+  renderUsage();
+  return usage.loading;
+}
+
+/** A finished turn changes usage; asks the session that just finished, a few seconds later. */
+function scheduleUsageRefresh(cell) {
+  clearTimeout(usage.soon);
+  usage.soon = setTimeout(() => refreshUsage(cell), 3000);
+}
+
+function scheduleNextUsage() {
+  clearTimeout(usage.timer);
+  const anyRunning = app.cells.some(c => c.proc != null);
+  usage.timer = setTimeout(() => refreshUsage(), anyRunning ? USAGE_EVERY_MS : USAGE_PROBE_EVERY_MS);
+}
+
+function untilText(ms) {
+  const mins = Math.max(0, Math.round((ms - Date.now()) / 60000));
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ${mins % 60}m`;
+  return `${Math.floor(hours / 24)}d ${hours % 24}h`;
+}
+
+function resetText(ms) {
+  const d = new Date(Math.round(ms / 60000) * 60000); // resets land a few ms either side of the minute
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const sameDay = d.toDateString() === new Date().toDateString();
+  return `Resets in ${untilText(ms)} · ${sameDay ? time : `${d.toLocaleDateString([], { weekday: 'short' })} ${time}`}`;
+}
+
+function renderUsage() {
+  const five = usage.data && usage.data.rows.find(r => r.key === 'five_hour');
+  const text = usagePill.querySelector('.usage-text');
+  usagePill.classList.toggle('empty', !five);
+  usagePill.classList.toggle('loading', !!usage.loading);
+  if (five) {
+    // A window that has already reset shows 0% until the next refresh brings the new numbers.
+    const expired = five.resetsAt && five.resetsAt < Date.now();
+    const percent = expired ? 0 : five.percent;
+    text.textContent = expired || !five.resetsAt ? `${percent}%` : `${percent}% · ${untilText(five.resetsAt)}`;
+    usagePill.style.background = heatCss(percent);
+    usagePill.style.color = heatText(percent);
+  } else {
+    text.textContent = usage.error ? 'Usage unavailable' : '…';
+    usagePill.style.background = '';
+    usagePill.style.color = '';
+  }
+  if (!usagePop.classList.contains('hidden')) renderUsagePop();
+}
+
+function renderUsagePop() {
+  const parts = [h('div', { class: 'usage-head' },
+    h('span', { text: 'Plan usage' }),
+    usage.data && usage.data.plan ? h('span', { class: 'usage-plan', text: usage.data.plan }) : null)];
+  if (usage.data && !usage.data.rows.length) {
+    parts.push(h('div', { class: 'usage-note', text: usage.data.available ? 'No limits reported.' : 'Usage limits are not available for this account.' }));
+  }
+  for (const row of (usage.data && usage.data.rows) || []) {
+    const expired = row.resetsAt && row.resetsAt < Date.now();
+    const percent = expired ? 0 : row.percent;
+    parts.push(h('div', { class: 'usage-row' },
+      h('div', { class: 'usage-line' }, h('span', { text: row.label }), h('span', { class: 'usage-pct', text: `${percent}%` })),
+      h('div', { class: 'usage-bar' }, h('span', { style: `width:${Math.min(100, percent)}%;background:${heatCss(percent)}` })),
+      row.resetsAt ? h('div', { class: 'usage-reset', text: expired ? 'Reset; refreshing…' : resetText(row.resetsAt) }) : null));
+  }
+  if (usage.error) parts.push(h('div', { class: 'usage-note error', text: usage.error }));
+  const updated = usage.loading ? 'Updating…' : usage.fetchedAt ? `Updated ${timeAgo(usage.fetchedAt)}` : '';
+  parts.push(h('div', { class: 'usage-foot', text: `${updated}${updated ? ' · ' : ''}click to refresh` }));
+  usagePop.replaceChildren(...parts);
+  const r = usagePill.getBoundingClientRect();
+  usagePop.style.top = `${r.bottom + 6}px`;
+  usagePop.style.left = `${Math.max(8, Math.min(r.right - usagePop.offsetWidth, window.innerWidth - usagePop.offsetWidth - 8))}px`;
+}
+
+let usageHideTimer = null;
+function showUsagePop() {
+  clearTimeout(usageHideTimer);
+  usagePop.classList.remove('hidden');
+  renderUsagePop();
+  if (Date.now() - usage.fetchedAt > USAGE_STALE_MS) refreshUsage();
+}
+function hideUsagePop() {
+  clearTimeout(usageHideTimer);
+  usageHideTimer = setTimeout(() => usagePop.classList.add('hidden'), 200);
+}
+usagePill.addEventListener('mouseenter', showUsagePop);
+usagePill.addEventListener('mouseleave', hideUsagePop);
+usagePill.addEventListener('focus', showUsagePop);
+usagePill.addEventListener('blur', hideUsagePop);
+usagePop.addEventListener('mouseenter', () => clearTimeout(usageHideTimer));
+usagePop.addEventListener('mouseleave', hideUsagePop);
+usagePill.addEventListener('click', () => refreshUsage());
+// Keeps the countdown current, and fetches fresh numbers once the 5-hour window resets.
+setInterval(() => {
+  const five = usage.data && usage.data.rows.find(r => r.key === 'five_hour');
+  if (five && five.resetsAt && five.resetsAt < Date.now() && Date.now() - usage.fetchedAt > 60000) refreshUsage();
+  else renderUsage();
+}, 30000);
+
+// ======================================================================================
 // Keyboard
 // ======================================================================================
 
@@ -1342,6 +1655,7 @@ document.addEventListener('keydown', e => {
   }
   if (e.ctrlKey && !e.shiftKey && !e.altKey) {
     if (e.key === 'n' || e.key === 'N') { e.preventDefault(); openPicker(); return; }
+    if (e.key === 'o' || e.key === 'O') { e.preventDefault(); openResumer(); return; }
     if (e.key === 'b' || e.key === 'B') { e.preventDefault(); setSidebar(!app.sidebarOpen, !app.sidebarOpen); return; }
     if ((e.key === 'm' || e.key === 'M') && cell) { e.preventDefault(); toggleMaximize(cell); return; }
     if ((e.key === 'w' || e.key === 'W') && cell) { e.preventDefault(); cell.requestClose(cell.el.querySelector('.act-close')); return; }
@@ -1356,7 +1670,7 @@ document.addEventListener('keydown', e => {
     }
   }
   if (!cell) return;
-  if (e.key === 'Escape' && picker.classList.contains('hidden') && (cell.status === 'running' || cell.pending.size)) {
+  if (e.key === 'Escape' && picker.classList.contains('hidden') && resumer.classList.contains('hidden') && (cell.status === 'running' || cell.pending.size)) {
     e.preventDefault();
     cell.interrupt();
     return;
@@ -1392,6 +1706,7 @@ function saveState() {
         model: c.modelChoice,
         effort: c.effort,
         title: c.title,
+        fork: c.fork || undefined,
       })),
       recent: app.recent,
       models: app.models,
@@ -1425,6 +1740,7 @@ async function restore() {
   layout();
   updateSummary();
   renderSidebar();
+  setTimeout(() => refreshUsage(), 1500);
 }
 
 restore();

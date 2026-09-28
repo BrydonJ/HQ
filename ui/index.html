@@ -15,6 +15,12 @@
     <div class="brand"><span class="codicon codicon-layout"></span> HQ</div>
     <div id="summary" class="summary"></div>
     <div class="spacer"></div>
+    <button id="usage" class="usage empty" title="Plan usage">
+      <span class="codicon codicon-dashboard"></span><span class="usage-text">&hellip;</span>
+    </button>
+    <button id="resume-session" class="btn" title="Continue a session from VS Code or the terminal (Ctrl+O)">
+      <span class="codicon codicon-history"></span> Resume
+    </button>
     <button id="new-session" class="btn primary" title="New session (Ctrl+N)">
       <span class="codicon codicon-add"></span> New session
     </button>
@@ -38,7 +44,7 @@
         <div class="empty-title">No sessions yet</div>
         <div class="empty-sub">Each session runs Claude Code in its own folder, on any drive.</div>
         <button id="empty-new" class="btn primary"><span class="codicon codicon-add"></span> New session</button>
-        <div class="empty-keys">Ctrl+N new &middot; Ctrl+B sessions list &middot; Ctrl+1&hellip;9 focus &middot; Ctrl+M maximize &middot; Esc stop</div>
+        <div class="empty-keys">Ctrl+N new &middot; Ctrl+O resume &middot; Ctrl+B sessions list &middot; Ctrl+1&hellip;9 focus &middot; Ctrl+M maximize &middot; Esc stop</div>
       </div>
       <div id="grid"></div>
     </main>
@@ -51,6 +57,24 @@
       <span class="codicon codicon-folder-opened"></span> Browse for a folder&hellip;
     </button>
   </div>
+
+  <div id="resumer" class="picker resumer hidden" role="dialog" aria-label="Resume a session">
+    <div class="picker-title">Continue a session</div>
+    <label class="sidebar-search">
+      <span class="codicon codicon-search"></span>
+      <input id="resume-search" type="text" placeholder="Search by title, prompt or folder" spellcheck="false" autocomplete="off" />
+    </label>
+    <div id="resume-filters" class="filters">
+      <button data-source="" class="on">All</button>
+      <button data-source="claude-vscode">VS Code</button>
+      <button data-source="cli">Terminal</button>
+      <button data-source="sdk-cli">HQ</button>
+      <button data-source="claude-desktop">Desktop</button>
+    </div>
+    <div id="resume-list" class="picker-list resume-list"></div>
+  </div>
+
+  <div id="usage-pop" class="usage-pop hidden" role="tooltip"></div>
 
   <div id="menu" class="menu hidden" role="menu"></div>
 
