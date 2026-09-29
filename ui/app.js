@@ -73,8 +73,8 @@ class Cell {
     this.aiTitle = !!aiTitle;      // true once `title` is Claude's own title
     this.customTitle = customTitle || null; // the user's rename, shown instead of `title`
     this.renamePending = !!(renamePending && customTitle); // rename not yet saved in Claude's transcript
-    this.titleAsked = false;       // Claude was asked for a title by this process
-    this.firstPrompt = '';         // full first prompt, which Claude titles the session from
+    this.titleTries = 0;           // times Claude was asked for a title by this process
+    this.promptText = '';          // the prompts sent so far, which Claude titles the session from
     this.renaming = false;
     this.clean = !!clean;          // prompts and replies only (the eye button)
     this.lastReply = '';
@@ -272,10 +272,10 @@ class Cell {
       }
       return;
     }
-    if (this.customTitle || this.aiTitle || this.titleAsked) return;
-    const description = this.firstPrompt || this.title;
+    if (this.customTitle || this.aiTitle || this.titleTries >= 4) return;
+    const description = this.promptText || this.title;
     if (!description) return;
-    this.titleAsked = true;
+    this.titleTries++; // Claude gives no title to a prompt like "hi", so each later turn asks again with more text
     const reply = await this.control({ subtype: 'generate_session_title', description, persist: true });
     const title = reply && reply.subtype === 'success' && reply.response && reply.response.title;
     if (typeof title === 'string' && title.trim()) {
@@ -632,8 +632,11 @@ class Cell {
     this.renderAttachments();
     this.stickToBottom = true;
     this.append(userBubble(text, images.map(i => i.url), Date.now()));
+    if (!this.aiTitle && !this.customTitle && text && this.promptText.length < 2000) {
+      this.promptText = `${this.promptText}
+${text}`.trim().slice(0, 2000);
+    }
     if (!this.title) {
-      this.firstPrompt = text.slice(0, 2000);
       this.setTitle(firstLine(text, 90) || 'Image');
       saveState();
     }
