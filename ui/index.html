@@ -94,12 +94,17 @@
         <span class="cell-path"></span>
         <span class="bg-tasks hidden"><span class="codicon codicon-loading codicon-modifier-spin"></span><span class="bg-count"></span></span>
         <button class="icon-btn act-clean"><span class="codicon codicon-eye"></span></button>
+        <button class="icon-btn act-progress"><span class="codicon codicon-checklist"></span></button>
         <button class="icon-btn act-code" title="Open folder in VS Code"><span class="codicon codicon-vscode"></span></button>
         <button class="icon-btn act-reveal" title="Open folder in Explorer"><span class="codicon codicon-folder"></span></button>
         <button class="icon-btn act-max" title="Maximize (Ctrl+M)"><span class="codicon codicon-screen-full"></span></button>
         <button class="icon-btn act-close" title="Close session"><span class="codicon codicon-close"></span></button>
+        <span class="head-progress hidden" aria-hidden="true"></span>
       </div>
-      <div class="messages"></div>
+      <div class="stage">
+        <div class="messages"></div>
+        <div class="progress-panel"></div>
+      </div>
       <div class="prompts"></div>
       <div class="composer">
         <div class="attachments"></div>

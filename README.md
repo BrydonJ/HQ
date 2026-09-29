@@ -122,12 +122,27 @@ every installed copy must be reinstalled by hand.
     update restart, would stop them, so HQ treats the cell as busy until they finish.
   - The top bar shows the totals. The taskbar button flashes when HQ is in the background.
 - **Session names:** the cell header shows the session's name after the project name.
-  - Claude names a new session after its first reply, as the VS Code extension does.
+  - Claude names a new session a few seconds after its first prompt, as the VS Code extension
+    does, even while that first turn is still running.
   - Click the name (or press F2) to rename it. The new name is saved in Claude's own
     transcript, so VS Code and `claude --resume` show it too.
 - **Prompts and replies only:** the eye button in the cell header hides tool calls, thinking,
   narration and status notes. It is set per cell and kept across restarts. Errors, and the
   last words of a turn you stopped, stay visible.
+- **Progress view:** the checklist button next to the eye fades the chat and shows how far
+  Claude has got. It is set per cell and kept across restarts. The view shows:
+  - Whether Claude is working, how long the turn has run, how many tool calls it has made, and
+    the tool running now.
+  - Claude's task list with a percentage bar, when the model keeps one. In HQ sessions Claude
+    Code only gives task tools to older models (4.6 and earlier, and Haiku 4.5). Sonnet 5.5 and
+    Opus 5.5 work without a list, and HQ does not force one on.
+  - Background agents and shells, with each agent's latest tool, tool count and summary.
+  - **Ask Claude:** asks, beside the running turn (like `/btw`), what Claude is doing and what
+    is left. Claude answers without stopping, and its rough percentage fills the bar. Each
+    click is one extra request that reads the session's context from the cache.
+
+  While a task list is open, a thin bar along the bottom of the cell header shows its
+  percentage, so it is visible in the grid without opening the view.
 - Claude's text comes in two styles:
   - **Narration:** muted grey text between tool calls, where Claude says what it is doing.
   - **Reply:** the answer that ends a turn, shown in a card with an orange edge.

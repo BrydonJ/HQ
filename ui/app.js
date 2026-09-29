@@ -60,7 +60,7 @@ const nextRequestId = () => `hq-${Date.now().toString(36)}-${++reqSeq}`;
 
 class Cell {
   constructor({ cwd, sessionId = null, permissionMode = 'default', model = null, effort = null, title = '', aiTitle = false,
-    customTitle = null, renamePending = false, clean = false, fork = false }) {
+    customTitle = null, renamePending = false, clean = false, progress = false, fork = false }) {
     this.cwd = cwd;
     this.sessionId = sessionId;
     this.fork = !!(fork && sessionId); // resume into a new session ID, leaving the original alone
@@ -74,9 +74,11 @@ class Cell {
     this.customTitle = customTitle || null; // the user's rename, shown instead of `title`
     this.renamePending = !!(renamePending && customTitle); // rename not yet saved in Claude's transcript
     this.titleTries = 0;           // times Claude was asked for a title by this process
+    this.titleAsked = '';          // the prompt text Claude was last asked to title
     this.promptText = '';          // the prompts sent so far, which Claude titles the session from
     this.renaming = false;
     this.clean = !!clean;          // prompts and replies only (the eye button)
+    this.progressView = !!progress; // the progress panel over the chat (the checklist button)
     this.lastReply = '';
     this.color = projectColor(cwd);
     this.attachments = [];         // images waiting to be sent: { mediaType, data, url }
@@ -91,7 +93,17 @@ class Cell {
     this.pending = new Map();  // control request_id -> prompt element
     this.controls = new Map(); // our control request_id -> resolver awaiting Claude's reply
     this.tools = new Map();    // tool_use_id -> { item, body }
-    this.live = null;          // { msgId, blocks: Map<index, {item, md, text}> } for streamed text
+    this.tasks = new Map();    // Claude's task list: task id -> { subject, activeForm, status }
+    this.taskCreates = new Map(); // TaskCreate tool_use_id -> task, until its result gives the id
+    this.tasksStale = false;   // the list is a finished one from an earlier prompt
+    this.taskProgress = new Map(); // task_id -> latest task_progress of an agent Claude started
+    this.turnStart = null;     // when the current turn started (ms)
+    this.turnTools = 0;        // top-level tool calls in the current turn
+    this.currentTool = null;   // { id, name, summary } of the latest top-level tool still running
+    this.statusAnswer = null;  // { text, at, percent, asking } from the Ask Claude button
+    this.progressTimer = null;
+    this.replaying = false;    // loadHistory is replaying the transcript
+    this.live = null;        // { msgId, blocks: Map<index, {item, md, text}> } for streamed text
     this.renderTimer = null;
     this.stickToBottom = true;
     this.closing = false;
@@ -115,6 +127,9 @@ class Cell {
     this.stopBtn = el.querySelector('.act-stop');
     this.titleEl = el.querySelector('.cell-title');
     this.cleanBtn = el.querySelector('.act-clean');
+    this.progressBtn = el.querySelector('.act-progress');
+    this.progressEl = el.querySelector('.progress-panel');
+    this.headBar = el.querySelector('.head-progress');
     this.bgEl = el.querySelector('.bg-tasks');
 
     el.style.setProperty('--proj', this.color);
@@ -123,6 +138,7 @@ class Cell {
     this.modeSel.value = this.permissionMode;
     this.setTitle(this.title);
     this.applyClean();
+    this.applyProgressView();
     this.updateModelLabel();
 
     el.addEventListener('mousedown', () => focusCell(this, false));
@@ -131,6 +147,7 @@ class Cell {
     });
     this.titleEl.addEventListener('click', () => this.startRename());
     this.cleanBtn.addEventListener('click', () => this.setClean(!this.clean));
+    this.progressBtn.addEventListener('click', () => this.setProgressView(!this.progressView));
     el.querySelector('.act-max').addEventListener('click', () => toggleMaximize(this));
     el.querySelector('.act-close').addEventListener('click', e => this.requestClose(e.currentTarget));
     el.querySelector('.act-reveal').addEventListener('click', () => invoke('reveal_folder', { path: this.cwd }).catch(err => this.notice(String(err), true)));
@@ -258,8 +275,9 @@ class Cell {
   /**
    * Saves a rename in Claude's transcript, so VS Code and `claude --resume` show it too, or asks
    * Claude to title a session that only has its first prompt as a name. Both need a running
-   * process and a session Claude has written to disk, so anything not sent yet is retried after
-   * each turn.
+   * process and a session Claude has written to disk. A title is asked for when each turn starts
+   * (Claude answers beside a running turn, so a long first turn gets its title within seconds);
+   * both are tried again after each turn.
    */
   async syncTitle() {
     if (this.proc == null || !this.sessionId || this.fork) return;
@@ -274,9 +292,11 @@ class Cell {
     }
     if (this.customTitle || this.aiTitle || this.titleTries >= 4) return;
     const description = this.promptText || this.title;
-    if (!description) return;
-    this.titleTries++; // Claude gives no title to a prompt like "hi", so each later turn asks again with more text
+    if (!description || description === this.titleAsked) return;
+    this.titleAsked = description;
+    this.titleTries++; // Claude gives no title to a prompt like "hi", so each later prompt asks again with more text
     const reply = await this.control({ subtype: 'generate_session_title', description, persist: true });
+    if (!reply || reply.subtype !== 'success') this.titleAsked = ''; // failed, so the same text may be asked again
     const title = reply && reply.subtype === 'success' && reply.response && reply.response.title;
     if (typeof title === 'string' && title.trim()) {
       this.aiTitle = true;
@@ -308,6 +328,234 @@ class Cell {
     this.cleanBtn.classList.toggle('on', this.clean);
     this.cleanBtn.querySelector('.codicon').className = `codicon codicon-${this.clean ? 'eye-closed' : 'eye'}`;
     this.cleanBtn.title = this.clean ? 'Show tools, thinking and narration' : 'Show only prompts and replies';
+  }
+
+  /** Fades the chat and shows Claude's task list, what it is doing now, and its background work. */
+  setProgressView(on) {
+    this.progressView = on;
+    this.applyProgressView();
+    if (!on) this.scroll();
+    saveState();
+  }
+
+  applyProgressView() {
+    this.el.classList.toggle('progress-view', this.progressView);
+    this.progressBtn.classList.toggle('on', this.progressView);
+    this.progressBtn.title = this.progressView ? 'Back to the chat' : 'Show progress: task list and current work';
+    this.renderProgress();
+  }
+
+  // ---------- progress ----------
+
+  /** A new turn restarts the clock and sets aside a task list that was already finished. */
+  startTurn() {
+    this.turnStart = Date.now();
+    this.turnTools = 0;
+    this.currentTool = null;
+    const list = this.taskItems();
+    if (list.length && list.every(t => t.status === 'completed')) this.tasksStale = true;
+  }
+
+  taskItems() {
+    return [...this.tasks.values(), ...this.taskCreates.values()];
+  }
+
+  /**
+   * Follows Claude's task list the way Claude Code rebuilds it from a transcript: only top-level
+   * calls count, a TaskCreate gets its id from its result, and TodoWrite (the older tool, used
+   * when CLAUDE_CODE_ENABLE_TASKS=false) sends the whole list each time. In HQ sessions Claude
+   * Code only gives these tools to older models (4.6 and earlier, and Haiku 4.5); Sonnet 5.5 and
+   * Opus 5.5 work without a list, so on those the panel relies on Ask Claude for a percentage. HQ
+   * deliberately does not force the tools on (CLAUDE_CODE_ENABLE_TODO_TOOLS).
+   */
+  trackTaskCall(block) {
+    const input = block.input || {};
+    if (block.name === 'TaskCreate' && typeof input.subject === 'string') {
+      if (this.tasksStale) { // the first task after a finished list starts a new list
+        this.tasks.clear();
+        this.taskCreates.clear();
+        this.tasksStale = false;
+      }
+      this.taskCreates.set(block.id, { subject: input.subject, activeForm: input.activeForm || '', status: 'pending' });
+    } else if (block.name === 'TaskUpdate') {
+      const id = String(input.taskId ?? input.id ?? '');
+      if (!id) return;
+      this.tasksStale = false;
+      if (input.status === 'deleted') {
+        this.tasks.delete(id);
+      } else {
+        const old = this.tasks.get(id);
+        this.tasks.set(id, {
+          subject: input.subject || (old && old.subject) || `Task ${id}`,
+          activeForm: input.activeForm || (old && old.activeForm) || '',
+          status: input.status || (old && old.status) || 'pending',
+        });
+      }
+    } else if (block.name === 'TodoWrite' && Array.isArray(input.todos)) {
+      this.tasks = new Map(input.todos.map((t, i) => [String(i), { subject: t.content || '', activeForm: t.activeForm || '', status: t.status || 'pending' }]));
+      this.taskCreates.clear();
+      this.tasksStale = false;
+    }
+  }
+
+  /** TaskCreate's result names the new task: "Task #3 created successfully: …". */
+  settleTaskCreate(block) {
+    const task = this.taskCreates.get(block.tool_use_id);
+    if (!task) return;
+    const id = toolResultText(block.content).match(/^Task #(\S+) created successfully/);
+    if (!block.is_error && !id) return; // unrecognised reply: keep showing it, as Claude Code does
+    this.taskCreates.delete(block.tool_use_id);
+    if (id && !this.tasks.has(id[1])) this.tasks.set(id[1], task);
+    this.renderProgress();
+  }
+
+  /** task_progress: a running agent's latest tool, tool count and summary. */
+  onTaskProgress(m) {
+    if (!m.task_id) return;
+    const u = m.usage || {};
+    this.taskProgress.set(String(m.task_id), {
+      toolUseId: m.tool_use_id || null,
+      description: firstLine(m.description || '', 120),
+      toolUses: Number.isFinite(u.tool_uses) ? u.tool_uses : null,
+      durationMs: Number.isFinite(u.duration_ms) ? u.duration_ms : null,
+      lastTool: typeof m.last_tool_name === 'string' ? m.last_tool_name : '',
+      summary: typeof m.summary === 'string' ? firstLine(m.summary, 200) : '',
+    });
+    this.renderProgress();
+  }
+
+  /** Forgets agents that are neither in the background list nor a tool call still running. */
+  pruneTaskProgress() {
+    for (const [id, p] of this.taskProgress) {
+      const t = p.toolUseId && this.tools.get(p.toolUseId);
+      if (!this.bgTasks.some(x => x.id === id) && !(t && t.item.classList.contains('pending'))) this.taskProgress.delete(id);
+    }
+  }
+
+  /** Asks Claude, beside the running turn, how far it is; Claude answers without stopping its work. */
+  async askStatus() {
+    if (this.proc == null || (this.statusAnswer && this.statusAnswer.asking)) return;
+    this.statusAnswer = { ...this.statusAnswer, asking: true };
+    this.renderProgress();
+    const reply = await this.control({ subtype: 'side_question', question: STATUS_QUESTION });
+    const r = reply && reply.subtype === 'success' && reply.response;
+    let text = r && typeof r.response === 'string' ? r.response.trim() : '';
+    let percent = null;
+    const m = text.match(/^\s*Progress:\s*(\d{1,3})\s*%[^\n]*\n?/i);
+    if (m) {
+      percent = Math.min(100, Number(m[1]));
+      text = text.slice(m[0].length).trim();
+    }
+    const error = !text && percent == null;
+    if (error) text = reply && reply.subtype === 'error' ? `Could not ask: ${reply.error || 'rejected by Claude'}` : 'Claude gave no answer.';
+    this.statusAnswer = { text, percent, error, at: Date.now(), asking: false };
+    this.renderProgress();
+  }
+
+  /** The elapsed time ticks once a second while the panel is open and Claude is working. */
+  syncProgressTimer() {
+    const need = this.progressView && (this.status === 'running' || this.bgTasks.length > 0);
+    if (need && !this.progressTimer) {
+      this.progressTimer = setInterval(() => {
+        const el = this.progressEl.querySelector('.pv-elapsed');
+        if (el && this.turnStart) el.textContent = formatDuration(Date.now() - this.turnStart);
+      }, 1000);
+    } else if (!need && this.progressTimer) {
+      clearInterval(this.progressTimer);
+      this.progressTimer = null;
+    }
+  }
+
+  renderProgress() {
+    if (this.replaying) return; // loadHistory draws it once the transcript is in
+    const list = this.taskItems();
+    const live = list.length > 0 && !this.tasksStale;
+    const done = list.filter(t => t.status === 'completed').length;
+    const active = list.filter(t => t.status === 'in_progress').length;
+    const taskPct = list.length ? Math.round(((done + active / 2) / list.length) * 100) : 0;
+    const running = this.status === 'running';
+    // A thin bar along the header, so progress shows in the grid without opening the panel.
+    const headBar = live && (running || taskPct < 100);
+    this.headBar.classList.toggle('hidden', !headBar);
+    if (headBar) this.headBar.style.setProperty('--pct', `${taskPct}%`);
+    this.syncProgressTimer();
+    if (!this.progressView) return;
+
+    const waiting = this.pending.size > 0;
+    const [state, stateCls] = waiting ? ['Waiting for you', 'waiting']
+      : running ? ['Working', 'running']
+      : this.bgTasks.length ? ['Background work running', 'bg']
+      : this.status === 'exited' ? ['Stopped', 'exited']
+      : ['Idle', ''];
+    const answer = this.statusAnswer;
+    const estimate = answer && answer.percent != null && this.turnStart && answer.at >= this.turnStart ? answer.percent : null;
+    const pct = live ? taskPct : estimate;
+    const barLabel = live ? `${taskPct}%  ·  ${done} of ${list.length} tasks done`
+      : estimate != null ? `About ${estimate}%  ·  Claude's estimate`
+      : running ? 'No task list. Ask Claude for a rough percentage.' : '';
+
+    const ask = h('button', { class: 'btn pv-ask', disabled: this.proc == null || (answer && answer.asking),
+      title: this.proc == null ? 'Claude starts when you send a message' : 'Ask Claude what it is doing and what is left, without stopping it' },
+    icon(answer && answer.asking ? 'loading codicon-modifier-spin' : 'comment-discussion'), answer && answer.asking ? 'Asking…' : 'Ask Claude');
+    ask.addEventListener('click', () => this.askStatus());
+
+    const turnActive = (running || waiting) && this.turnStart;
+    const head = h('div', { class: 'pv-head' },
+      h('span', { class: `pv-state ${stateCls}` }, h('span', { class: 'pv-dot' }), state),
+      turnActive ? h('span', { class: 'pv-elapsed', text: formatDuration(Date.now() - this.turnStart) }) : null,
+      turnActive && this.turnTools ? h('span', { text: `${this.turnTools} tool call${this.turnTools === 1 ? '' : 's'}` }) : null,
+      h('span', { class: 'spacer' }),
+      ask);
+
+    let bar = null;
+    if (pct != null || running) {
+      const fill = h('span');
+      if (pct != null) fill.style.setProperty('--pct', `${pct}%`);
+      bar = h('div', { class: 'pv-progress' }, h('div', { class: `pv-bar${pct == null ? ' indeterminate' : ''}` }, fill),
+        barLabel ? h('div', { class: 'pv-label', text: barLabel }) : null);
+    }
+
+    let now = null;
+    if (waiting) now = h('div', { class: 'pv-now' }, icon('bell'), 'Claude needs your answer or permission below.');
+    else if (running) {
+      const t = this.currentTool;
+      now = h('div', { class: 'pv-now' }, icon('debug-stackframe'),
+        t ? [h('span', { class: 'tname', text: t.name }), h('span', { class: 'targ', text: t.summary })] : h('span', { text: 'Thinking or writing' }));
+    }
+
+    let tasks = null;
+    if (list.length) {
+      const iconFor = { completed: 'pass-filled', in_progress: 'loading codicon-modifier-spin', pending: 'circle-large-outline' };
+      tasks = h('div', { class: 'pv-section' },
+        h('div', { class: 'pv-title', text: this.tasksStale ? 'Previous task list' : 'Tasks' }),
+        h('ul', { class: `pv-tasks${this.tasksStale ? ' stale' : ''}` }, list.map(t => h('li', { class: t.status },
+          icon(iconFor[t.status] || 'circle-large-outline'),
+          h('span', { text: t.status === 'in_progress' && t.activeForm ? t.activeForm : t.subject }),
+        ))));
+    }
+
+    const agents = this.bgTasks.map(t => ({ label: `${BG_LABELS[t.type] || 'Task'}: ${t.description}`, p: this.taskProgress.get(t.id) }));
+    for (const [id, p] of this.taskProgress) {
+      if (!this.bgTasks.some(t => t.id === id)) agents.push({ label: `Agent: ${p.description}`, p });
+    }
+    const agentsEl = agents.length ? h('div', { class: 'pv-section' },
+      h('div', { class: 'pv-title', text: 'Agents and shells' }),
+      h('ul', { class: 'pv-agents' }, agents.map(({ label, p }) => {
+        const detail = p ? [p.lastTool && `last: ${p.lastTool}`, p.toolUses != null && `${p.toolUses} tool uses`,
+          p.durationMs != null && formatDuration(p.durationMs)].filter(Boolean).join('  ·  ') : '';
+        return h('li', null, h('span', { class: 'codicon codicon-loading codicon-modifier-spin' }),
+          h('div', null, h('div', { text: label }), detail ? h('div', { class: 'desc', text: detail }) : null,
+            p && p.summary ? h('div', { class: 'desc', text: p.summary }) : null));
+      }))) : null;
+
+    const answerEl = answer && answer.at ? h('div', { class: 'pv-section' },
+      h('div', { class: 'pv-title' }, 'Claude says', stamp(answer.at)),
+      h('div', { class: `pv-answer${answer.error ? ' error' : ''}`, text: answer.text })) : null;
+
+    const empty = !bar && !now && !tasks && !agentsEl
+      ? h('div', { class: 'pv-empty', text: 'Nothing is running. Progress shows here while Claude works.' }) : null;
+
+    this.progressEl.replaceChildren(...[head, bar, now, tasks, agentsEl, answerEl, empty].filter(Boolean));
   }
 
   // ---------- images ----------
@@ -500,6 +748,7 @@ class Cell {
   // ---------- state ----------
 
   setStatus(status) {
+    if (status === 'running' && this.status !== 'running') this.startTurn();
     this.status = status;
     this.refreshState();
   }
@@ -519,6 +768,7 @@ class Cell {
       const lines = this.bgTasks.map(t => `${BG_LABELS[t.type] || 'Task'}: ${t.description}`);
       this.bgEl.title = ['Running in the background:', ...lines].join('\n');
     }
+    this.renderProgress();
     updateSummary();
   }
 
@@ -529,6 +779,7 @@ class Cell {
 
   setBackground(tasks) {
     this.bgTasks = tasks;
+    this.pruneTaskProgress();
     this.refreshState();
   }
 
@@ -544,7 +795,9 @@ class Cell {
       t.item.classList.remove('bg');
       if (m.status === 'failed') t.item.classList.replace('ok', 'err');
     }
+    this.taskProgress.delete(String(m.task_id));
     if (this.bgTasks.some(x => x.id === m.task_id)) this.setBackground(this.bgTasks.filter(x => x.id !== m.task_id));
+    else this.renderProgress();
   }
 
   markUnread() {
@@ -686,6 +939,7 @@ ${text}`.trim().slice(0, 2000);
     if (this.proc != null) invoke('kill_session', { id: this.proc });
     this.proc = null;
     clearTimeout(this.renderTimer);
+    clearInterval(this.progressTimer);
   }
 
   // ---------- protocol ----------
@@ -732,12 +986,16 @@ ${text}`.trim().slice(0, 2000);
       }
       if (changed) saveState();
       if (this.status !== 'running') this.setStatus('running');
+      // A pending rename waits for the turn's end, when Claude's transcript surely exists.
+      if (!this.renamePending) this.syncTitle();
     } else if (m.subtype === 'compact_boundary') {
       this.notice('Conversation compacted');
     } else if (m.subtype === 'background_tasks_changed') {
       this.setBackground(sanitizeTasks(m.tasks)); // Claude's full list, sent whenever it changes
     } else if (m.subtype === 'task_started' || m.subtype === 'task_notification') {
       this.onTaskEvent(m);
+    } else if (m.subtype === 'task_progress') {
+      this.onTaskProgress(m);
     }
   }
 
@@ -870,8 +1128,14 @@ ${text}`.trim().slice(0, 2000);
   }
 
   addTool(block, parent) {
-    if (!parent) this.demoteTurnTexts();
     const name = block.name || 'tool';
+    if (!parent) {
+      this.demoteTurnTexts();
+      this.turnTools++;
+      this.currentTool = { id: block.id, name, summary: toolSummary(name, block.input, this.cwd) };
+      this.trackTaskCall(block);
+      this.renderProgress();
+    }
     if (name === 'AskUserQuestion' && !parent) return this.addQuestion(block);
     const summary = h('summary', null,
       h('span', { class: 'tname', text: name }),
@@ -933,6 +1197,7 @@ ${text}`.trim().slice(0, 2000);
       if (t.qa && t.item.classList.contains('pending')) t.qa.answerEl.textContent = 'No answer';
       t.item.classList.remove('pending');
     }
+    this.currentTool = null;
   }
 
   onUser(m, replay) {
@@ -950,6 +1215,11 @@ ${text}`.trim().slice(0, 2000);
     const structured = lone ? m.tool_use_result || m.toolUseResult : null;
     for (const block of content) {
       if (block.type === 'tool_result') {
+        this.settleTaskCreate(block);
+        if (this.currentTool && this.currentTool.id === block.tool_use_id) {
+          this.currentTool = null;
+          this.renderProgress();
+        }
         const t = this.tools.get(block.tool_use_id);
         if (!t) continue;
         if (t.qa) { this.answerQuestion(t, block, structured); continue; }
@@ -980,6 +1250,7 @@ ${text}`.trim().slice(0, 2000);
     this.finishLive();
     this.closeTurn(m.subtype === 'success' && !m.is_error);
     this.settleTools();
+    this.pruneTaskProgress();
     for (const id of [...this.pending.keys()]) this.dropPrompt(id); // a finished turn has nothing left to approve
     if (m.is_error && m.subtype !== 'error_during_execution') {
       const detail = m.result || (m.errors && m.errors.join('\n')) || m.subtype;
@@ -1168,11 +1439,14 @@ ${text}`.trim().slice(0, 2000);
     }
     const prevStick = this.stickToBottom;
     this.stickToBottom = false;
+    this.replaying = true;
     for (const line of lines) {
       try { this.handle(JSON.parse(line), true); } catch { /* skip malformed line */ }
     }
+    this.replaying = false;
     this.closeTurn(true);
     this.settleTools();
+    this.renderProgress();
     this.stickToBottom = prevStick;
     this.setTitle(this.title);
     saveState(); // keeps a title recovered from the transcript
@@ -1263,6 +1537,19 @@ function parseAnswers(text) {
 }
 
 const BG_LABELS = { local_agent: 'Agent', local_bash: 'Shell' };
+
+// Sent as a side question (like /btw), so Claude answers beside the running turn without stopping it.
+const STATUS_QUESTION = 'Progress check from the user\'s dashboard. Reply in exactly this form: a first line "Progress: N%" '
+  + 'with your rough estimate of how much of the current request is done, then at most three short sentences on what '
+  + 'you are doing now and what is left. If nothing is in progress, say so.';
+
+/** 45s, 3m 12s, 1h 04m. */
+function formatDuration(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
+  return `${Math.floor(s / 3600)}h ${String(Math.floor(s / 60) % 60).padStart(2, '0')}m`;
+}
 
 function sanitizeTasks(tasks) {
   return (Array.isArray(tasks) ? tasks : []).filter(t => t && t.task_id).map(t => ({
@@ -2202,6 +2489,7 @@ function flushState() {
       customTitle: c.customTitle || undefined,
       renamePending: c.renamePending || undefined,
       clean: c.clean || undefined,
+      progress: c.progressView || undefined,
       fork: c.fork || undefined,
     })),
     recent: app.recent,
