@@ -16,12 +16,13 @@ const app = {
   maximized: null,
   recent: [],
   models: [],          // model list from the last initialize reply, so idle cells can offer it too
+  defaults: {},        // permission mode, model and effort last picked, for new sessions
   sidebarOpen: false,
   query: '',
 };
 
 // Which copy of HQ this is (see build_info in main.rs); filled in by restore().
-let build = { profile: null, version: '', liveUi: false };
+let build = { profile: null, version: '', liveUi: false, updatable: false };
 
 // Shown until a session has started once and reported the real list.
 const FALLBACK_MODELS = [
@@ -31,6 +32,24 @@ const FALLBACK_MODELS = [
   { value: 'haiku', displayName: 'Haiku' },
 ];
 const ALL_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+// Claude Code only updates itself from interactive sessions, and HQ runs it headless, so HQ
+// runs `claude update` before the first session starts and again once the last run is old.
+// New models reach the model menu this way, since the menu lists what the CLI reports.
+const CLAUDE_UPDATE_EVERY_MS = 6 * 60 * 60 * 1000;
+const CLAUDE_UPDATE_WAIT_MS = 150 * 1000;
+const claudeUpdate = { promise: null, at: 0, done: false };
+
+function updateClaude() {
+  if (claudeUpdate.promise && Date.now() - claudeUpdate.at < CLAUDE_UPDATE_EVERY_MS) return claudeUpdate.promise;
+  claudeUpdate.at = Date.now();
+  const run = invoke('update_claude')
+    .then(out => console.info('claude update:', out), err => console.warn('claude update failed:', err))
+    .finally(() => { if (claudeUpdate.promise === run) claudeUpdate.done = true; });
+  claudeUpdate.promise = run;
+  claudeUpdate.done = false;
+  return run;
+}
 
 let reqSeq = 0;
 const nextRequestId = () => `hq-${Date.now().toString(36)}-${++reqSeq}`;
@@ -118,7 +137,7 @@ class Cell {
     el.querySelector('.act-code').addEventListener('click', () => invoke('open_in_vscode', { path: this.cwd }).catch(err => this.notice(String(err), true)));
     el.querySelector('.act-send').addEventListener('click', () => this.submit());
     this.stopBtn.addEventListener('click', () => this.interrupt());
-    this.modeSel.addEventListener('change', () => this.setMode(this.modeSel.value));
+    this.modeSel.addEventListener('change', () => this.setMode(this.modeSel.value).then(() => rememberChoice({ permissionMode: this.permissionMode })));
     this.modelBtn.addEventListener('click', () => openMenu(this.modelBtn, this, menuEl => this.buildModelMenu(menuEl)));
     this.mcpBtn.addEventListener('click', () => {
       openMenu(this.mcpBtn, this, menuEl => this.buildMcpMenu(menuEl));
@@ -401,7 +420,7 @@ class Cell {
     menuEl.append(h('div', { class: 'menu-title', text: 'Model' }));
     for (const m of list) {
       const checked = m.value === current;
-      menuEl.append(h('button', { class: `menu-item${checked ? ' checked' : ''}`, onclick: () => this.setModel(m.value) },
+      menuEl.append(h('button', { class: `menu-item${checked ? ' checked' : ''}`, onclick: () => this.setModel(m.value).then(() => rememberChoice({ model: this.modelChoice })) },
         icon(checked ? 'check' : 'blank'),
         h('span', { class: 'menu-main' }, h('span', { class: 'name', text: m.displayName || m.value }), m.description ? h('span', { class: 'desc', text: m.description }) : null)));
     }
@@ -413,7 +432,7 @@ class Cell {
     }
     const active = this.effort || this.appliedEffort;
     menuEl.append(h('div', { class: 'segmented' }, levels.map(level =>
-      h('button', { class: level === active ? 'on' : '', onclick: () => this.setEffort(level) }, level))));
+      h('button', { class: level === active ? 'on' : '', onclick: () => this.setEffort(level).then(() => rememberChoice({ effort: this.effort })) }, level))));
     if (!this.effort) menuEl.append(h('div', { class: 'menu-note', text: active ? `Using your default (${active}).` : 'Using your default effort.' }));
   }
 
@@ -542,6 +561,10 @@ class Cell {
     if (this.proc != null) return true;
     if (this.spawning) return this.spawning;
     this.spawning = (async () => {
+      const update = updateClaude();
+      if (!claudeUpdate.done) this.metaEl.textContent = 'Updating Claude Code…';
+      await withTimeout(update, CLAUDE_UPDATE_WAIT_MS);
+      if (this.metaEl.textContent === 'Updating Claude Code…') this.metaEl.textContent = '';
       const channel = new Channel();
       channel.onmessage = line => this.onLine(line);
       try {
@@ -1206,6 +1229,15 @@ function sanitizeModels(models) {
   }));
 }
 
+/** Keeps the saved permission mode, model and effort only when they are strings. */
+function sanitizeDefaults(d) {
+  const out = {};
+  for (const key of ['permissionMode', 'model', 'effort']) {
+    if (d && typeof d[key] === 'string' && d[key]) out[key] = d[key];
+  }
+  return out;
+}
+
 /** Which of a question's options an answer ("label, label, typed text") picked, and any typed text left over. */
 function splitAnswer(answer, options) {
   let rest = `, ${answer}, `;
@@ -1299,9 +1331,19 @@ document.addEventListener('mousedown', e => {
 // Board: add / remove / focus / layout
 // ======================================================================================
 
+/** Cells in the same folder belong to one project; they share a color and sit together. */
+const projectKey = path => normPath(path).toLowerCase();
+
+/**
+ * Adds a cell right after the last open cell of its project, so the grid, the sessions list
+ * and the Ctrl+1..9 keys show sessions grouped by project, projects in the order first opened.
+ */
 function addCell(opts, { restore = false } = {}) {
   const cell = new Cell(opts);
-  app.cells.push(cell);
+  const key = projectKey(cell.cwd);
+  const last = app.cells.findLastIndex(c => projectKey(c.cwd) === key);
+  if (last >= 0) app.cells.splice(last + 1, 0, cell);
+  else app.cells.push(cell);
   layout();
   focusCell(cell, true);
   // Claude starts on the first message, so an empty cell costs no claude process.
@@ -1310,6 +1352,18 @@ function addCell(opts, { restore = false } = {}) {
   saveState();
   renderSidebar();
   return cell;
+}
+
+/** Opens a new session with the permission mode, model and effort the user picked last. */
+function addNewCell(opts, flags) {
+  const { permissionMode = 'default', model = null, effort = null } = app.defaults;
+  return addCell({ permissionMode, model, effort, ...opts }, flags);
+}
+
+/** Remembers a permission mode, model or effort picked in a cell, as the default for new sessions. */
+function rememberChoice(choice) {
+  app.defaults = { ...app.defaults, ...choice };
+  saveState();
 }
 
 function closeCell(cell) {
@@ -1577,7 +1631,7 @@ async function openPicker() {
       saveState();
       openPicker();
     });
-    list.append(h('button', { class: 'picker-item', 'data-path': path, onclick: () => { closePicker(); addCell({ cwd: path }); } },
+    list.append(h('button', { class: 'picker-item', 'data-path': path, onclick: () => { closePicker(); addNewCell({ cwd: path }); } },
       icon('folder'), h('span', { class: 'name', text: baseName(path) || path }), h('span', { class: 'path', text: path }), forget));
   });
   pickerIndex = -1;
@@ -1593,7 +1647,7 @@ function closePicker() {
 async function browseFolder() {
   closePicker();
   const path = await invoke('pick_folder').catch(() => null);
-  if (path) addCell({ cwd: path });
+  if (path) addNewCell({ cwd: path });
 }
 
 function rememberFolder(path) {
@@ -1707,7 +1761,7 @@ function resumeSession(info, fork) {
   const open = app.cells.find(c => c.sessionId === info.sessionId);
   if (open && !fork) { revealCell(open); return; }
   rememberFolder(info.cwd);
-  const cell = addCell({ cwd: info.cwd, sessionId: info.sessionId, title: info.title || info.lastPrompt || '', fork }, { restore: true });
+  const cell = addNewCell({ cwd: info.cwd, sessionId: info.sessionId, title: info.title || info.lastPrompt || '', fork }, { restore: true });
   // Read by loadHistory once the transcript is drawn, so it lands at the bottom where it is seen.
   if (!fork && Date.now() - info.modifiedMs < RECENTLY_ACTIVE_MS) {
     cell.resumeWarning = `This session changed ${timeAgo(info.modifiedMs)}. If it is still open in VS Code or a terminal, close it there before you send a message here.`;
@@ -1816,7 +1870,10 @@ function refreshUsage(preferred) {
       const r = await withTimeout(cell.control({ subtype: 'get_usage' }), 15000);
       if (r && r.subtype === 'success') reply = r.response;
     }
-    if (!reply) reply = JSON.parse(await invoke('probe_usage'));
+    if (!reply) {
+      await withTimeout(updateClaude(), CLAUDE_UPDATE_WAIT_MS); // the probe must not start claude mid-update
+      reply = JSON.parse(await invoke('probe_usage'));
+    }
     usage.data = sanitizeUsage(reply);
     usage.error = null;
     usage.fetchedAt = Date.now();
@@ -1946,20 +2003,27 @@ const UPDATE_EVERY_MS = 4 * 60 * 60 * 1000;
 // active window, since the user may be reading it.
 const UPDATE_QUIET_MS = 2 * 60 * 1000;
 const UPDATE_QUIET_FOCUSED_MS = 15 * 60 * 1000;
-const updater = { ready: null, checking: false, installing: false, lastInput: Date.now(), confirmTimer: null };
+// `wanted`: the user asked to update while sessions were busy, so it installs as soon as they finish.
+const updater = { ready: null, checking: null, installing: false, wanted: false, lastInput: Date.now() };
 
-async function checkForUpdate() {
-  if (updater.checking || updater.installing) return;
-  updater.checking = true;
-  try {
-    const info = await invoke('check_update');
-    if (info) updater.ready = info;
-  } catch (err) {
-    console.warn('update check failed', err); // offline, or no release yet: the next check tries again
-  } finally {
-    updater.checking = false;
-  }
-  renderUpdate();
+/** Resolves with the error text when the check fails, else null. */
+function checkForUpdate() {
+  if (updater.installing) return Promise.resolve(null);
+  if (updater.checking) return updater.checking;
+  updater.checking = (async () => {
+    try {
+      const info = await invoke('check_update');
+      if (info) updater.ready = info;
+      return null;
+    } catch (err) {
+      console.warn('update check failed', err); // offline, or no release yet: the next check tries again
+      return String(err);
+    } finally {
+      updater.checking = null;
+      renderUpdate();
+    }
+  })();
+  return updater.checking;
 }
 
 /**
@@ -1970,8 +2034,12 @@ async function checkForUpdate() {
 function safeToRestart() {
   if (Date.now() - updater.lastInput < (document.hasFocus() ? UPDATE_QUIET_FOCUSED_MS : UPDATE_QUIET_MS)) return false;
   if (!picker.classList.contains('hidden') || !resumer.classList.contains('hidden') || menuState.anchor) return false;
-  return app.cells.every(c => !c.busy() && !c.spawning && !c.unread && !c.renaming
-    && !c.input.value.trim() && !c.attachments.length);
+  return sessionsIdle() && app.cells.every(c => !c.unread);
+}
+
+/** No turn, prompt or background task running, and no unsent text or images that a restart would lose. */
+function sessionsIdle() {
+  return app.cells.every(c => !c.busy() && !c.spawning && !c.renaming && !c.input.value.trim() && !c.attachments.length);
 }
 
 function busyCount() {
@@ -2001,25 +2069,41 @@ function renderUpdate() {
   if (updater.installing) {
     text.textContent = 'Updating…';
     updatePill.title = `Installing HQ ${version}. HQ restarts when it is done.`;
-  } else if (updater.confirmTimer) {
+  } else if (updater.wanted) {
     const n = busyCount();
-    text.textContent = `Click again to stop ${n} session${n === 1 ? '' : 's'} and update`;
-    updatePill.title = 'Claude is working. Updating now stops it; the sessions can be resumed afterwards.';
+    text.textContent = n ? `Updates when ${n === 1 ? '1 session finishes' : `${n} sessions finish`}` : 'Updates once unsent messages are sent';
+    updatePill.title = `HQ ${version} installs as soon as no session is working and no message is left unsent. Click to cancel.`;
   } else {
     text.textContent = `Update to ${version}`;
     updatePill.title = `HQ ${version} is ready (you have ${currentVersion}). It installs by itself when no session is busy, or when you close HQ. Click to install now.`;
   }
 }
 
+// Updating never stops a session: while any is busy, a click queues the update instead.
 updatePill.addEventListener('click', () => {
-  if (busyCount() && !updater.confirmTimer) {
-    updater.confirmTimer = setTimeout(() => { updater.confirmTimer = null; renderUpdate(); }, 4000);
+  if (updater.installing) return;
+  if (updater.wanted || !sessionsIdle()) {
+    updater.wanted = !updater.wanted;
     renderUpdate();
     return;
   }
-  clearTimeout(updater.confirmTimer);
-  updater.confirmTimer = null;
   installUpdate();
+});
+
+const checkUpdateBtn = $('#check-update');
+checkUpdateBtn.addEventListener('click', async () => {
+  clearTimeout(checkUpdateBtn.resetTimer);
+  if (!build.updatable) {
+    checkUpdateBtn.textContent = 'This copy does not update';
+  } else {
+    checkUpdateBtn.disabled = true;
+    checkUpdateBtn.textContent = 'Checking…';
+    const err = await checkForUpdate();
+    checkUpdateBtn.disabled = false;
+    checkUpdateBtn.textContent = err ? 'Check failed' : updater.ready ? `${updater.ready.version} is ready` : 'Up to date';
+    checkUpdateBtn.title = err || '';
+  }
+  checkUpdateBtn.resetTimer = setTimeout(() => { checkUpdateBtn.textContent = 'Check for updates'; checkUpdateBtn.title = ''; }, 6000);
 });
 
 for (const type of ['keydown', 'pointerdown', 'wheel']) {
@@ -2027,8 +2111,8 @@ for (const type of ['keydown', 'pointerdown', 'wheel']) {
 }
 setInterval(checkForUpdate, UPDATE_EVERY_MS);
 setInterval(() => {
-  if (updater.ready && !updater.installing && safeToRestart()) installUpdate();
-}, 30 * 1000);
+  if (updater.ready && !updater.installing && (updater.wanted ? sessionsIdle() : safeToRestart())) installUpdate();
+}, 5 * 1000);
 
 // ======================================================================================
 // Keyboard
@@ -2119,6 +2203,7 @@ function flushState() {
     })),
     recent: app.recent,
     models: app.models,
+    defaults: app.defaults,
     sidebarOpen: app.sidebarOpen,
   };
   return invoke('save_state', { json: JSON.stringify(state) }).catch(err => console.error('save failed', err));
@@ -2126,7 +2211,9 @@ function flushState() {
 
 async function restore() {
   await invoke('kill_all_sessions').catch(() => {});
+  updateClaude();
   build = await invoke('build_info').catch(() => build);
+  $('#hq-version').textContent = build.version ? `HQ ${build.version}` : 'HQ';
   if (build.profile) {
     const tag = $('#profile');
     tag.textContent = build.profile;
@@ -2142,6 +2229,7 @@ async function restore() {
   }
   app.recent = Array.isArray(state && state.recent) ? state.recent : [];
   app.models = sanitizeModels(state && state.models);
+  app.defaults = sanitizeDefaults(state && (state.defaults || (state.cells || []).at(-1)));
   app.sidebarOpen = !!(state && state.sidebarOpen);
   sidebar.classList.toggle('hidden', !app.sidebarOpen);
   $('#toggle-sidebar').classList.toggle('on', app.sidebarOpen);

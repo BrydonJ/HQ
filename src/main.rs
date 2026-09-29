@@ -93,6 +93,11 @@ async fn probe_usage() -> Result<String, String> {
 }
 
 #[tauri::command]
+async fn update_claude() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(session::update_claude).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 fn open_url(app: AppHandle, url: String) -> Result<(), String> {
     if !(url.starts_with("https://") || url.starts_with("http://")) {
         return Err("only http(s) links can be opened".into());
@@ -148,6 +153,8 @@ struct BuildInfo {
     version: String,
     /// The UI is read from `ui/` on each load, so a reload shows edits without a rebuild.
     live_ui: bool,
+    /// Whether this copy installs updates (the installed app, or a test build that opts in).
+    updatable: bool,
 }
 
 struct Profile(Option<String>);
@@ -158,6 +165,7 @@ fn build_info(app: AppHandle, profile: State<'_, Profile>) -> BuildInfo {
         profile: profile.0.clone(),
         version: app.package_info().version.to_string(),
         live_ui: cfg!(debug_assertions),
+        updatable: update::updates_enabled(),
     }
 }
 
@@ -215,6 +223,7 @@ fn main() {
             load_transcript,
             list_sessions,
             probe_usage,
+            update_claude,
             open_url,
             reveal_folder,
             open_in_vscode,

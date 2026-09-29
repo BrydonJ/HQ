@@ -43,7 +43,7 @@ pub fn is_installed() -> bool {
 }
 
 /// `HQ_NO_UPDATE` turns updates off; `HQ_UPDATE_ANY_COPY` allows them for a test build.
-fn updates_enabled() -> bool {
+pub fn updates_enabled() -> bool {
     if std::env::var_os("HQ_NO_UPDATE").is_some() {
         return false;
     }

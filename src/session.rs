@@ -115,6 +115,36 @@ pub fn probe_usage() -> Result<String, String> {
     Ok(response["response"].to_string())
 }
 
+/// Runs `claude update` and returns what it printed. HQ only starts headless (`-p`) sessions,
+/// so it calls this before sessions start rather than waiting on Claude's own auto-update.
+///
+/// The updater is left out of any job object: if HQ closes or the wait times out, it carries
+/// on and finishes, instead of being killed halfway through replacing the binary.
+pub fn update_claude() -> Result<String, String> {
+    let mut cmd = Command::new(claude_program());
+    cmd.arg("update")
+        .env_remove("CLAUDECODE")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    hide_console(&mut cmd);
+    let child = cmd.spawn().map_err(|e| format!("Could not start `{}` ({e})", claude_program()))?;
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    let output = rx
+        .recv_timeout(Duration::from_secs(120))
+        .map_err(|_| "`claude update` is still running".to_string())?
+        .map_err(|e| e.to_string())?;
+    let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    if output.status.success() {
+        Ok(text.trim().to_owned())
+    } else {
+        Err(text.trim().to_owned())
+    }
+}
+
 impl Sessions {
     pub fn spawn(&self, app: &AppHandle, opts: SpawnOptions, events: Channel<String>) -> Result<u64, String> {
         if !Path::new(&opts.cwd).is_dir() {
