@@ -102,11 +102,12 @@ pub struct SessionInfo {
 /// session goes, so the newest copies sit near the end; the start is only read as a fallback.
 const SCAN_BYTES: u64 = 256 * 1024;
 
-/// Lists the most recently used sessions across every project folder, newest first.
+/// Lists the most recently used sessions across every project folder, newest first, or only
+/// those whose folder is `cwd`.
 ///
 /// The transcript format is internal to Claude Code, so every field is optional and a
 /// transcript that cannot be read is skipped rather than failing the whole list.
-pub fn list_sessions(limit: usize) -> Result<Vec<SessionInfo>, String> {
+pub fn list_sessions(limit: usize, cwd: Option<&str>) -> Result<Vec<SessionInfo>, String> {
     let projects = claude_config_dir().ok_or("cannot locate Claude config folder")?.join("projects");
     let mut files: Vec<(PathBuf, SystemTime)> = Vec::new();
     for dir in fs::read_dir(&projects).map_err(|e| format!("{}: {e}", projects.display()))?.flatten() {
@@ -124,7 +125,19 @@ pub fn list_sessions(limit: usize) -> Result<Vec<SessionInfo>, String> {
         }
     }
     files.sort_by(|a, b| b.1.cmp(&a.1));
-    Ok(files.into_iter().filter_map(|(path, modified)| read_session_info(&path, modified)).take(limit).collect())
+    // Lazy, so reading stops once `limit` sessions are found.
+    let wanted = cwd.map(folder_key);
+    Ok(files
+        .into_iter()
+        .filter_map(|(path, modified)| read_session_info(&path, modified))
+        .filter(|info| wanted.as_ref().is_none_or(|w| folder_key(&info.cwd) == *w))
+        .take(limit)
+        .collect())
+}
+
+/// Compares folders the way the UI does: either slash, no trailing slash, any case.
+fn folder_key(path: &str) -> String {
+    path.replace('/', "\\").trim_end_matches('\\').to_lowercase()
 }
 
 fn is_session_id(s: &str) -> bool {
@@ -242,4 +255,81 @@ pub fn find_vscode() -> Option<PathBuf> {
         }
     }
     candidates.into_iter().find(|p| p.is_file())
+}
+
+pub fn is_workspace_file(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("code-workspace"))
+}
+
+/// A `.code-workspace` file offered for a folder in the VS Code button's menu.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceFile {
+    path: String,
+    /// The workspace lists the folder among its own folders.
+    includes_folder: bool,
+}
+
+/// Workspace files in the folder, its parent and `dirs` (where workspaces were picked before),
+/// those that list the folder first.
+pub fn find_workspaces(folder: &str, dirs: &[String]) -> Vec<WorkspaceFile> {
+    let folder_path = Path::new(folder);
+    let mut search: Vec<&Path> = vec![folder_path];
+    search.extend(folder_path.parent());
+    search.extend(dirs.iter().map(Path::new));
+    let wanted = folder_key(folder);
+    let mut seen = std::collections::HashSet::new();
+    let mut found = Vec::new();
+    for dir in search {
+        if !seen.insert(folder_key(&dir.to_string_lossy())) {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(dir) else { continue };
+        for path in entries.flatten().map(|entry| entry.path()) {
+            if !is_workspace_file(&path) || !path.is_file() {
+                continue;
+            }
+            let includes_folder = workspace_folders(&path).iter().any(|f| folder_key(f) == wanted);
+            found.push(WorkspaceFile { path: path.to_string_lossy().into_owned(), includes_folder });
+        }
+    }
+    found.sort_by_key(|w| (!w.includes_folder, w.path.to_lowercase()));
+    found.truncate(30);
+    found
+}
+
+/// The folders a workspace file lists, as full paths. The file is JSON with comments, so the
+/// `"path"` values are picked out by hand instead of parsed; a miss only loses the ranking.
+fn workspace_folders(file: &Path) -> Vec<String> {
+    let Some(base) = file.parent() else { return Vec::new() };
+    let Ok(text) = fs::read_to_string(file) else { return Vec::new() };
+    if text.len() > 256 * 1024 {
+        return Vec::new();
+    }
+    let mut folders = Vec::new();
+    let mut rest = text.as_str();
+    while let Some(i) = rest.find("\"path\"") {
+        rest = &rest[i + 6..];
+        let Some(value) = rest.trim_start().strip_prefix(':').map(str::trim_start).and_then(|r| r.strip_prefix('"')) else { continue };
+        let Some(end) = value.find('"') else { break };
+        let raw = value[..end].replace("\\\\", "\\").replace("\\/", "/");
+        folders.push(resolve(base, &raw));
+    }
+    folders
+}
+
+/// Joins a workspace's relative folder path onto its own folder and folds `.` and `..` away.
+fn resolve(base: &Path, relative: &str) -> String {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for part in base.join(relative).components() {
+        match part {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out.to_string_lossy().into_owned()
 }

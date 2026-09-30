@@ -98,6 +98,8 @@ every installed copy must be reinstalled by hand.
   or the desktop app:
   - It lists the 80 most recent sessions from Claude's own transcripts, newest first.
   - Search by title, prompt or folder, or filter by where the session was last used.
+  - The folder list narrows it to one folder. It then lists that folder's 80 most recent
+    sessions, older ones included, not only those among the 80 newest overall.
   - Click a session to open it in a cell with its history. Claude resumes it (`--resume`) when
     you send a message.
   - A session changed in the last 5 minutes is marked **Active**. Close it in VS Code first,
@@ -115,6 +117,8 @@ every installed copy must be reinstalled by hand.
   use it, so sessions in the same folder are easy to spot.
 - Status cues on each cell:
   - A band of light sweeps across the project name in the cell header: Claude is working.
+    Above the prompt box, a star cycles through the CLI spinner's glyphs next to a verb
+    ("Percolating…") picked for each turn.
   - Pulsing amber glow: Claude is waiting on you (a permission, a question or a plan).
   - Green glow: the session finished while you were looking elsewhere.
   - Spinner badge with a count, and a hollow status dot: background agents or shells that
@@ -153,6 +157,13 @@ every installed copy must be reinstalled by hand.
 - **Questions:** when Claude asks you something, the chat keeps a one-line record of the
   question and your answer. Click it to see every option and which ones you picked. The eye
   button never hides it.
+- **Collapse** (the minimize button in the cell header, or Ctrl+Shift+M) hides a cell's chat and
+  moves its header to a strip under the grid. The other cells take its space.
+  - The header keeps every status cue (dot, sweep, glow, background badge, task bar) and says
+    the state in words: Working, Waiting on you, Finished, and so on.
+  - A reply that finishes while collapsed gets the green glow, even if the cell had focus.
+  - Click the header to expand it. Ctrl+1…9, the sessions list and maximize expand it too.
+  - Keys 1/2/3 and Esc never act on a collapsed cell, since its prompts are not on screen.
 - **Sessions list** (Ctrl+B, or the button at the top left) shows every session in one column:
   - Each row has its status, first prompt and latest reply.
   - Type to search by folder, path, prompt or reply. Press Enter to jump to the first match.
@@ -183,18 +194,27 @@ every installed copy must be reinstalled by hand.
   - Esc: stop the focused session.
   - Ctrl+1…9: focus a cell.
   - Ctrl+M: maximize the focused cell. You can also double-click its header.
+  - Ctrl+Shift+M: collapse or expand the focused cell.
   - Ctrl+W: close the focused cell.
   - Ctrl+B: show or hide the sessions list.
   - Ctrl+O: resume a session from VS Code or the terminal.
   - F2: rename the focused session.
 - The board is saved to `%APPDATA%\dev.brydon.hq\board.json` (`dev.brydon.hq.<profile>` for
   another profile):
-  - It stores each cell's folder, session, mode, model, effort, name and view (all, or
-    prompts and replies only).
+  - It stores each cell's folder, session, mode, model, effort, name, view (all, or prompts
+    and replies only) and whether it is collapsed, plus the VS Code workspace picked for each
+    folder.
   - On restart, each cell shows its history from Claude's own transcript.
   - Claude starts again (`--resume`) only when you send a message, so restored cells use no
     memory until you use them.
 - Header buttons open the cell's folder in VS Code or in Explorer.
+  - Right-click the VS Code button to pick a `.code-workspace` file for the folder. The button
+    then opens that workspace instead, and a small dot marks it. The choice applies to every
+    session in the folder.
+  - The menu lists workspace files in the folder, its parent, and the folders of workspaces
+    picked before. Workspaces that include the folder come first. **Choose a workspace
+    file…** browses for any other.
+  - If the workspace file is gone, the button opens the folder and says so.
 
 Environment overrides:
 
@@ -211,7 +231,8 @@ Environment overrides:
 ```
 src/session.rs   spawns one `claude -p --input-format stream-json ...` per cell; Windows job
                  object kills the whole process tree when a cell (or HQ) closes; usage probe
-src/store.rs     board.json persistence, transcript lookup and session list, VS Code lookup
+src/store.rs     board.json persistence, transcript lookup and session list, VS Code and
+                 workspace lookup
 src/update.rs    self-update: checks and downloads signed releases; installs when told to
 src/main.rs      Tauri commands, profiles, single-instance lock
 src/dev.rs       debug builds only: UI read from disk, DevTools port

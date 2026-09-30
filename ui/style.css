@@ -78,9 +78,10 @@ button, input, select, textarea { font: inherit; color: inherit; }
 
 /* ---------- board / grid ---------- */
 #workspace { display: flex; flex: 1; min-height: 0; }
-#board { position: relative; flex: 1; min-height: 0; min-width: 0; }
+#board { position: relative; display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
 #toggle-sidebar.on { color: var(--fg-strong); }
-#grid { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 6px; padding: 6px; }
+#grid { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 6px; padding: 6px; }
+#grid.all-collapsed::before { content: "Every session is collapsed. Click one below to open it."; margin: auto; color: var(--fg-faint); }
 .row { display: flex; gap: 6px; flex: 1; min-height: 0; }
 #grid.maximized .row:not(.has-max), #grid.maximized .cell:not(.max) { display: none; }
 
@@ -187,12 +188,33 @@ button, input, select, textarea { font: inherit; color: inherit; }
 }
 .bg-tasks .codicon { font-size: 12px; }
 .cell-path { flex: 1 1 0; color: var(--fg-faint); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; direction: rtl; text-align: left; }
+/* The VS Code button opens a workspace picked for this folder: a small dot marks it. */
+.act-code { position: relative; }
+.act-code.linked::after { content: ""; position: absolute; right: 2px; bottom: 2px; width: 5px; height: 5px; border-radius: 50%; background: var(--link); }
+
+/* ---------- collapsed cells: bare headers in the dock under the grid ---------- */
+#dock { flex: none; display: flex; flex-wrap: wrap; gap: 6px; padding: 0 6px 6px; }
+#dock:empty { display: none; }
+#dock .cell { flex: 0 1 300px; min-width: 190px; }
+.cell.collapsed .stage, .cell.collapsed .prompts, .cell.collapsed .composer, .cell.collapsed .cell-path,
+.cell.collapsed .act-clean, .cell.collapsed .act-progress, .cell.collapsed .act-code, .cell.collapsed .act-reveal,
+.cell.collapsed .act-max { display: none; }
+.cell.collapsed .cell-head { border-bottom: 0; cursor: pointer; }
+.cell.collapsed .cell-title { flex: 1 1 0; cursor: pointer; }
+.cell.collapsed .cell-title:hover { background: none; }
+/* The state in words, since a collapsed cell has no chat to show it. */
+.cell-state { display: none; flex: none; color: var(--fg-faint); font-size: 11px; white-space: nowrap; }
+.cell.collapsed .cell-state { display: inline; }
+.cell.state-running .cell-state, .cell.state-bg .cell-state { color: var(--link); }
+.cell.state-waiting .cell-state { color: var(--waiting); }
+.cell.unread .cell-state { color: var(--done); }
+.cell.state-exited .cell-state { color: var(--error); }
 
 /* ---------- messages (timeline like the Claude Code extension) ---------- */
 .stage { position: relative; display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .messages {
   flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden;
-  padding: 10px 12px 6px 12px; user-select: text; transition: opacity 0.2s;
+  padding: 10px 12px 12px 12px; user-select: text; transition: opacity 0.2s; /* the bottom leaves room for .busy */
 }
 
 /* ---------- progress view (the checklist button): the chat fades behind a progress panel ---------- */
@@ -396,9 +418,24 @@ button, input, select, textarea { font: inherit; color: inherit; }
 
 /* ---------- composer ---------- */
 .composer {
-  flex: none; margin: 6px 10px 10px; border: 1px solid var(--border-strong); border-radius: 6px;
+  position: relative; flex: none; margin: 6px 10px 10px; border: 1px solid var(--border-strong); border-radius: 6px;
   background: var(--input-bg);
 }
+/*
+ * Claude is working: a star cycles through the CLI spinner's glyphs above the prompt box, next
+ * to a verb picked each turn, with the same band of light as the project name. It floats in the
+ * gap over the composer, so it never moves the chat, and only opacity and transforms animate.
+ */
+.busy {
+  position: absolute; left: 2px; bottom: calc(100% + 1px); height: 16px; display: none; align-items: center; gap: 5px;
+  padding: 0 6px; font-size: 11.5px; line-height: 16px; white-space: nowrap; pointer-events: none;
+}
+.cell.state-running .busy { display: flex; }
+.busy-glyph { display: inline-grid; width: 12px; justify-items: center; color: var(--claude); font-size: 13px; }
+.busy-glyph > span { grid-area: 1 / 1; opacity: 0; animation: busy-glyph 1.2s step-end infinite; animation-delay: calc(var(--i) * 0.12s); }
+@keyframes busy-glyph { 0% { opacity: 1; } 10%, 100% { opacity: 0; } }
+.busy-verb { position: relative; color: color-mix(in srgb, var(--claude) 75%, var(--fg-muted)); }
+.busy .sweep-name { color: #ffe6db; text-shadow: 0 0 6px rgba(217, 119, 87, 0.9); }
 .composer:focus-within { border-color: var(--accent); }
 .composer textarea {
   display: block; width: 100%; max-height: 200px; resize: none; border: 0; outline: none;
@@ -594,6 +631,14 @@ button, input, select, textarea { font: inherit; color: inherit; }
 }
 .filters button:hover { color: var(--fg); }
 .filters button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.filters select {
+  margin-left: auto; max-width: 240px; padding: 0 4px; border: 1px solid var(--border-strong); border-radius: 10px;
+  background: transparent; color: var(--fg-muted); font-size: 12px; outline: none; cursor: pointer;
+}
+.filters select:hover { color: var(--fg); }
+.filters select:focus-visible { border-color: var(--accent); }
+.filters select.on { border-color: var(--accent); color: var(--fg-strong); }
+.filters select option { background: var(--bg-raised); color: var(--fg); }
 .resume-list { max-height: 60vh; }
 .resume-item {
   display: flex; align-items: center; gap: 8px; width: 100%; margin: 1px 0;

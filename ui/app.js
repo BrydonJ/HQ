@@ -7,6 +7,7 @@ const { invoke, Channel } = window.__TAURI__.core;
 
 const $ = sel => document.querySelector(sel);
 const grid = $('#grid');
+const dock = $('#dock');
 const board = $('#board');
 const MAX_RECENT = 20;
 
@@ -17,6 +18,7 @@ const app = {
   recent: [],
   models: [],          // model list from the last initialize reply, so idle cells can offer it too
   defaults: {},        // permission mode, model and effort last picked, for new sessions
+  workspaces: {},      // projectKey(folder) -> .code-workspace file the VS Code button opens
   sidebarOpen: false,
   query: '',
 };
@@ -32,6 +34,11 @@ const FALLBACK_MODELS = [
   { value: 'haiku', displayName: 'Haiku' },
 ];
 const ALL_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+// Shown above the prompt box while Claude works, one per turn, in the spirit of the CLI's spinner.
+const BUSY_VERBS = ['Brewing', 'Cogitating', 'Clauding', 'Conjuring', 'Deliberating', 'Finagling', 'Hatching', 'Herding',
+  'Marinating', 'Moseying', 'Mulling', 'Musing', 'Noodling', 'Percolating', 'Pondering', 'Puttering', 'Reticulating',
+  'Ruminating', 'Schlepping', 'Simmering', 'Smooshing', 'Stewing', 'Tinkering', 'Transmuting', 'Whirring', 'Wrangling'];
 
 // Claude Code only updates itself from interactive sessions, and HQ runs it headless, so HQ
 // runs `claude update` before the first session starts and again once the last run is old.
@@ -60,7 +67,7 @@ const nextRequestId = () => `hq-${Date.now().toString(36)}-${++reqSeq}`;
 
 class Cell {
   constructor({ cwd, sessionId = null, permissionMode = 'default', model = null, effort = null, title = '', aiTitle = false,
-    customTitle = null, renamePending = false, clean = false, progress = false, fork = false }) {
+    customTitle = null, renamePending = false, clean = false, progress = false, fork = false, collapsed = false }) {
     this.cwd = cwd;
     this.sessionId = sessionId;
     this.fork = !!(fork && sessionId); // resume into a new session ID, leaving the original alone
@@ -79,6 +86,10 @@ class Cell {
     this.renaming = false;
     this.clean = !!clean;          // prompts and replies only (the eye button)
     this.progressView = !!progress; // the progress panel over the chat (the checklist button)
+    this.collapsed = !!collapsed;  // only the header shows, in the dock under the grid
+    this.savedScroll = null;       // [scrollTop, stickToBottom] from when the chat was collapsed
+    this.expandedAt = 0;
+    this.busyWord = '';            // the verb shown above the prompt box this turn
     this.lastReply = '';
     this.color = projectColor(cwd);
     this.attachments = [];         // images waiting to be sent: { mediaType, data, url }
@@ -131,27 +142,41 @@ class Cell {
     this.progressEl = el.querySelector('.progress-panel');
     this.headBar = el.querySelector('.head-progress');
     this.bgEl = el.querySelector('.bg-tasks');
+    this.stateEl = el.querySelector('.cell-state');
+    this.codeBtn = el.querySelector('.act-code');
+    this.collapseBtn = el.querySelector('.act-collapse');
 
     el.style.setProperty('--proj', this.color);
-    for (const name of el.querySelectorAll('.proj-name, .sweep-name')) name.textContent = baseName(this.cwd) || this.cwd;
+    for (const name of el.querySelectorAll('.proj-name, .cell-project .sweep-name')) name.textContent = baseName(this.cwd) || this.cwd;
     el.querySelector('.cell-path').textContent = this.cwd;
     this.modeSel.value = this.permissionMode;
     this.setTitle(this.title);
     this.applyClean();
     this.applyProgressView();
+    this.applyCollapsed();
+    this.stateEl.textContent = stateOf(this)[1];
+    this.renderCodeButton();
     this.updateModelLabel();
 
     el.addEventListener('mousedown', () => focusCell(this, false));
-    el.querySelector('.cell-head').addEventListener('dblclick', e => {
+    const head = el.querySelector('.cell-head');
+    // A collapsed cell opens on a click anywhere in its header except its buttons.
+    head.addEventListener('click', e => {
+      if (this.collapsed && !e.target.closest('button, .cell-rename')) collapseCell(this, false);
+    });
+    head.addEventListener('dblclick', e => {
+      if (Date.now() - this.expandedAt < 600) return; // the first click of this double-click expanded the cell
       if (!e.target.closest('button, .cell-title, .cell-rename')) toggleMaximize(this);
     });
-    this.titleEl.addEventListener('click', () => this.startRename());
+    this.titleEl.addEventListener('click', () => { if (!this.collapsed) this.startRename(); });
     this.cleanBtn.addEventListener('click', () => this.setClean(!this.clean));
     this.progressBtn.addEventListener('click', () => this.setProgressView(!this.progressView));
     el.querySelector('.act-max').addEventListener('click', () => toggleMaximize(this));
     el.querySelector('.act-close').addEventListener('click', e => this.requestClose(e.currentTarget));
     el.querySelector('.act-reveal').addEventListener('click', () => invoke('reveal_folder', { path: this.cwd }).catch(err => this.notice(String(err), true)));
-    el.querySelector('.act-code').addEventListener('click', () => invoke('open_in_vscode', { path: this.cwd }).catch(err => this.notice(String(err), true)));
+    this.codeBtn.addEventListener('click', () => this.openInCode());
+    this.codeBtn.addEventListener('contextmenu', e => { e.preventDefault(); this.openCodeMenu(); });
+    this.collapseBtn.addEventListener('click', () => collapseCell(this, !this.collapsed));
     el.querySelector('.act-send').addEventListener('click', () => this.submit());
     this.stopBtn.addEventListener('click', () => this.interrupt());
     this.modeSel.addEventListener('change', () => this.setMode(this.modeSel.value).then(() => rememberChoice({ permissionMode: this.permissionMode })));
@@ -185,6 +210,7 @@ class Cell {
       el.classList.remove('drag-over');
       if (!e.dataTransfer || !e.dataTransfer.files.length) return;
       e.preventDefault();
+      if (this.collapsed) this.setCollapsed(false);
       focusCell(this, true);
       this.addImages([...e.dataTransfer.files]);
     });
@@ -197,6 +223,7 @@ class Cell {
     });
     this.input.addEventListener('input', () => autoGrow(this.input));
     this.msgs.addEventListener('scroll', () => {
+      if (this.collapsed) return; // a hidden scroller reads as scrolled to the bottom
       const m = this.msgs;
       this.stickToBottom = m.scrollHeight - m.scrollTop - m.clientHeight < 40;
     });
@@ -345,10 +372,104 @@ class Cell {
     this.renderProgress();
   }
 
+  /**
+   * Hides the chat and leaves the header in the dock under the grid. The header keeps every
+   * status cue (dot, sweep, glow, background badge, task bar), and names the state in words.
+   */
+  setCollapsed(on) {
+    if (this.collapsed === on) return;
+    if (on) {
+      this.savedScroll = [this.msgs.scrollTop, this.stickToBottom];
+      if (app.maximized === this) app.maximized = null;
+      if (menuState.cell === this) closeMenu();
+    }
+    this.collapsed = on;
+    this.applyCollapsed();
+    layout();
+    if (!on) {
+      this.expandedAt = Date.now();
+      // Text that arrived while hidden did not scroll, so land where the user left, or at the bottom.
+      const [top, stick] = this.savedScroll || [0, true];
+      this.stickToBottom = stick;
+      this.msgs.scrollTop = stick ? this.msgs.scrollHeight : top;
+    }
+    saveState();
+  }
+
+  applyCollapsed() {
+    this.el.classList.toggle('collapsed', this.collapsed);
+    this.collapseBtn.querySelector('.codicon').className = `codicon codicon-${this.collapsed ? 'chrome-restore' : 'chrome-minimize'}`;
+    this.collapseBtn.title = this.collapsed ? 'Expand (Ctrl+Shift+M)' : 'Collapse to the dock (Ctrl+Shift+M)';
+  }
+
+  // ---------- VS Code ----------
+
+  /** Opens the workspace picked for this folder (right-click the button), else the folder itself. */
+  async openInCode() {
+    const workspace = workspaceFor(this.cwd);
+    if (workspace) {
+      try {
+        await invoke('open_in_vscode', { path: workspace });
+        return;
+      } catch (err) {
+        this.notice(`Could not open ${baseName(workspace)}: ${err}. Opened the folder instead. Right-click the VS Code button to pick another workspace.`, true);
+      }
+    }
+    invoke('open_in_vscode', { path: this.cwd }).catch(err => this.notice(String(err), true));
+  }
+
+  renderCodeButton() {
+    const workspace = workspaceFor(this.cwd);
+    this.codeBtn.classList.toggle('linked', !!workspace);
+    this.codeBtn.title = workspace
+      ? `Open ${baseName(workspace)} in VS Code\nRight-click to change the workspace`
+      : 'Open folder in VS Code\nRight-click to pick a workspace';
+  }
+
+  openCodeMenu() {
+    openMenu(this.codeBtn, this, menuEl => this.buildCodeMenu(menuEl));
+    if (menuState.anchor !== this.codeBtn) return;
+    this.workspaceFiles = null;
+    // Workspaces often sit together in one folder, so wherever one was picked is searched too.
+    invoke('find_workspaces', { path: this.cwd, dirs: workspaceDirs() }).catch(() => []).then(files => {
+      this.workspaceFiles = Array.isArray(files) ? files : [];
+      if (menuState.anchor === this.codeBtn) refreshMenu();
+    });
+  }
+
+  buildCodeMenu(menuEl) {
+    const current = workspaceFor(this.cwd);
+    const files = [...(this.workspaceFiles || [])];
+    if (current && !files.some(f => projectKey(f.path) === projectKey(current))) files.unshift({ path: current, includesFolder: false });
+    const option = (path, name, desc) => {
+      const checked = path ? projectKey(path) === projectKey(current || '') : !current;
+      return h('button', { class: `menu-item${checked ? ' checked' : ''}`, title: path || this.cwd, onclick: () => { closeMenu(); setWorkspace(this.cwd, path); } },
+        icon(checked ? 'check' : 'blank'),
+        h('span', { class: 'menu-main' }, h('span', { class: 'name', text: name }), h('span', { class: 'desc', text: desc })));
+    };
+    menuEl.append(h('div', { class: 'menu-title', text: 'The VS Code button opens' }));
+    menuEl.append(option(null, 'This folder', this.cwd));
+    for (const f of files) menuEl.append(option(f.path, baseName(f.path), f.includesFolder ? `Includes this folder · ${parentDir(f.path)}` : parentDir(f.path)));
+    if (!this.workspaceFiles) menuEl.append(h('div', { class: 'menu-note', text: 'Looking for workspace files…' }));
+    menuEl.append(h('button', { class: 'menu-item', onclick: () => { closeMenu(); this.chooseWorkspace(); } },
+      icon('folder-opened'), h('span', { class: 'menu-main' }, h('span', { class: 'name', text: 'Choose a workspace file…' }))));
+    menuEl.append(h('div', { class: 'menu-note', text: 'Applies to every session in this folder.' }));
+  }
+
+  async chooseWorkspace() {
+    const current = workspaceFor(this.cwd);
+    const dir = current ? parentDir(current) : workspaceDirs()[0] || this.cwd;
+    const path = await invoke('pick_workspace', { dir }).catch(() => null);
+    if (path) setWorkspace(this.cwd, path);
+  }
+
   // ---------- progress ----------
 
   /** A new turn restarts the clock and sets aside a task list that was already finished. */
   startTurn() {
+    const words = BUSY_VERBS.filter(w => `${w}…` !== this.busyWord);
+    this.busyWord = `${words[Math.floor(Math.random() * words.length)]}…`;
+    for (const el of this.el.querySelectorAll('.busy-word')) el.textContent = this.busyWord;
     this.turnStart = Date.now();
     this.turnTools = 0;
     this.currentTool = null;
@@ -763,6 +884,7 @@ class Cell {
     el.classList.toggle('unread', this.unread && !waiting);
     this.stopBtn.classList.toggle('hidden', this.status !== 'running' && !waiting);
     this.bgEl.classList.toggle('hidden', !this.bgTasks.length);
+    this.stateEl.textContent = stateOf(this)[1]; // shown while collapsed, where the chat cannot say it
     if (this.bgTasks.length) {
       this.bgEl.querySelector('.bg-count').textContent = String(this.bgTasks.length);
       const lines = this.bgTasks.map(t => `${BG_LABELS[t.type] || 'Task'}: ${t.description}`);
@@ -801,7 +923,7 @@ class Cell {
   }
 
   markUnread() {
-    const seen = document.hasFocus() && app.focused === this && !document.hidden;
+    const seen = document.hasFocus() && app.focused === this && !this.collapsed && !document.hidden;
     if (!seen) {
       this.unread = true;
       invoke('request_attention').catch(() => {});
@@ -1656,6 +1778,44 @@ function rememberChoice(choice) {
   saveState();
 }
 
+/** The .code-workspace file the VS Code button opens for a folder, if one was picked. */
+function workspaceFor(cwd) {
+  return app.workspaces[projectKey(cwd)] || null;
+}
+
+function setWorkspace(cwd, path) {
+  const key = projectKey(cwd);
+  delete app.workspaces[key]; // re-added last, so workspaceDirs() sees it as the newest pick
+  if (path) app.workspaces[key] = path;
+  for (const c of app.cells) if (projectKey(c.cwd) === key) c.renderCodeButton();
+  saveState();
+}
+
+/** The folders holding the workspace files picked so far, most recent pick first. */
+function workspaceDirs() {
+  const dirs = new Map();
+  for (const path of Object.values(app.workspaces).reverse()) {
+    const dir = parentDir(path);
+    if (dir && !dirs.has(projectKey(dir))) dirs.set(projectKey(dir), dir);
+  }
+  return [...dirs.values()];
+}
+
+function parentDir(path) {
+  const p = normPath(path);
+  const i = p.lastIndexOf('\\');
+  return i > 0 ? p.slice(0, i) : '';
+}
+
+/** Keeps string-to-string entries only. */
+function sanitizeWorkspaces(w) {
+  const out = {};
+  for (const [key, path] of Object.entries(w && typeof w === 'object' ? w : {})) {
+    if (typeof path === 'string' && path) out[key] = path;
+  }
+  return out;
+}
+
 function closeCell(cell) {
   cell.dispose();
   if (peeked === cell) peeked = null;
@@ -1665,7 +1825,8 @@ function closeCell(cell) {
   if (app.maximized === cell) app.maximized = null;
   if (app.focused === cell) {
     app.focused = null;
-    const next = app.cells[Math.min(i, app.cells.length - 1)];
+    const open = app.cells.filter(c => !c.collapsed);
+    const next = open.find(c => app.cells.indexOf(c) >= i) || open.at(-1) || app.cells[Math.min(i, app.cells.length - 1)];
     if (next) focusCell(next, true);
   }
   layout();
@@ -1688,6 +1849,7 @@ function focusCell(cell, focusInput) {
 
 /** Focuses a cell from the sessions list, brings it into view if another is maximized, and flashes it. */
 function revealCell(cell) {
+  if (cell.collapsed) cell.setCollapsed(false);
   if (app.maximized && app.maximized !== cell) {
     app.maximized = cell;
     layout();
@@ -1701,9 +1863,21 @@ function revealCell(cell) {
 }
 
 function toggleMaximize(cell) {
+  if (cell.collapsed) cell.setCollapsed(false);
   app.maximized = app.maximized === cell ? null : cell;
   layout();
   focusCell(cell, true);
+}
+
+/** Collapsing the focused cell hands focus to the nearest open one, so keys never act on a hidden chat. */
+function collapseCell(cell, on) {
+  cell.setCollapsed(on);
+  if (!on) { focusCell(cell, true); return; }
+  if (app.focused !== cell) return;
+  const i = app.cells.indexOf(cell);
+  const open = app.cells.filter(c => !c.collapsed);
+  const next = open.find(c => app.cells.indexOf(c) > i) || open.at(-1);
+  if (next) focusCell(next, true);
 }
 
 /**
@@ -1736,14 +1910,20 @@ function distribute(n, rows) {
 }
 
 function layout() {
-  const n = app.cells.length;
-  $('#empty').classList.toggle('hidden', n > 0);
+  $('#empty').classList.toggle('hidden', app.cells.length > 0);
   grid.classList.toggle('maximized', !!app.maximized);
 
-  // Preserve scroll positions: re-parenting a scroller can reset it.
-  const scrolls = app.cells.map(c => [c, c.msgs.scrollTop, c.stickToBottom]);
+  // Collapsed cells sit in the dock as bare headers; the grid lays out the rest.
+  const shown = app.cells.filter(c => !c.collapsed);
+  const docked = app.cells.filter(c => c.collapsed).map(c => c.el);
+  if (dock.children.length !== docked.length || docked.some((el, i) => dock.children[i] !== el)) dock.replaceChildren(...docked);
+  grid.classList.toggle('all-collapsed', !shown.length && app.cells.length > 0);
 
-  const rect = board.getBoundingClientRect();
+  // Preserve scroll positions: re-parenting a scroller can reset it.
+  const scrolls = shown.map(c => [c, c.msgs.scrollTop, c.stickToBottom]);
+
+  const n = shown.length;
+  const rect = grid.getBoundingClientRect(); // after the dock is filled, which takes its height
   const rowsWanted = n ? chooseRows(n, rect.width, rect.height) : 0;
   const counts = distribute(n, rowsWanted);
   while (grid.children.length > rowsWanted) grid.lastElementChild.remove();
@@ -1752,7 +1932,7 @@ function layout() {
   let k = 0;
   counts.forEach((count, r) => {
     const row = grid.children[r];
-    const want = app.cells.slice(k, k + count).map(c => c.el);
+    const want = shown.slice(k, k + count).map(c => c.el);
     k += count;
     const same = row.children.length === want.length && want.every((el, i) => row.children[i] === el);
     if (!same) row.replaceChildren(...want);
@@ -1971,24 +2151,67 @@ const resumeSearch = $('#resume-search');
 const SOURCE_LABELS = { 'claude-vscode': 'VS Code', cli: 'Terminal', 'sdk-cli': 'HQ', 'claude-desktop': 'Desktop' };
 // A transcript written this recently may still be open somewhere else.
 const RECENTLY_ACTIVE_MS = 5 * 60 * 1000;
-const resumeState = { sessions: [], source: '', loading: false, error: null };
+const resumeProject = $('#resume-project');
+// `all`: the newest sessions from every folder, which the folder list is built from.
+// `project`: the folder picked in the list ('' for all); its sessions are fetched on their own,
+// so older ones show too. `seq` drops a reply that a newer request has overtaken.
+const resumeState = { sessions: [], all: [], project: '', source: '', loading: false, error: null, seq: 0 };
 
 async function openResumer() {
   closePicker();
   closeMenu();
   resumer.classList.remove('hidden');
   resumeSearch.value = '';
+  resumeState.project = '';
+  renderProjectOptions();
   resumeSearch.focus();
+  await loadResumeSessions();
+}
+
+async function loadResumeSessions() {
+  const seq = ++resumeState.seq;
+  const cwd = resumeState.project || null;
   resumeState.loading = true;
   resumeState.error = null;
   renderResumeList();
+  let sessions = null;
+  let error = null;
   try {
-    resumeState.sessions = await invoke('list_sessions', { limit: 80 });
+    sessions = await invoke('list_sessions', { limit: 80, cwd });
   } catch (err) {
-    resumeState.error = String(err);
+    error = String(err);
   }
+  if (seq !== resumeState.seq) return;
+  if (sessions) {
+    resumeState.sessions = sessions;
+    if (!cwd) {
+      resumeState.all = sessions;
+      renderProjectOptions();
+    }
+  }
+  resumeState.error = error;
   resumeState.loading = false;
   renderResumeList();
+}
+
+/** Every folder with a recent session, an open cell or a place in the recent list, by name. */
+function renderProjectOptions() {
+  const folders = new Map();
+  const add = path => { if (path && !folders.has(projectKey(path))) folders.set(projectKey(path), path); };
+  resumeState.all.forEach(s => add(s.cwd));
+  app.cells.forEach(c => add(c.cwd));
+  app.recent.forEach(add);
+  add(resumeState.project);
+  const name = path => baseName(path) || path;
+  const counts = new Map();
+  for (const path of folders.values()) counts.set(name(path).toLowerCase(), (counts.get(name(path).toLowerCase()) || 0) + 1);
+  const sorted = [...folders.values()].sort((a, b) => name(a).localeCompare(name(b), undefined, { sensitivity: 'base' }) || a.localeCompare(b));
+  resumeProject.replaceChildren(h('option', { value: '', text: 'All folders' }), ...sorted.map(path => h('option', {
+    value: path, title: path,
+    text: counts.get(name(path).toLowerCase()) > 1 ? `${name(path)} — ${path}` : name(path), // two folders share a name
+  })));
+  resumeProject.value = resumeState.project;
+  resumeProject.classList.toggle('on', !!resumeState.project);
 }
 
 function closeResumer() {
@@ -2014,9 +2237,11 @@ function renderResumeList() {
     return;
   }
   const terms = resumeSearch.value.toLowerCase().split(/\s+/).filter(Boolean);
+  const project = resumeState.project ? projectKey(resumeState.project) : null;
   const rows = [];
   for (const info of resumeState.sessions) {
     if (resumeState.source && info.entrypoint !== resumeState.source) continue;
+    if (project && projectKey(info.cwd) !== project) continue;
     const title = info.title || info.lastPrompt || '(no prompt)';
     const hay = [title, info.lastPrompt, info.cwd].join('\n').toLowerCase();
     if (!terms.every(t => hay.includes(t))) continue;
@@ -2042,7 +2267,10 @@ function renderResumeList() {
     row.addEventListener('click', () => resumeSession(info, false));
     rows.push(row);
   }
-  if (!rows.length) rows.push(h('div', { class: 'session-empty', text: resumeState.sessions.length ? 'No sessions match.' : 'No sessions found.' }));
+  if (!rows.length) {
+    const text = resumeState.loading ? 'Reading sessions…' : resumeState.sessions.length ? 'No sessions match.' : 'No sessions found.';
+    rows.push(h('div', { class: 'session-empty', text }));
+  }
   resumeList.replaceChildren(...rows);
 }
 
@@ -2064,12 +2292,20 @@ $('#resume-filters').addEventListener('click', e => {
   const btn = e.target.closest('button');
   if (!btn) return;
   resumeState.source = btn.dataset.source;
-  for (const b of $('#resume-filters').children) b.classList.toggle('on', b === btn);
+  for (const b of $('#resume-filters').querySelectorAll('button')) b.classList.toggle('on', b === btn);
   renderResumeList();
+});
+resumeProject.addEventListener('change', () => {
+  resumeState.project = resumeProject.value;
+  resumeProject.classList.toggle('on', !!resumeState.project);
+  if (!resumeState.project) resumeState.sessions = resumeState.all;
+  renderResumeList(); // the sessions already loaded for that folder show at once
+  loadResumeSessions();
 });
 resumer.addEventListener('keydown', e => {
   const items = [...resumeList.querySelectorAll('.resume-item:not([disabled])')];
   if (e.key === 'Escape') { e.stopPropagation(); closeResumer(); return; }
+  if (e.target === resumeProject) return; // the arrow keys pick a folder there
   if (e.key === 'Enter' && document.activeElement === resumeSearch) {
     e.preventDefault();
     if (items[0]) items[0].click();
@@ -2422,6 +2658,11 @@ document.addEventListener('keydown', e => {
     closeMenu();
     return;
   }
+  if (e.ctrlKey && e.shiftKey && !e.altKey && (e.key === 'm' || e.key === 'M') && cell) {
+    e.preventDefault();
+    collapseCell(cell, !cell.collapsed);
+    return;
+  }
   if (e.ctrlKey && !e.shiftKey && !e.altKey) {
     if (e.key === 'n' || e.key === 'N') { e.preventDefault(); openPicker(); return; }
     if (e.key === 'o' || e.key === 'O') { e.preventDefault(); openResumer(); return; }
@@ -2432,13 +2673,15 @@ document.addEventListener('keydown', e => {
       const target = app.cells[Number(e.key) - 1];
       if (target) {
         e.preventDefault();
+        if (target.collapsed) target.setCollapsed(false);
         if (app.maximized) { app.maximized = target; layout(); }
         focusCell(target, true);
       }
       return;
     }
   }
-  if (!cell) return;
+  // A collapsed chat is not on screen, so Esc and 1/2/3 must not stop it or answer its prompts.
+  if (!cell || cell.collapsed) return;
   if (e.key === 'F2') {
     e.preventDefault();
     cell.startRename();
@@ -2491,10 +2734,12 @@ function flushState() {
       clean: c.clean || undefined,
       progress: c.progressView || undefined,
       fork: c.fork || undefined,
+      collapsed: c.collapsed || undefined,
     })),
     recent: app.recent,
     models: app.models,
     defaults: app.defaults,
+    workspaces: app.workspaces,
     sidebarOpen: app.sidebarOpen,
   };
   return invoke('save_state', { json: JSON.stringify(state) }).catch(err => console.error('save failed', err));
@@ -2521,6 +2766,7 @@ async function restore() {
   app.recent = Array.isArray(state && state.recent) ? state.recent : [];
   app.models = sanitizeModels(state && state.models);
   app.defaults = sanitizeDefaults(state && (state.defaults || (state.cells || []).at(-1)));
+  app.workspaces = sanitizeWorkspaces(state && state.workspaces);
   app.sidebarOpen = !!(state && state.sidebarOpen);
   sidebar.classList.toggle('hidden', !app.sidebarOpen);
   $('#toggle-sidebar').classList.toggle('on', app.sidebarOpen);
@@ -2531,6 +2777,11 @@ async function restore() {
     const ok = await invoke('folder_exists', { path: c.cwd }).catch(() => false);
     if (!ok) continue;
     addCell(c, { restore: true });
+  }
+  // Each restored cell took focus in turn; a collapsed one must not keep it.
+  if (app.focused && app.focused.collapsed) {
+    const open = app.cells.find(c => !c.collapsed);
+    if (open) focusCell(open, true);
   }
   layout();
   updateSummary();

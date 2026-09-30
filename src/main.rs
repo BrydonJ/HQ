@@ -57,6 +57,32 @@ async fn pick_folder(window: WebviewWindow) -> Option<String> {
     .flatten()
 }
 
+/// Picks the VS Code workspace file that the cell's VS Code button opens for this folder.
+#[tauri::command]
+async fn pick_workspace(window: WebviewWindow, dir: String) -> Option<String> {
+    let app = window.app_handle().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut dialog = app
+            .dialog()
+            .file()
+            .set_parent(&window)
+            .set_title("Choose a VS Code workspace for this folder")
+            .add_filter("VS Code workspace", &["code-workspace"]);
+        if Path::new(&dir).is_dir() {
+            dialog = dialog.set_directory(&dir);
+        }
+        dialog.blocking_pick_file().and_then(|p| p.into_path().ok()).map(|p| p.to_string_lossy().into_owned())
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+#[tauri::command]
+async fn find_workspaces(path: String, dirs: Vec<String>) -> Vec<store::WorkspaceFile> {
+    tauri::async_runtime::spawn_blocking(move || store::find_workspaces(&path, &dirs)).await.unwrap_or_default()
+}
+
 #[tauri::command]
 fn folder_exists(path: String) -> bool {
     Path::new(&path).is_dir()
@@ -80,9 +106,9 @@ async fn load_transcript(session_id: String) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
-async fn list_sessions(limit: Option<usize>) -> Result<Vec<store::SessionInfo>, String> {
+async fn list_sessions(limit: Option<usize>, cwd: Option<String>) -> Result<Vec<store::SessionInfo>, String> {
     let limit = limit.unwrap_or(80).min(500);
-    tauri::async_runtime::spawn_blocking(move || store::list_sessions(limit))
+    tauri::async_runtime::spawn_blocking(move || store::list_sessions(limit, cwd.as_deref()))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -113,9 +139,15 @@ fn reveal_folder(app: AppHandle, path: String) -> Result<(), String> {
     app.opener().open_path(path, None::<&str>).map_err(|e| e.to_string())
 }
 
+/// Opens a folder, or a `.code-workspace` file, in VS Code. Nothing else is accepted.
 #[tauri::command]
 fn open_in_vscode(path: String) -> Result<(), String> {
-    if !Path::new(&path).is_dir() {
+    let target = Path::new(&path);
+    if store::is_workspace_file(target) {
+        if !target.is_file() {
+            return Err("workspace file does not exist".into());
+        }
+    } else if !target.is_dir() {
         return Err("folder does not exist".into());
     }
     let code = store::find_vscode().ok_or("VS Code (Code.exe) was not found")?;
@@ -217,6 +249,8 @@ fn main() {
             send_line,
             kill_session,
             pick_folder,
+            pick_workspace,
+            find_workspaces,
             folder_exists,
             load_state,
             save_state,

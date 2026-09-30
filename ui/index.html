@@ -51,9 +51,10 @@
         <div class="empty-title">No sessions yet</div>
         <div class="empty-sub">Each session runs Claude Code in its own folder, on any drive.</div>
         <button id="empty-new" class="btn primary"><span class="codicon codicon-add"></span> New session</button>
-        <div class="empty-keys">Ctrl+N new &middot; Ctrl+O resume &middot; Ctrl+B sessions list &middot; Ctrl+1&hellip;9 focus &middot; Ctrl+M maximize &middot; F2 rename &middot; Esc stop</div>
+        <div class="empty-keys">Ctrl+N new &middot; Ctrl+O resume &middot; Ctrl+B sessions list &middot; Ctrl+1&hellip;9 focus &middot; Ctrl+M maximize &middot; Ctrl+Shift+M collapse &middot; F2 rename &middot; Esc stop</div>
       </div>
       <div id="grid"></div>
+      <div id="dock" aria-label="Collapsed sessions"></div>
     </main>
   </div>
 
@@ -77,6 +78,7 @@
       <button data-source="cli">Terminal</button>
       <button data-source="sdk-cli">HQ</button>
       <button data-source="claude-desktop">Desktop</button>
+      <select id="resume-project" title="Only sessions from this folder"><option value="">All folders</option></select>
     </div>
     <div id="resume-list" class="picker-list resume-list"></div>
   </div>
@@ -91,12 +93,14 @@
         <span class="status-dot"></span>
         <span class="cell-project"><span class="proj-name"></span><span class="sweep" aria-hidden="true"><span class="sweep-name"></span></span></span>
         <span class="cell-title" title="Rename session (F2)"></span>
+        <span class="cell-state"></span>
         <span class="cell-path"></span>
         <span class="bg-tasks hidden"><span class="codicon codicon-loading codicon-modifier-spin"></span><span class="bg-count"></span></span>
         <button class="icon-btn act-clean"><span class="codicon codicon-eye"></span></button>
         <button class="icon-btn act-progress"><span class="codicon codicon-checklist"></span></button>
-        <button class="icon-btn act-code" title="Open folder in VS Code"><span class="codicon codicon-vscode"></span></button>
+        <button class="icon-btn act-code"><span class="codicon codicon-vscode"></span></button>
         <button class="icon-btn act-reveal" title="Open folder in Explorer"><span class="codicon codicon-folder"></span></button>
+        <button class="icon-btn act-collapse"><span class="codicon codicon-chrome-minimize"></span></button>
         <button class="icon-btn act-max" title="Maximize (Ctrl+M)"><span class="codicon codicon-screen-full"></span></button>
         <button class="icon-btn act-close" title="Close session"><span class="codicon codicon-close"></span></button>
         <span class="head-progress hidden" aria-hidden="true"></span>
@@ -107,6 +111,10 @@
       </div>
       <div class="prompts"></div>
       <div class="composer">
+        <div class="busy" aria-hidden="true">
+          <span class="busy-glyph"><span style="--i:0">&middot;</span><span style="--i:1">&#x2722;</span><span style="--i:2">&#x2733;&#xFE0E;</span><span style="--i:3">&#x2736;</span><span style="--i:4">&#x273B;</span><span style="--i:5">&#x273D;</span><span style="--i:6">&#x273B;</span><span style="--i:7">&#x2736;</span><span style="--i:8">&#x2733;&#xFE0E;</span><span style="--i:9">&#x2722;</span></span>
+          <span class="busy-verb"><span class="busy-word"></span><span class="sweep"><span class="sweep-name busy-word"></span></span></span>
+        </div>
         <div class="attachments"></div>
         <textarea rows="1" placeholder="Ask Claude…  (Enter to send, Shift+Enter for new line)"></textarea>
         <div class="composer-bar">
