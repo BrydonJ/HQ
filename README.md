@@ -55,6 +55,9 @@ The dev copy runs next to the installed HQ. A debug build also:
 - Opens DevTools on port 9223 (`HQ_DEBUG_PORT` changes it), for CDP tools such as the Chrome
   DevTools MCP server. Right-click > Inspect works too.
 
+`cargo test` runs the backend's unit tests (stream filtering, batching, transcript reading,
+session search). The UI has none; check it in the dev copy.
+
 ## Releases and updates
 
 An installed copy of HQ updates itself:
@@ -94,12 +97,20 @@ every installed copy must be reinstalled by hand.
 
 - **New session** (Ctrl+N) lists recent folders. You can also browse to any folder on any drive.
   A new cell starts `claude` only when you send its first message, so empty cells cost nothing.
+  - Esc (or the stop button) while Claude is still starting takes the prompt back into the
+    composer, and nothing is sent. If Claude cannot start, the prompt comes back too, and its
+    bubble is marked **Not sent**.
+  - `claude update` runs in the background, at most once every 6 hours (the time of the last run
+    is kept in the board), and a first message does not wait for it. If a start fails while the
+    update replaces the program, HQ waits for the update and tries once more.
 - **Resume** (Ctrl+O) continues a session started elsewhere, such as a VS Code tab, a terminal
   or the desktop app:
   - It lists the 80 most recent sessions from Claude's own transcripts, newest first.
   - Search by title, prompt or folder, or filter by where the session was last used.
   - The folder list narrows it to one folder. It then lists that folder's 80 most recent
     sessions, older ones included, not only those among the 80 newest overall.
+  - **In text** searches inside the conversations, not only titles and prompts. Matches stream
+    in with a snippet, newest session first (up to 5 per session, 100 in all).
   - Click a session to open it in a cell with its history. Claude resumes it (`--resume`) when
     you send a message.
   - A session changed in the last 5 minutes is marked **Active**. Close it in VS Code first,
@@ -113,6 +124,37 @@ every installed copy must be reinstalled by hand.
     HQ asks a running session when there is one. Otherwise it starts a short-lived `claude`
     that skips MCP servers and hooks and saves no transcript.
   - It refreshes after each finished turn, and every 5 minutes (15 when no session is running).
+- **Context window:** a small ring in the composer bar (it appears after the first reply) shows
+  how full the session's context is.
+  - The ring fills toward the auto-compact point and turns from green to red as it nears it
+    (toward the end of the window when auto-compact is off). The number is the share of the
+    whole window, the same one `/context` shows.
+  - Hover it for the tokens used, the auto-compact point, and what the tokens are made of
+    (system prompt, tools, skills, messages…). HQ asks Claude for that breakdown on hover
+    only, and keeps the answer for 30 seconds.
+  - Click it to run `/compact`. Shift+click adds instructions for the summary. While a turn is
+    running the button waits. The chat shows "Compacting the conversation…" and then
+    "Conversation compacted" (or why it could not).
+  - After a restart the ring shows the token count from the restored transcript. The window
+    size is learned from the first reply.
+  - The cell's meta line, and the hover, also show the cost Claude Code reported in this HQ
+    run (a total of what `result` messages say; it starts again from 0 when HQ restarts).
+- **Remote Control:** the broadcast button in the cell header lets you continue the session
+  from claude.ai/code or the Claude mobile app. Prompts and permission answers from there show
+  up in the cell.
+  - It needs claude.ai subscription sign-in. The button is hidden when Claude reports that
+    Remote Control is not available, or when your organization turned it off.
+  - Click it for **Open on claude.ai**, **Copy link** and **Turn off**, or to turn it on.
+    **Start with Remote Control on** sets the default for new sessions. The first time, it
+    follows your account's own auto-enable setting.
+  - For a new session, HQ turns it on right after the first prompt, so that claude.ai lists
+    the session under its title. HQ sets the remote name only when you renamed the session or
+    Claude gave it a title (a name locks the title). Otherwise Claude Code derives one from
+    your prompt and HQ's rename and Claude's title update it. Sessions that would have no name
+    at all get `HQ-<folder>`, never `<hostname>-<random>`.
+  - It is saved per cell. A restored cell turns it on again when Claude starts for it, which
+    happens when you send a message (or choose **Start Claude now** in the menu). HQ asks to
+    reattach to the same claude.ai session, and that works across a restart.
 - Each project folder gets its own color. The cell header and its entry in the sessions list
   use it, so sessions in the same folder are easy to spot.
 - Status cues on each cell:
@@ -154,6 +196,21 @@ every installed copy must be reinstalled by hand.
   A reply streams in as plain text and becomes a card when the turn finishes. Prompts and
   replies show the time they were sent in the top-right corner (with the date once it is not
   today).
+- **Edits** show a real line diff with a few lines of context (and the line numbers Claude Code
+  reports once the edit is done). Tool input and output are built when you open the tool, and
+  very long ones are cut with a **Show all** button.
+- **Copy and export:** a **Copy** button under each reply (on hover) copies it as Markdown. The
+  export button in the cell header saves the whole session as a Markdown file.
+- **Drafts:** text you have typed but not sent is kept in the board, and is back after a restart.
+- **Slash commands:** type `/` at the start of the composer to list the commands Claude reports
+  (built-in ones, skills and custom commands). Arrow keys pick, Tab or Enter completes, Esc
+  closes. A command that is already complete is sent by Enter.
+- **Notifications:** while HQ is not the active window, a Windows notification names the session
+  and shows the first line of its reply when a turn finishes, or says that Claude needs you.
+  Coming back to HQ soon after one opens that cell. Turn them off in Settings.
+- **Settings** (the gear in the top bar, or Ctrl+,): theme (auto, dark or light), notifications,
+  Remote Control for new sessions, the default model, automatic HQ updates, and the path of the
+  `claude` program.
 - **Questions:** when Claude asks you something, the chat keeps a one-line record of the
   question and your answer. Click it to see every option and which ones you picked. The eye
   button never hides it.
@@ -186,12 +243,15 @@ every installed copy must be reinstalled by hand.
   - **Yes**: allow this tool use once.
   - **Yes, and don't ask again**: uses Claude's own suggested rule.
   - **No**: deny, with optional feedback for Claude.
-  - Keys 1/2/3 answer the top card.
+  - Keys 1…9 answer the top card. With several questions, they answer the highlighted one,
+    and move on to the next after a single-choice answer. Click a question to highlight it.
 - Permission mode selector per cell: ask before edits, edit automatically, plan, auto, bypass.
   If Claude rejects a switch, the cell shows the reason and keeps the old mode. For example,
   bypass can't be turned on mid-session, and auto isn't available on every model.
 - Keys:
-  - Esc: stop the focused session.
+  - Esc: stop the focused session. If Claude has not stopped 10 seconds later, the chat offers
+    **Force stop**, which ends the process; the session resumes when you next send a message.
+  - Ctrl+,: settings.
   - Ctrl+1…9: focus a cell.
   - Ctrl+M: maximize the focused cell. You can also double-click its header.
   - Ctrl+Shift+M: collapse or expand the focused cell.
@@ -204,7 +264,15 @@ every installed copy must be reinstalled by hand.
   - It stores each cell's folder, session, mode, model, effort, name, view (all, or prompts
     and replies only) and whether it is collapsed, plus the VS Code workspace picked for each
     folder.
-  - On restart, each cell shows its history from Claude's own transcript.
+  - On restart, each cell shows its history from Claude's own transcript, newest part first
+    (up to 1500 messages or about 4 MB). **Load earlier** at the top fetches more. Images in
+    restored history are left out ("[image omitted]"). Collapsed cells draw their history
+    when first opened. If the transcript ends in the middle of a turn, the chat says that
+    the last turn was interrupted when HQ closed.
+  - A cell whose folder is missing at startup stays on the board and in `board.json`, marked
+    **Folder missing**, with its history and the composer off. **Locate folder…** points it at
+    another folder; **Close** removes it. Rename the folder back and restart, and the cell
+    works again as before.
   - Claude starts again (`--resume`) only when you send a message, so restored cells use no
     memory until you use them.
 - Header buttons open the cell's folder in VS Code or in Explorer.
@@ -218,7 +286,7 @@ every installed copy must be reinstalled by hand.
 
 Environment overrides:
 
-- `HQ_CLAUDE`: path to the `claude` binary.
+- `HQ_CLAUDE`: path to the `claude` binary. The **Claude command** setting overrides it.
 - `HQ_MODEL`: default model for HQ sessions that have no model picked.
 - `HQ_NO_UPDATE`: never check for updates.
 - `HQ_UPDATE_ANY_COPY`: check for updates even in a copy that was not installed (for testing).
@@ -229,17 +297,20 @@ Environment overrides:
 ## Layout
 
 ```
-src/session.rs   spawns one `claude -p --input-format stream-json ...` per cell; Windows job
-                 object kills the whole process tree when a cell (or HQ) closes; usage probe
-src/store.rs     board.json persistence, transcript lookup and session list, VS Code and
-                 workspace lookup
+src/session.rs   spawns one `claude -p --input-format stream-json ...` per cell; a writer thread
+                 feeds its stdin in order and a batcher sends its stdout to the UI as arrays
+                 (dropping streaming lines the UI never uses); Windows job object kills the
+                 whole process tree when a cell (or HQ) closes; usage probe
+src/store.rs     board.json persistence, transcript loading (newest part, backwards), cached
+                 session list, search inside transcripts, VS Code and workspace lookup
 src/update.rs    self-update: checks and downloads signed releases; installs when told to
 src/main.rs      Tauri commands, profiles, single-instance lock
 src/dev.rs       debug builds only: UI read from disk, DevTools port
-ui/app.js        cells, protocol handling, prompts, menus, sessions list, grid layout, persistence
-ui/render.js     markdown (raw HTML escaped, http(s) links only), tool rows, diffs, images,
-                 project colors
-ui/style.css     VS Code Dark Modern look
+ui/app.js        cells, protocol handling, prompts, menus, sessions list, grid layout, persistence,
+                 context indicator, Remote Control, settings
+ui/render.js     markdown (raw HTML escaped, http(s) links only; incremental while streaming),
+                 tool rows, line diffs, images, project colors
+ui/style.css     VS Code Dark Modern look, and a light theme
 release.ps1      builds, signs and publishes a release
 dev.cmd          rebuilds and restarts the dev copy
 ```
@@ -248,7 +319,11 @@ dev.cmd          rebuilds and restarts the dev copy
 
 - Sessions run in `-p` (print) mode, which skips Claude's workspace-trust dialog. Only open
   folders you trust.
-- Slash commands that only work in the interactive terminal, such as `/config`, are not
-  available. Use the composer menus for model, effort and MCP servers. Skills, custom commands
-  and `/compact` work.
+- Sessions run headless, so commands that need the interactive terminal either print a short
+  answer (`/mcp`, `/agents`) or are not available (`/focus` is hidden from the list). Use the
+  composer menus for model, effort and MCP servers. Skills, custom commands, `/compact` and
+  `/context` work.
+- Remote Control: whether a prompt typed on the phone shows in HQ was not tested (it needs the
+  Claude app). HQ draws it when the CLI reports it. Whether claude.ai shows the title HQ expects
+  was not tested either.
 - @-file mentions are not implemented yet.

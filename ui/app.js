@@ -19,6 +19,11 @@ const app = {
   models: [],          // model list from the last initialize reply, so idle cells can offer it too
   defaults: {},        // permission mode, model and effort last picked, for new sessions
   workspaces: {},      // projectKey(folder) -> .code-workspace file the VS Code button opens
+  commands: [],        // slash commands from the last initialize reply, for the composer's autocomplete
+  claudeUpdateAt: 0,   // when `claude update` last ran (ms), so a restart does not repeat it
+  remoteDefault: null, // new sessions start with Remote Control on; null until seeded from the account
+  remoteAvailable: null, // from the last initialize reply: null until a session has reported it
+  settings: { theme: 'auto', notify: true, autoUpdate: true, claudePath: '' }, // the Settings screen
   sidebarOpen: false,
   query: '',
 };
@@ -43,18 +48,23 @@ const BUSY_VERBS = ['Brewing', 'Cogitating', 'Clauding', 'Conjuring', 'Deliberat
 // Claude Code only updates itself from interactive sessions, and HQ runs it headless, so HQ
 // runs `claude update` before the first session starts and again once the last run is old.
 // New models reach the model menu this way, since the menu lists what the CLI reports.
+const FORCE_STOP_AFTER_MS = 10 * 1000; // an interrupt Claude has not answered by then offers "Force stop"
 const CLAUDE_UPDATE_EVERY_MS = 6 * 60 * 60 * 1000;
 const CLAUDE_UPDATE_WAIT_MS = 150 * 1000;
-const claudeUpdate = { promise: null, at: 0, done: false };
+// `promise` is set only while an update runs. The time of the last run is saved in board.json,
+// so a restart does not repeat it, and a spawn does not wait for it (see ensureProcess).
+const claudeUpdate = { promise: null };
 
+/** Runs `claude update` unless one ran in the last 6 hours. Resolves when the update in flight ends. */
 function updateClaude() {
-  if (claudeUpdate.promise && Date.now() - claudeUpdate.at < CLAUDE_UPDATE_EVERY_MS) return claudeUpdate.promise;
-  claudeUpdate.at = Date.now();
+  if (claudeUpdate.promise) return claudeUpdate.promise;
+  if (Date.now() - app.claudeUpdateAt < CLAUDE_UPDATE_EVERY_MS) return Promise.resolve();
+  app.claudeUpdateAt = Date.now();
+  saveState();
   const run = invoke('update_claude')
     .then(out => console.info('claude update:', out), err => console.warn('claude update failed:', err))
-    .finally(() => { if (claudeUpdate.promise === run) claudeUpdate.done = true; });
+    .finally(() => { claudeUpdate.promise = null; });
   claudeUpdate.promise = run;
-  claudeUpdate.done = false;
   return run;
 }
 
@@ -67,7 +77,8 @@ const nextRequestId = () => `hq-${Date.now().toString(36)}-${++reqSeq}`;
 
 class Cell {
   constructor({ cwd, sessionId = null, permissionMode = 'default', model = null, effort = null, title = '', aiTitle = false,
-    customTitle = null, renamePending = false, clean = false, progress = false, fork = false, collapsed = false }) {
+    customTitle = null, renamePending = false, clean = false, progress = false, fork = false, collapsed = false,
+    missing = false, remote = null, bridgeSessionId = null, draft = '' }) {
     this.cwd = cwd;
     this.sessionId = sessionId;
     this.fork = !!(fork && sessionId); // resume into a new session ID, leaving the original alone
@@ -89,6 +100,15 @@ class Cell {
     this.collapsed = !!collapsed;  // only the header shows, in the dock under the grid
     this.savedScroll = null;       // [scrollTop, stickToBottom] from when the chat was collapsed
     this.expandedAt = 0;
+    this.missing = !!missing;      // the folder was gone at startup: the cell stays, with its composer off
+    this.remote = remote ?? app.remoteDefault; // Remote Control wanted for this session; null until the account's default is known
+    this.bridgeSessionId = bridgeSessionId || null; // the claude.ai session Remote Control last used
+    this.remoteState = 'off';      // off | connecting | on | failed | policy
+    this.remoteUrl = null;
+    this.remoteDetail = '';
+    this.remoteSeq = 0;            // drops the reply of an enable request that a newer one overtook
+    this.sentPrompts = [];         // prompts HQ wrote, so a prompt from elsewhere (the phone) can be told apart
+    this.initialDraft = typeof draft === 'string' ? draft : '';
     this.busyWord = '';            // the verb shown above the prompt box this turn
     this.lastReply = '';
     this.color = projectColor(cwd);
@@ -108,6 +128,16 @@ class Cell {
     this.taskCreates = new Map(); // TaskCreate tool_use_id -> task, until its result gives the id
     this.tasksStale = false;   // the list is a finished one from an earlier prompt
     this.taskProgress = new Map(); // task_id -> latest task_progress of an agent Claude started
+    this.ctx = { tokens: null, window: null, info: null, infoAt: 0, loading: null, model: null }; // context window use
+    this.compacting = false;   // a compaction is running (the CLI's status 'compacting')
+    this.cost = { usd: 0, tokens: 0, procUsd: 0, procTokens: 0 }; // this HQ run's spend; proc* = last total of the current process
+    this.drafts = new Set();   // prompts submitted while claude was still starting, which Esc can take back
+    this.openTools = new Set(); // tool_use ids of tool calls that have not reported a result yet
+    this.lastDuration = '';    // how long the last turn took, for the line under the composer
+    this.historyStart = 0;     // byte offset in the transcript of the oldest line shown (0: all of it is)
+    this.historyLoading = null; // promise while the transcript is being drawn
+    this.historyPending = false; // collapsed on restore: the transcript is drawn when the cell is first opened
+    this.replayingEarlier = false;
     this.turnStart = null;     // when the current turn started (ms)
     this.turnTools = 0;        // top-level tool calls in the current turn
     this.currentTool = null;   // { id, name, summary } of the latest top-level tool still running
@@ -145,6 +175,9 @@ class Cell {
     this.stateEl = el.querySelector('.cell-state');
     this.codeBtn = el.querySelector('.act-code');
     this.collapseBtn = el.querySelector('.act-collapse');
+    this.ctxBtn = el.querySelector('.act-context');
+    this.remoteBtn = el.querySelector('.act-remote');
+    this.missingBar = el.querySelector('.missing-bar');
 
     el.style.setProperty('--proj', this.color);
     for (const name of el.querySelectorAll('.proj-name, .cell-project .sweep-name')) name.textContent = baseName(this.cwd) || this.cwd;
@@ -154,9 +187,16 @@ class Cell {
     this.applyClean();
     this.applyProgressView();
     this.applyCollapsed();
+    this.applyMissing();
     this.stateEl.textContent = stateOf(this)[1];
     this.renderCodeButton();
     this.updateModelLabel();
+    this.renderContext();
+    this.renderRemote();
+    if (this.initialDraft) {
+      this.input.value = this.initialDraft;
+      autoGrow(this.input);
+    }
 
     el.addEventListener('mousedown', () => focusCell(this, false));
     const head = el.querySelector('.cell-head');
@@ -177,6 +217,15 @@ class Cell {
     this.codeBtn.addEventListener('click', () => this.openInCode());
     this.codeBtn.addEventListener('contextmenu', e => { e.preventDefault(); this.openCodeMenu(); });
     this.collapseBtn.addEventListener('click', () => collapseCell(this, !this.collapsed));
+    this.ctxBtn.addEventListener('click', e => this.compact(e.shiftKey));
+    this.ctxBtn.addEventListener('mouseenter', () => showContextPop(this));
+    this.ctxBtn.addEventListener('mouseleave', hideContextPop);
+    this.ctxBtn.addEventListener('focus', () => showContextPop(this));
+    this.ctxBtn.addEventListener('blur', hideContextPop);
+    this.remoteBtn.addEventListener('click', () => openMenu(this.remoteBtn, this, menuEl => this.buildRemoteMenu(menuEl)));
+    el.querySelector('.act-export').addEventListener('click', () => this.exportTranscript());
+    el.querySelector('.act-locate').addEventListener('click', () => this.locateFolder());
+    el.querySelector('.act-drop').addEventListener('click', () => closeCell(this));
     el.querySelector('.act-send').addEventListener('click', () => this.submit());
     this.stopBtn.addEventListener('click', () => this.interrupt());
     this.modeSel.addEventListener('change', () => this.setMode(this.modeSel.value).then(() => rememberChoice({ permissionMode: this.permissionMode })));
@@ -216,12 +265,18 @@ class Cell {
     });
 
     this.input.addEventListener('keydown', e => {
+      if (slashKeydown(this, e)) return;
       if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
         e.preventDefault();
         this.submit();
       }
     });
-    this.input.addEventListener('input', () => autoGrow(this.input));
+    this.input.addEventListener('input', () => {
+      autoGrow(this.input);
+      slashUpdate(this);
+      saveState(); // the unsent text is kept in board.json
+    });
+    this.input.addEventListener('blur', () => slashClose(this));
     this.msgs.addEventListener('scroll', () => {
       if (this.collapsed) return; // a hidden scroller reads as scrolled to the bottom
       const m = this.msgs;
@@ -233,12 +288,38 @@ class Cell {
 
   append(node, parent) {
     (parent || this.msgs).append(node);
-    this.scroll();
+    this.scheduleScroll();
     return node;
+  }
+
+  /** Reading scrollHeight forces a layout, so a burst of new items scrolls once, in the next frame. */
+  scheduleScroll() {
+    if (this.scrollFrame || !this.stickToBottom) return;
+    this.scrollFrame = requestAnimationFrame(() => {
+      this.scrollFrame = 0;
+      this.scroll();
+    });
   }
 
   scroll() {
     if (this.stickToBottom) this.msgs.scrollTop = this.msgs.scrollHeight;
+  }
+
+  /**
+   * Items off screen are sized by an estimate (content-visibility), so the real bottom moves
+   * while the ones near it are laid out: scroll again, a few frames, until it holds.
+   */
+  pinToBottom(frames = 90, steady = 0) {
+    const m = this.msgs;
+    m.scrollTop = 1e9;
+    if (frames <= 0) return;
+    requestAnimationFrame(() => {
+      if (!this.stickToBottom || this.collapsed) return;
+      const gap = m.scrollHeight - m.scrollTop - m.clientHeight;
+      // Done once the bottom has held for a few frames in a row.
+      if (gap <= 2 && steady >= 3) return;
+      this.pinToBottom(frames - 1, gap <= 2 ? steady + 1 : 0);
+    });
   }
 
   notice(text, isError) {
@@ -388,10 +469,17 @@ class Cell {
     layout();
     if (!on) {
       this.expandedAt = Date.now();
+      autoGrow(this.input); // a draft restored while the cell was collapsed
+      if (this.historyPending) {
+        this.historyPending = false;
+        this.loadHistory();
+      }
+      if (this.live) this.scheduleLiveRender(); // text that arrived while collapsed was not drawn
       // Text that arrived while hidden did not scroll, so land where the user left, or at the bottom.
       const [top, stick] = this.savedScroll || [0, true];
       this.stickToBottom = stick;
-      this.msgs.scrollTop = stick ? this.msgs.scrollHeight : top;
+      if (stick) this.pinToBottom();
+      else this.msgs.scrollTop = top;
     }
     saveState();
   }
@@ -587,8 +675,17 @@ class Cell {
     }
   }
 
+  /** Redraws at most once per frame: every stream event and task update calls this. */
   renderProgress() {
-    if (this.replaying) return; // loadHistory draws it once the transcript is in
+    if (this.replaying || this.progressFrame) return; // loadHistory draws it once the transcript is in
+    this.progressFrame = requestAnimationFrame(() => {
+      this.progressFrame = 0;
+      this.drawProgress();
+    });
+  }
+
+  drawProgress() {
+    if (this.replaying) return;
     const list = this.taskItems();
     const live = list.length > 0 && !this.tasksStale;
     const done = list.filter(t => t.status === 'completed').length;
@@ -891,6 +988,7 @@ class Cell {
       this.bgEl.title = ['Running in the background:', ...lines].join('\n');
     }
     this.renderProgress();
+    this.renderContext(); // the button waits while a turn runs
     updateSummary();
   }
 
@@ -936,26 +1034,26 @@ class Cell {
     if (this.proc != null) return true;
     if (this.spawning) return this.spawning;
     this.spawning = (async () => {
-      const update = updateClaude();
-      if (!claudeUpdate.done) this.metaEl.textContent = 'Updating Claude Code…';
-      await withTimeout(update, CLAUDE_UPDATE_WAIT_MS);
-      if (this.metaEl.textContent === 'Updating Claude Code…') this.metaEl.textContent = '';
-      const channel = new Channel();
-      channel.onmessage = line => this.onLine(line);
+      updateClaude(); // runs in the background; a spawn does not wait for it
+      this.spawnedFresh = !this.sessionId; // Remote Control waits for a new session's first prompt
       try {
-        this.proc = await invoke('spawn_session', {
-          cwd: this.cwd,
-          resume: this.sessionId,
-          permissionMode: this.permissionMode,
-          model: this.modelChoice,
-          effort: this.effortLevels().length ? this.effort : null,
-          fork: this.fork,
-          onEvent: channel,
-        });
-      } catch (err) {
-        this.notice(String(err), true);
-        this.setStatus('exited');
-        return false;
+        for (let attempt = 0; ; attempt++) {
+          try {
+            this.proc = await this.spawnProcess();
+            break;
+          } catch (err) {
+            // The spawn can fail while `claude update` replaces the binary: wait for it, then try once more.
+            if (attempt === 0 && claudeUpdate.promise) {
+              this.metaEl.textContent = 'Updating Claude Code…';
+              await withTimeout(claudeUpdate.promise, CLAUDE_UPDATE_WAIT_MS);
+              if (this.metaEl.textContent === 'Updating Claude Code…') this.metaEl.textContent = '';
+              continue;
+            }
+            this.notice(String(err), true);
+            this.setStatus('exited');
+            return false;
+          }
+        }
       } finally {
         this.spawning = null;
       }
@@ -964,19 +1062,51 @@ class Cell {
         this.proc = null;
         return false;
       }
+      this.cost.procUsd = 0;
+      this.cost.procTokens = 0;
+      this.remoteAsked = false;
       this.initialize();
       return true;
     })();
     return this.spawning;
   }
 
+  spawnProcess() {
+    const channel = new Channel();
+    channel.onmessage = batch => this.onLine(batch);
+    return invoke('spawn_session', {
+      cwd: this.cwd,
+      resume: this.sessionId,
+      permissionMode: this.permissionMode,
+      model: this.modelChoice,
+      effort: this.effortLevels().length ? this.effort : null,
+      fork: this.fork,
+      onEvent: channel,
+    });
+  }
+
   async initialize() {
     const reply = await this.control({ subtype: 'initialize' });
-    const models = reply && reply.subtype === 'success' && reply.response && reply.response.models;
-    if (Array.isArray(models) && models.length) {
-      app.models = sanitizeModels(models);
+    const r = reply && reply.subtype === 'success' && reply.response;
+    if (r) {
+      if (Array.isArray(r.models) && r.models.length) {
+        app.models = sanitizeModels(r.models);
+        saveState();
+      }
+      if (Array.isArray(r.commands)) app.commands = sanitizeCommands(r.commands);
+      if (typeof r.remote_control_available === 'boolean') app.remoteAvailable = r.remote_control_available;
+      if (app.remoteDefault == null && typeof r.remote_control_auto_enable === 'boolean') {
+        app.remoteDefault = r.remote_control_auto_enable; // seeded once from the account, then the user's choice
+        saveState();
+      }
+    }
+    if (this.remote == null) {
+      this.remote = !!app.remoteDefault;
       saveState();
     }
+    renderRemoteButtons();
+    // A session that already has a transcript has its title and messages, so Remote Control can start now.
+    if (this.remote && (!this.spawnedFresh || this.promptWritten)) this.autoEnableRemote();
     await this.refreshApplied();
   }
 
@@ -998,35 +1128,114 @@ class Cell {
   }
 
   async submit() {
+    if (this.missing) return;
+    if (this.historyLoading) await this.historyLoading; // the transcript is drawn first, so live messages follow it
     const text = this.input.value.trim();
     const images = this.attachments;
     if (!text && !images.length) return;
+    for (const old of this.msgs.querySelectorAll('.item.user.unsent')) old.remove(); // a prompt that failed to send is replaced by this one
+    const draft = { text, images, cancelled: false, bubble: null, addedPrompt: false, titled: false };
     this.input.value = '';
     autoGrow(this.input);
+    slashClose(this);
+    saveState(); // the sent text is no longer a draft
     this.attachments = [];
     this.renderAttachments();
     this.stickToBottom = true;
-    this.append(userBubble(text, images.map(i => i.url), Date.now()));
+    draft.bubble = this.append(userBubble(text, images.map(i => i.url), Date.now()));
     if (!this.aiTitle && !this.customTitle && text && this.promptText.length < 2000) {
-      this.promptText = `${this.promptText}
-${text}`.trim().slice(0, 2000);
+      this.promptText = `${this.promptText}\n${text}`.trim().slice(0, 2000);
+      draft.addedPrompt = true;
     }
     if (!this.title) {
       this.setTitle(firstLine(text, 90) || 'Image');
+      draft.titled = true;
       saveState();
     }
     this.unread = false;
     this.setStatus('running');
-    if (!(await this.ensureProcess())) return;
+    this.drafts.add(draft);
+    const started = await this.ensureProcess();
+    this.drafts.delete(draft);
+    if (draft.cancelled || this.closing) return;
+    if (!started) {
+      this.unsend(draft, true);
+      return;
+    }
     const content = images.length
       ? [...images.map(i => ({ type: 'image', source: { type: 'base64', media_type: i.mediaType, data: i.data } })), ...(text ? [{ type: 'text', text }] : [])]
       : text;
+    if (text) this.sentPrompts.push(text);
+    this.promptWritten = true;
     this.write({ type: 'user', message: { role: 'user', content }, parent_tool_use_id: null });
+    // After the first prompt is written, so that Claude has a message to title the remote session from.
+    if (this.remote && this.spawnedFresh) this.autoEnableRemote();
+    this.lastSent = draft; // until Claude answers, so that a process that dies at startup gives the prompt back
+  }
+
+  /**
+   * Puts a prompt that was never sent back in the composer, and undoes the title and title text it
+   * set, so a prompt Claude never saw cannot become the session's name. `keepBubble` marks the
+   * bubble as not sent (a failed start); otherwise it is removed (the user pressed Esc).
+   */
+  unsend(draft, keepBubble) {
+    const current = this.input.value;
+    this.input.value = draft.text && current ? `${draft.text}\n${current}` : draft.text || current;
+    autoGrow(this.input);
+    this.attachments = [...draft.images, ...this.attachments];
+    this.renderAttachments();
+    if (draft.addedPrompt && this.promptText.endsWith(draft.text)) this.promptText = this.promptText.slice(0, this.promptText.length - draft.text.length).trim();
+    if (draft.titled && !this.aiTitle && !this.customTitle) {
+      this.setTitle('');
+      saveState();
+    }
+    const inner = draft.bubble && draft.bubble.querySelector('.bubble');
+    if (keepBubble && inner) {
+      draft.bubble.classList.add('unsent');
+      inner.append(h('div', { class: 'unsent-tag', text: 'Not sent' }));
+    } else if (draft.bubble) {
+      draft.bubble.remove();
+    }
+    saveState();
   }
 
   interrupt() {
+    if (this.drafts.size && this.proc == null) {
+      // Claude is still starting, so nothing was sent yet: take the prompts back.
+      for (const draft of [...this.drafts].reverse()) { // last first, so each is put in front of the text already restored
+        draft.cancelled = true;
+        this.unsend(draft, false);
+      }
+      this.drafts.clear();
+      this.setStatus('idle');
+      return;
+    }
     if (this.proc == null) return;
     this.control({ subtype: 'interrupt' });
+    if (!this.interruptTimer) this.interruptTimer = setTimeout(() => this.offerForceStop(), FORCE_STOP_AFTER_MS);
+  }
+
+  /** The CLI normally answers an interrupt at once; when it does not, the user may end the process. */
+  offerForceStop() {
+    this.interruptTimer = null;
+    if (this.proc == null || (this.status !== 'running' && !this.pending.size)) return;
+    const note = this.notice('Claude has not stopped yet.');
+    note.append(' ', h('button', { class: 'btn', text: 'Force stop', onclick: () => { this.clearForceNote(); this.forceStop(); } }));
+    this.forceNote = note;
+  }
+
+  clearForceNote() {
+    clearTimeout(this.interruptTimer);
+    this.interruptTimer = null;
+    if (this.forceNote) this.forceNote.remove();
+    this.forceNote = null;
+  }
+
+  /** Ends the process. The session resumes (--resume) in a new one when the next message is sent. */
+  forceStop() {
+    if (this.proc == null) return;
+    this.forced = true;
+    invoke('kill_session', { id: this.proc });
   }
 
   async setMode(mode) {
@@ -1060,24 +1269,37 @@ ${text}`.trim().slice(0, 2000);
     if (menuState.cell === this) closeMenu();
     if (this.proc != null) invoke('kill_session', { id: this.proc });
     this.proc = null;
-    clearTimeout(this.renderTimer);
+    cancelAnimationFrame(this.renderTimer);
+    cancelAnimationFrame(this.scrollFrame);
+    cancelAnimationFrame(this.progressFrame);
+    clearTimeout(this.interruptTimer);
     clearInterval(this.progressTimer);
   }
 
   // ---------- protocol ----------
 
-  onLine(line) {
-    let m;
-    try { m = JSON.parse(line); } catch { return; }
+  /** The backend sends batches: a JSON array of messages, with `hq_exit` last. A lone object or string is accepted too. */
+  onLine(batch) {
     if (this.closing) return;
-    try {
-      this.handle(m, false);
-    } catch (err) {
-      console.error('render failed', err, m);
+    let list = batch;
+    if (typeof batch === 'string') {
+      try { list = [JSON.parse(batch)]; } catch { return; }
+    } else if (!Array.isArray(batch)) {
+      list = [batch];
+    }
+    for (const m of list) {
+      if (this.closing) return;
+      if (!m || typeof m !== 'object') continue;
+      try {
+        this.handle(m, false);
+      } catch (err) {
+        console.error('render failed', err, m);
+      }
     }
   }
 
   handle(m, replay) {
+    if (this.lastSent && !replay && (m.type === 'stream_event' || m.type === 'assistant' || m.type === 'result' || (m.type === 'system' && m.subtype === 'init'))) this.lastSent = null;
     switch (m.type) {
       case 'system': return this.onSystem(m);
       case 'stream_event': return this.onStreamEvent(m);
@@ -1110,8 +1332,14 @@ ${text}`.trim().slice(0, 2000);
       if (this.status !== 'running') this.setStatus('running');
       // A pending rename waits for the turn's end, when Claude's transcript surely exists.
       if (!this.renamePending) this.syncTitle();
+    } else if (m.subtype === 'status') {
+      this.onStatus(m);
     } else if (m.subtype === 'compact_boundary') {
-      this.notice('Conversation compacted');
+      this.onCompactBoundary(m);
+    } else if (m.subtype === 'bridge_state') {
+      this.onBridgeState(m);
+    } else if (m.subtype === 'worker_shutting_down') {
+      this.setRemoteState('off');
     } else if (m.subtype === 'background_tasks_changed') {
       this.setBackground(sanitizeTasks(m.tasks)); // Claude's full list, sent whenever it changes
     } else if (m.subtype === 'task_started' || m.subtype === 'task_notification') {
@@ -1133,7 +1361,7 @@ ${text}`.trim().slice(0, 2000);
         const md = h('div', { class: 'md streaming' });
         const item = this.append(h('div', { class: 'item text' }, md));
         this.turnTexts.push(item);
-        this.live.blocks.set(ev.index, { item, md, text: ev.content_block.text || '' });
+        this.live.blocks.set(ev.index, { item, md, text: ev.content_block.text || '', state: {} });
       } else if (type === 'tool_use' || type === 'server_tool_use') {
         this.demoteTurnTexts();
       }
@@ -1146,16 +1374,17 @@ ${text}`.trim().slice(0, 2000);
     }
   }
 
+  /** At most one render per frame, and none while the cell is collapsed: it draws when shown again. */
   scheduleLiveRender() {
-    if (this.renderTimer) return;
-    this.renderTimer = setTimeout(() => {
-      this.renderTimer = null;
-      if (!this.live) return;
+    if (this.renderTimer || this.collapsed) return;
+    this.renderTimer = requestAnimationFrame(() => {
+      this.renderTimer = 0;
+      if (!this.live || this.collapsed) return;
       for (const b of this.live.blocks.values()) {
-        if (b.md.classList.contains('streaming')) renderMarkdown(b.md, b.text);
+        if (b.md.classList.contains('streaming')) renderMarkdownLive(b.md, b.text, b.state);
       }
       this.scroll();
-    }, 50);
+    });
   }
 
   /** Swaps the oldest still-streaming block of this message for its final text. */
@@ -1193,6 +1422,10 @@ ${text}`.trim().slice(0, 2000);
 
   onAssistant(m, replay) {
     const msg = m.message || {};
+    this.noteUsage(m);
+    // A local command (/context, /usage...) is answered by the CLI itself, as text in a synthetic message. Its
+    // /compact answer repeats the status notice that was already shown.
+    if (m.local_command_run && m.local_command_run.command === 'compact') return;
     const parent = this.containerFor(m.parent_tool_use_id);
     for (const block of msg.content || []) {
       if (block.type === 'text') {
@@ -1247,11 +1480,18 @@ ${text}`.trim().slice(0, 2000);
       this.lastReply = firstLine(text, 140);
       renderSidebar();
     }
+    // A copy button for the reply's Markdown source, shown when the reply is hovered.
+    const copy = h('button', { class: 'msg-action', title: 'Copy this reply as Markdown' }, icon('copy'), 'Copy');
+    copy.addEventListener('click', () => {
+      const source = items.map(i => (i.querySelector('.md') || {})._src || '').filter(Boolean).join('\n\n');
+      copyText(source).then(() => { copy.lastChild.textContent = 'Copied'; setTimeout(() => { copy.lastChild.textContent = 'Copy'; }, 1500); });
+    });
+    items[items.length - 1].append(h('div', { class: 'reply-actions' }, copy));
   }
 
   addTool(block, parent) {
     const name = block.name || 'tool';
-    if (!parent) {
+    if (!parent && !this.replayingEarlier) {
       this.demoteTurnTexts();
       this.turnTools++;
       this.currentTool = { id: block.id, name, summary: toolSummary(name, block.input, this.cwd) };
@@ -1262,11 +1502,26 @@ ${text}`.trim().slice(0, 2000);
     const summary = h('summary', null,
       h('span', { class: 'tname', text: name }),
       h('span', { class: 'targ', text: toolSummary(name, block.input, this.cwd) }));
-    const body = h('div', { class: 'tool-body' }, toolRow('in', toolInputView(name, block.input)));
+    const body = h('div', { class: 'tool-body' });
     const item = h('details', { class: 'item tool pending' }, summary, body);
-    if (name === 'TodoWrite') item.open = true;
-    this.tools.set(block.id, { item, body, name });
+    // The body (input, diff, output) is built when the tool is first opened: most never are.
+    const t = { item, body, name, input: block.input, outputs: [], patch: null, built: false };
+    item.addEventListener('toggle', () => { if (item.open) this.buildTool(t); });
+    if (name === 'TodoWrite') {
+      item.open = true;
+      this.buildTool(t);
+    }
+    this.tools.set(block.id, t);
+    this.openTools.add(block.id);
     this.append(item, parent);
+  }
+
+  buildTool(t) {
+    if (t.built) return;
+    t.built = true;
+    t.body.append(toolRow('in', (t.patch && patchView(t.patch)) || toolInputView(t.name, t.input)));
+    for (const make of t.outputs) t.body.append(make());
+    t.outputs = [];
   }
 
   /** Claude's questions and the answers given: a small collapsible record, shown even in the replies-only view. */
@@ -1280,6 +1535,7 @@ ${text}`.trim().slice(0, 2000);
     const t = { item: h('details', { class: 'item qa pending' }, summary, body), body, name: 'AskUserQuestion', qa: { questions, answerEl } };
     this.renderQuestion(t, null);
     this.tools.set(block.id, t);
+    this.openTools.add(block.id);
     this.append(t.item);
   }
 
@@ -1315,10 +1571,13 @@ ${text}`.trim().slice(0, 2000);
 
   /** A finished turn has no tool calls left running. */
   settleTools() {
-    for (const t of this.tools.values()) {
+    for (const id of this.openTools) {
+      const t = this.tools.get(id);
+      if (!t) continue;
       if (t.qa && t.item.classList.contains('pending')) t.qa.answerEl.textContent = 'No answer';
       t.item.classList.remove('pending');
     }
+    this.openTools.clear();
     this.currentTool = null;
   }
 
@@ -1332,6 +1591,7 @@ ${text}`.trim().slice(0, 2000);
     const content = typeof msg.content === 'string' ? [{ type: 'text', text: msg.content }] : msg.content || [];
     const texts = [];
     const images = [];
+    let omitted = 0; // images of a restored transcript, whose data the backend leaves out
     // The structured result is per message, so it can only be matched to a lone tool_result.
     const lone = content.filter(b => b.type === 'tool_result').length === 1;
     const structured = lone ? m.tool_use_result || m.toolUseResult : null;
@@ -1344,11 +1604,22 @@ ${text}`.trim().slice(0, 2000);
         }
         const t = this.tools.get(block.tool_use_id);
         if (!t) continue;
+        this.openTools.delete(block.tool_use_id);
         if (t.qa) { this.answerQuestion(t, block, structured); continue; }
         const text = toolResultText(block.content);
         t.item.classList.remove('pending');
         t.item.classList.add(block.is_error ? 'err' : 'ok');
-        if (text) t.body.append(toolRow('out', h('pre', { text }), block.is_error ? 'err' : ''));
+        // An Edit's result carries the real patch, with line numbers; it replaces the computed diff.
+        if (structured && t.name === 'Edit' && Array.isArray(structured.structuredPatch) && structured.structuredPatch.length) {
+          t.patch = structured.structuredPatch;
+          const view = t.built && patchView(t.patch);
+          if (view) t.body.querySelector('.tool-row').lastElementChild.replaceWith(view);
+        }
+        if (text) {
+          const make = () => toolRow('out', longPre(text), block.is_error ? 'err' : '');
+          if (t.built) t.body.append(make());
+          else t.outputs.push(make);
+        }
       } else if (block.type === 'text' && block.text) {
         const text = block.text;
         if (text.startsWith('[Request interrupted')) this.notice('Interrupted');
@@ -1357,18 +1628,33 @@ ${text}`.trim().slice(0, 2000);
       } else if (block.type === 'image') {
         const url = imageBlockUrl(block.source);
         if (url) images.push(url);
+        else if (block.source && block.source.data === '') omitted++;
       }
     }
     // Live prompts are drawn when sent; only a restored transcript needs them drawn here.
-    if (replay && !parent && (texts.length || images.length)) {
+    if (replay && !parent && (texts.length || images.length || omitted)) {
       this.closeTurn(true);
       const text = texts.join('\n');
-      this.append(userBubble(text, images, Date.parse(m.timestamp)));
+      this.append(userBubble(text, images, Date.parse(m.timestamp), omitted));
       if (!this.title) this.title = firstLine(text, 90) || 'Image';
+    } else if (!replay && !parent && !m.isSynthetic && this.remoteState === 'on') {
+      // A prompt typed on the phone or on claude.ai/code arrives like this; HQ's own prompts were drawn when sent.
+      for (const text of texts) {
+        const i = this.sentPrompts.indexOf(text);
+        if (i >= 0) {
+          this.sentPrompts.splice(0, i + 1);
+          continue;
+        }
+        const bubble = userBubble(text, [], Date.now());
+        bubble.querySelector('.bubble').prepend(h('span', { class: 'remote-tag', text: 'Remote' }));
+        this.append(bubble);
+      }
     }
   }
 
   onResult(m) {
+    const local = !!m.local_command; // /compact and other commands the CLI answers itself
+    this.clearForceNote();
     this.finishLive();
     this.closeTurn(m.subtype === 'success' && !m.is_error);
     this.settleTools();
@@ -1378,9 +1664,15 @@ ${text}`.trim().slice(0, 2000);
       const detail = m.result || (m.errors && m.errors.join('\n')) || m.subtype;
       this.notice(`Error: ${detail}`, true);
     }
-    if (typeof m.duration_ms === 'number') this.metaEl.textContent = `${(m.duration_ms / 1000).toFixed(1)}s`;
+    this.noteResult(m);
+    if (this.compacting) this.setCompacting(false);
+    if (!local && typeof m.duration_ms === 'number') this.lastDuration = `${(m.duration_ms / 1000).toFixed(1)}s`;
+    this.renderMeta();
     this.setStatus('idle');
-    this.markUnread();
+    if (!local) {
+      this.markUnread();
+      notifyTurnDone(this, m);
+    }
     this.refreshState();
     scheduleUsageRefresh(this);
     this.syncTitle();
@@ -1396,6 +1688,12 @@ ${text}`.trim().slice(0, 2000);
 
   onExit(m) {
     const wasRunning = this.status === 'running';
+    const forced = this.forced;
+    this.forced = false;
+    this.clearForceNote();
+    // Claude died before it answered the last prompt (a failed --resume, say): the prompt goes back to the composer.
+    const lost = this.lastSent;
+    this.lastSent = null;
     this.proc = null;
     for (const resolve of this.controls.values()) resolve(null);
     this.controls.clear();
@@ -1405,9 +1703,18 @@ ${text}`.trim().slice(0, 2000);
     this.settleTools();
     for (const t of this.tools.values()) t.item.classList.remove('bg');
     this.bgTasks = []; // they ran inside this claude, so they ended with it
-    if (m.code !== 0 && m.code != null) {
+    this.compacting = false;
+    this.remoteState = this.remoteState === 'policy' ? 'policy' : 'off'; // the claude.ai session ended with the process
+    this.remoteUrl = null;
+    this.renderRemote();
+    this.renderContext();
+    if (forced) {
+      this.notice('Stopped. Claude resumes this session when you send a message.');
+      this.setStatus('idle');
+    } else if (m.code !== 0 && m.code != null) {
       const tail = (m.stderr || []).slice(-8).join('\n');
       this.notice(`Claude exited with code ${m.code}${tail ? '\n' + tail : ''}`, true);
+      if (lost) this.unsend(lost, true);
       this.setStatus('exited');
     } else {
       this.setStatus(wasRunning ? 'exited' : 'idle');
@@ -1419,8 +1726,9 @@ ${text}`.trim().slice(0, 2000);
   onControlRequest(m) {
     const req = m.request || {};
     if (req.subtype !== 'can_use_tool') {
-      // Hooks and SDK MCP servers are never registered by HQ, so refuse anything else.
+      // Hooks and SDK MCP servers are never registered by HQ, so refuse anything else, and say so.
       this.write({ type: 'control_response', response: { subtype: 'error', request_id: m.request_id, error: `HQ does not handle ${req.subtype}` } });
+      this.notice(`Claude sent a request that HQ does not handle (${req.subtype || 'unknown'}), and HQ refused it.`, true);
       return;
     }
     let card;
@@ -1432,6 +1740,7 @@ ${text}`.trim().slice(0, 2000);
     this.unread = false;
     this.refreshState();
     invoke('request_attention').catch(() => {});
+    notifyWaiting(this, req);
   }
 
   dropPrompt(requestId) {
@@ -1486,6 +1795,19 @@ ${text}`.trim().slice(0, 2000);
     const questions = Array.isArray(input.questions) ? input.questions : [];
     const picks = questions.map(() => new Set());
     const others = [];
+    let focusedQ = 0; // the question the number keys answer
+    const focusQuestion = i => {
+      focusedQ = i;
+      blocks.forEach((b, k) => b.classList.toggle('qfocus', questions.length > 1 && k === i));
+    };
+    // After a single-choice answer the number keys move on to the next question that has none yet.
+    const nextOpen = qi => {
+      for (let k = 1; k < questions.length; k++) {
+        const i = (qi + k) % questions.length;
+        if (!picks[i].size && !others[i].value) return i;
+      }
+      return qi;
+    };
     const blocks = questions.map((q, qi) => {
       const buttons = (q.options || []).map((opt, oi) => {
         const b = choice(String(oi + 1), opt.label, opt.description, () => {
@@ -1498,18 +1820,23 @@ ${text}`.trim().slice(0, 2000);
           }
           buttons.forEach(btn => btn.classList.toggle('selected', picks[qi].has(btn.dataset.label)));
           if (!q.multiSelect && questions.length === 1) submit();
+          else if (!q.multiSelect) focusQuestion(nextOpen(qi));
         });
         b.dataset.label = opt.label;
         return b;
       });
       others[qi] = h('input', { type: 'text', placeholder: 'Other…' });
       others[qi].addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
-      return h('div', { class: 'qblock' },
+      const block = h('div', { class: 'qblock' },
         q.header ? h('div', { class: 'qhead', text: q.header }) : null,
         h('div', { class: 'prompt-title', text: q.question }),
         h('div', { class: 'choices' }, buttons),
         others[qi]);
+      block.addEventListener('pointerdown', () => focusQuestion(qi));
+      block.addEventListener('focusin', () => focusQuestion(qi));
+      return block;
     });
+    focusQuestion(0);
     const submit = () => {
       const answers = {};
       questions.forEach((q, qi) => {
@@ -1525,7 +1852,10 @@ ${text}`.trim().slice(0, 2000);
       h('div', { class: 'actions' },
         h('button', { class: 'btn primary', onclick: submit }, 'Submit'),
         h('button', { class: 'btn', onclick: skip }, 'Skip')));
-    if (questions.length === 1) card.hotkeys = (questions[0].options || []).map((_, i) => () => blocks[0].querySelectorAll('.choice')[i].click());
+    card.hotkeys = Array.from({ length: 9 }, (_, i) => () => {
+      const button = blocks[focusedQ].querySelectorAll('.choice')[i];
+      if (button) button.click();
+    });
     return card;
   }
 
@@ -1551,31 +1881,479 @@ ${text}`.trim().slice(0, 2000);
 
   // ---------- history ----------
 
-  async loadHistory() {
-    if (!this.sessionId) return;
-    let lines = [];
+  /**
+   * Draws the transcript, in slices that give the event loop back so a long one does not freeze
+   * the window. A collapsed cell waits until it is opened. Only the newest part is loaded; an
+   * earlier part is fetched on request ("Load earlier").
+   */
+  loadHistory() {
+    if (!this.sessionId || this.historyLoading) return this.historyLoading;
+    this.historyLoading = this.drawHistory().finally(() => { this.historyLoading = null; });
+    return this.historyLoading;
+  }
+
+  async drawHistory() {
+    let chunk = { lines: [], start: 0 };
     try {
-      lines = await invoke('load_transcript', { sessionId: this.sessionId });
+      chunk = await invoke('load_transcript', { sessionId: this.sessionId, before: null });
     } catch (err) {
       this.notice(`Could not load history: ${err}`, true);
     }
+    const lines = Array.isArray(chunk.lines) ? chunk.lines : [];
+    this.historyStart = Number(chunk.start) || 0;
     const prevStick = this.stickToBottom;
     this.stickToBottom = false;
     this.replaying = true;
-    for (const line of lines) {
-      try { this.handle(JSON.parse(line), true); } catch { /* skip malformed line */ }
-    }
+    const last = await this.replayLines(lines);
     this.replaying = false;
     this.closeTurn(true);
     this.settleTools();
-    this.renderProgress();
+    this.drawProgress();
+    this.renderContext();
     this.stickToBottom = prevStick;
     this.setTitle(this.title);
     saveState(); // keeps a title recovered from the transcript
+    if (this.historyStart > 0) this.msgs.prepend(this.earlierNote());
     if (this.fork) this.notice('Forked: your first message starts a copy of this session. The original is left as it was.');
+    else if (this.missing) this.notice('The folder of this session is missing, so the session cannot continue. Use "Locate folder…" below, or close it.');
     else this.notice(lines.length ? 'Session restored. Claude resumes when you send a message.' : 'Session restored (no history found).');
+    if (last && endsMidTurn(last)) this.notice('The last turn was interrupted when HQ closed.');
     if (this.resumeWarning) this.notice(this.resumeWarning, true);
-    this.msgs.scrollTop = this.msgs.scrollHeight;
+    this.pinToBottom();
+  }
+
+  /**
+   * Replays transcript lines through the live handlers; returns the last user or assistant message.
+   * `slices`: give the event loop back now and then (not for the earlier part, which swaps state
+   * that live messages must not see).
+   */
+  async replayLines(lines, slices = true) {
+    let last = null;
+    let sliceStart = performance.now();
+    for (const line of lines) {
+      try {
+        const m = JSON.parse(line);
+        this.handle(m, true);
+        if (m.type === 'user' || m.type === 'assistant') last = m;
+      } catch { /* skip malformed line */ }
+      if (slices && performance.now() - sliceStart > 12) {
+        await new Promise(resolve => setTimeout(resolve, 0));
+        sliceStart = performance.now();
+        if (this.closing) return last;
+      }
+    }
+    return last;
+  }
+
+  earlierNote() {
+    const button = h('button', { class: 'btn', text: 'Load earlier' });
+    const note = h('div', { class: 'item notice' }, 'Earlier messages of this session are not shown. ', button);
+    button.addEventListener('click', async () => {
+      button.disabled = true;
+      await this.loadEarlier();
+      note.remove();
+      if (this.historyStart > 0) this.msgs.prepend(this.earlierNote());
+    });
+    return note;
+  }
+
+  /** Draws the part of the transcript before the one shown, above it, and keeps the view where it was. */
+  async loadEarlier() {
+    let chunk;
+    try {
+      chunk = await invoke('load_transcript', { sessionId: this.sessionId, before: this.historyStart });
+    } catch (err) {
+      this.notice(`Could not load earlier history: ${err}`, true);
+      return;
+    }
+    const lines = Array.isArray(chunk.lines) ? chunk.lines : [];
+    // Draw into a detached container (items append to this.msgs), then move the result to the top.
+    const shown = this.msgs;
+    const staging = h('div');
+    const saved = { turnTexts: this.turnTexts, title: this.title, aiTitle: this.aiTitle, customTitle: this.customTitle,
+      lastReply: this.lastReply, ctx: { ...this.ctx }, replaying: this.replaying };
+    this.msgs = staging;
+    this.turnTexts = [];
+    this.replaying = true;
+    this.replayingEarlier = true;
+    try {
+      // One synchronous pass, so no live message can arrive while this.msgs points at the staging area.
+      for (const line of lines) {
+        try { this.handle(JSON.parse(line), true); } catch { /* skip malformed line */ }
+      }
+      this.closeTurn(true);
+    } finally {
+      this.replaying = saved.replaying;
+      this.replayingEarlier = false;
+      this.msgs = shown;
+      this.turnTexts = saved.turnTexts;
+      this.lastReply = saved.lastReply;
+      this.ctx = saved.ctx; // the older messages' usage says nothing about the context now
+      Object.assign(this, { title: saved.title, aiTitle: saved.aiTitle, customTitle: saved.customTitle });
+    }
+    const before = shown.scrollHeight;
+    shown.prepend(...staging.childNodes);
+    shown.scrollTop += shown.scrollHeight - before;
+    this.historyStart = Number(chunk.start) || 0;
+  }
+
+  // ---------- folder missing ----------
+
+  applyMissing() {
+    this.el.classList.toggle('missing', this.missing);
+    this.missingBar.classList.toggle('hidden', !this.missing);
+    this.missingBar.querySelector('.missing-text').textContent = `Folder missing: ${this.cwd}`;
+    this.input.disabled = this.missing;
+    this.stateEl.textContent = stateOf(this)[1];
+  }
+
+  /** Points a cell whose folder is gone at a folder that exists, and brings its history back. */
+  async locateFolder() {
+    const path = await invoke('pick_folder').catch(() => null);
+    if (!path) return;
+    this.cwd = path;
+    this.color = projectColor(path);
+    this.el.style.setProperty('--proj', this.color);
+    for (const name of this.el.querySelectorAll('.proj-name, .cell-project .sweep-name')) name.textContent = baseName(path) || path;
+    this.el.querySelector('.cell-path').textContent = path;
+    this.missing = false;
+    this.applyMissing();
+    this.renderTitle();
+    this.renderCodeButton();
+    placeCell(this);
+    layout();
+    rememberFolder(path);
+    saveState();
+    this.notice(`Folder set to ${path}. If Claude cannot resume the session from this folder, copy the project's session files across or start a new session.`);
+    focusCell(this, true);
+  }
+
+  // ---------- context window ----------
+
+  /** The last request's size is what the next one starts with: input plus both cache counters. */
+  noteUsage(m) {
+    const msg = m.message || {};
+    const u = msg.usage;
+    if (!u || m.parent_tool_use_id || msg.model === '<synthetic>') return;
+    const tokens = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+    if (!tokens) return;
+    this.ctx.tokens = tokens;
+    this.ctx.stale = false;
+    if (msg.model) this.ctx.model = msg.model;
+    if (!this.replaying) this.renderContext();
+  }
+
+  /** A result carries the window size per model (its token counts are cumulative, so only `contextWindow` is read) and the cost. */
+  noteResult(m) {
+    const win = pickContextWindow(m.modelUsage, this.ctx.model || this.resolvedModel);
+    if (win) this.ctx.window = win;
+    const total = Number(m.total_cost_usd);
+    if (Number.isFinite(total)) {
+      if (total > this.cost.procUsd) this.cost.usd += total - this.cost.procUsd;
+      this.cost.procUsd = Math.max(total, this.cost.procUsd);
+    }
+    let tokens = 0;
+    for (const u of Object.values(m.modelUsage && typeof m.modelUsage === 'object' ? m.modelUsage : {})) {
+      tokens += (u.inputTokens || 0) + (u.outputTokens || 0) + (u.cacheReadInputTokens || 0) + (u.cacheCreationInputTokens || 0);
+    }
+    if (tokens > this.cost.procTokens) this.cost.tokens += tokens - this.cost.procTokens;
+    this.cost.procTokens = Math.max(tokens, this.cost.procTokens);
+    this.renderContext();
+  }
+
+  renderMeta() {
+    const parts = [this.lastDuration, this.cost.usd > 0 ? formatCost(this.cost.usd) : ''].filter(Boolean);
+    if (this.metaEl.textContent === 'Updating Claude Code…') return;
+    this.metaEl.textContent = parts.join(' · ');
+    this.metaEl.title = this.cost.usd > 0 ? `Last turn${this.lastDuration ? `: ${this.lastDuration}` : ''}\nCost reported by Claude Code in this HQ run: ${formatCost(this.cost.usd)}` : '';
+  }
+
+  /** The ring: how close the context is to the auto-compact point (or to the window's end when auto-compact is off). */
+  renderContext() {
+    const c = this.ctx;
+    const known = c.tokens != null;
+    this.ctxBtn.classList.toggle('hidden', !known && !this.compacting);
+    if (!known && !this.compacting) return;
+    const info = c.info;
+    const max = (info && info.max) || c.window;
+    const limit = (info && info.autoCompact && info.threshold) || max;
+    const percent = known && limit ? Math.min(100, (c.tokens / limit) * 100) : 0;
+    this.ctxBtn.style.setProperty('--ctx-pct', String(percent.toFixed(1)));
+    this.ctxBtn.style.setProperty('--ctx-color', limit ? heatCss(percent) : 'var(--fg-faint)');
+    this.ctxBtn.querySelector('.ctx-text').textContent = !known ? '' : max ? `${Math.round((c.tokens / max) * 100)}%` : formatTokens(c.tokens);
+    this.ctxBtn.classList.toggle('busy', this.compacting);
+    const blocked = this.status === 'running' && !this.compacting;
+    this.ctxBtn.classList.toggle('blocked', blocked);
+    this.ctxBtn.setAttribute('aria-disabled', String(blocked || this.compacting));
+    this.ctxBtn.title = this.compacting ? 'Compacting…' : blocked ? 'Wait for the turn to finish' : '';
+    if (ctxPopCell === this) renderContextPop();
+  }
+
+  /** Asks Claude for the breakdown. The reply is large, so it is asked for on hover only, and kept for 30 seconds. */
+  async refreshContext(force) {
+    const c = this.ctx;
+    if (this.proc == null) return null;
+    if (c.loading) return c.loading;
+    if (!force && Date.now() - c.infoAt < CONTEXT_INFO_TTL_MS) return null;
+    c.loading = (async () => {
+      const reply = await withTimeout(this.control({ subtype: 'get_context_usage', detail: 'summary' }), 15000);
+      const r = reply && reply.subtype === 'success' && reply.response;
+      if (r) {
+        c.info = sanitizeContext(r);
+        c.infoAt = Date.now();
+        if (c.stale && c.info.total != null) { c.tokens = c.info.total; c.stale = false; }
+        if (c.info.max) c.window = c.info.max;
+      }
+    })().catch(() => {}).finally(() => {
+      c.loading = null;
+      this.renderContext();
+    });
+    this.renderContext();
+    return c.loading;
+  }
+
+  /** `/compact` is a local command, so it goes in as a prompt (a plain string). The CLI has no compact control request. */
+  async compact(askInstructions) {
+    if (this.missing || this.compacting || this.status === 'running') return;
+    if (askInstructions) {
+      openMenu(this.ctxBtn, this, menuEl => this.buildCompactMenu(menuEl));
+      return;
+    }
+    await this.runCompact('');
+  }
+
+  async runCompact(instructions) {
+    if (this.historyLoading) await this.historyLoading;
+    if (this.status === 'running' || this.compacting) return;
+    this.setStatus('running'); // its result brings the cell back to idle
+    if (!(await this.ensureProcess())) return;
+    this.notice(instructions ? `Compacting the conversation (${instructions})…` : 'Compacting the conversation…');
+    this.stickToBottom = true;
+    this.write({ type: 'user', message: { role: 'user', content: instructions ? `/compact ${instructions}` : '/compact' }, parent_tool_use_id: null });
+  }
+
+  buildCompactMenu(menuEl) {
+    const field = h('input', { type: 'text', placeholder: 'What to keep in the summary (optional)', spellcheck: 'false' });
+    const go = () => { closeMenu(); this.runCompact(field.value.replace(/\s+/g, ' ').trim()); };
+    field.addEventListener('keydown', e => {
+      e.stopPropagation();
+      if (e.key === 'Enter') { e.preventDefault(); go(); }
+    });
+    menuEl.append(h('div', { class: 'menu-title', text: 'Compact the conversation' }),
+      h('div', { class: 'menu-note' }, field),
+      h('button', { class: 'menu-item', onclick: go }, icon('fold'), h('span', { class: 'menu-main' }, h('span', { class: 'name', text: 'Compact' }))));
+    setTimeout(() => field.focus(), 0);
+  }
+
+  /** status: 'compacting' while it runs; then compact_result 'success' or 'failed' (with compact_error). */
+  onStatus(m) {
+    if (m.status === 'compacting') {
+      this.setCompacting(true);
+    } else if (m.compact_result === 'failed') {
+      this.setCompacting(false);
+      const why = typeof m.compact_error === 'string' && m.compact_error ? m.compact_error : 'Compaction failed.';
+      this.notice(why, !/not enough messages/i.test(why));
+    } else if (m.status == null && m.compact_result) {
+      this.setCompacting(false);
+    }
+  }
+
+  onCompactBoundary(m) {
+    const meta = m.compact_metadata || {};
+    this.setCompacting(false);
+    this.notice(meta.trigger === 'auto' ? 'Conversation compacted automatically' : 'Conversation compacted');
+    this.ctx.info = null;
+    this.ctx.infoAt = 0;
+    const post = Number(meta.post_tokens);
+    if (Number.isFinite(post) && post > 0) {
+      this.ctx.tokens = post;
+      this.ctx.stale = false;
+      this.renderContext();
+    } else {
+      this.ctx.stale = true; // the last request's size no longer holds; ask
+      this.refreshContext(true);
+    }
+  }
+
+  setCompacting(on) {
+    if (this.compacting === on) return;
+    this.compacting = on;
+    if (on && this.status !== 'running') this.setStatus('running');
+    this.renderContext();
+  }
+
+  // ---------- Remote Control ----------
+
+  /** The title Claude Code gives the claude.ai session. Sent only when the user chose it or Claude titled it: a name locks the title. */
+  remoteName() {
+    if (this.customTitle) return this.customTitle;
+    if (this.aiTitle && this.title) return this.title;
+    return null;
+  }
+
+  setRemoteState(state, detail = '') {
+    this.remoteState = state;
+    this.remoteDetail = detail;
+    if (state === 'off') this.remoteUrl = null;
+    this.renderRemote();
+  }
+
+  /** Turns Remote Control on once per process, without the user asking: a failure is shown once, not at every prompt. */
+  autoEnableRemote() {
+    if (this.remoteAsked) return;
+    this.remoteAsked = true;
+    this.enableRemote();
+  }
+
+  async enableRemote() {
+    if (this.proc == null || app.remoteAvailable === false || this.remoteState === 'policy' || this.remoteState === 'connecting' || this.remoteState === 'on') return;
+    this.remote = true;
+    const seq = ++this.remoteSeq;
+    this.setRemoteState('connecting');
+    const request = { subtype: 'remote_control', enabled: true };
+    const name = this.remoteName();
+    if (name) request.name = name;
+    if (this.bridgeSessionId) request.reattach_session_id = this.bridgeSessionId;
+    let reply = await this.control(request);
+    if (seq !== this.remoteSeq) return; // turned off meanwhile
+    if (reply && reply.subtype === 'error' && request.reattach_session_id && /not found|no such|unknown|invalid|expired|archiv|ended|gone|exist/i.test(String(reply.error))) {
+      this.bridgeSessionId = null; // the old remote session is gone: start a new one
+      delete request.reattach_session_id;
+      reply = await this.control(request);
+      if (seq !== this.remoteSeq) return;
+    }
+    if (reply && reply.subtype === 'success') {
+      const r = reply.response || {};
+      this.remoteUrl = r.session_url || r.connect_url || null;
+      if (r.bridge_session_id) this.bridgeSessionId = r.bridge_session_id;
+      if (this.remoteState === 'connecting') this.setRemoteState('on');
+      saveState();
+    } else if (reply) {
+      const why = reply.error || 'rejected by Claude';
+      this.setRemoteState('failed', why);
+      this.notice(`Remote Control could not start: ${why}`, true);
+    } else {
+      this.setRemoteState('off'); // the process ended first
+    }
+  }
+
+  async setRemote(on) {
+    this.remote = on;
+    saveState();
+    if (on) {
+      if (this.proc != null) await this.enableRemote();
+      else this.renderRemote(); // starts with Claude
+      return;
+    }
+    this.remoteSeq++; // drops an enable that is still waiting for its reply
+    const wasOn = this.remoteState !== 'off';
+    this.bridgeSessionId = null;
+    this.setRemoteState('off');
+    saveState();
+    if (this.proc != null && wasOn) await this.control({ subtype: 'remote_control', enabled: false });
+  }
+
+  /** system/bridge_state: connected and ready mean the session can be reached from claude.ai; failed carries the cause. */
+  onBridgeState(m) {
+    const detail = [m.detail, m.failure_kind ? `(${m.failure_kind})` : ''].filter(Boolean).join(' ');
+    if (this.remote === false && m.state !== 'policy_disabled') return; // a late event from before the user turned it off
+    if (m.state === 'connected' || m.state === 'ready') {
+      this.setRemoteState('on');
+    } else if (m.state === 'failed') {
+      this.setRemoteState('failed', detail || 'The connection failed.');
+    } else if (m.state === 'policy_disabled') {
+      this.setRemoteState('policy', detail || 'Remote Control is turned off by your organization.');
+      this.notice(`Remote Control is not available: ${this.remoteDetail}`, true);
+    }
+  }
+
+  renderRemote() {
+    const btn = this.remoteBtn;
+    const hidden = app.remoteAvailable === false || this.remoteState === 'policy';
+    btn.classList.toggle('hidden', hidden);
+    if (hidden) return;
+    const armed = this.remote && this.proc == null;
+    btn.classList.toggle('on', this.remoteState === 'on');
+    btn.classList.toggle('connecting', this.remoteState === 'connecting');
+    btn.classList.toggle('failed', this.remoteState === 'failed');
+    btn.title = this.remoteState === 'on' ? 'Remote Control is on: continue this session from claude.ai/code or the Claude app\nClick for options'
+      : this.remoteState === 'connecting' ? 'Connecting Remote Control…'
+      : this.remoteState === 'failed' ? `Remote Control failed: ${this.remoteDetail}\nClick for options`
+      : armed ? 'Remote Control turns on when Claude starts for this session\nClick for options'
+      : 'Remote Control: off. Click to turn it on';
+    btn.querySelector('.codicon').className = `codicon codicon-${this.remoteState === 'on' || armed ? 'broadcast' : 'circle-slash'}`;
+  }
+
+  buildRemoteMenu(menuEl) {
+    menuEl.append(h('div', { class: 'menu-title', text: 'Remote Control' }));
+    const item = (name, desc, run, ico) => h('button', { class: 'menu-item', onclick: () => { closeMenu(); run(); } },
+      icon(ico), h('span', { class: 'menu-main' }, h('span', { class: 'name', text: name }), desc ? h('span', { class: 'desc', text: desc }) : null));
+    if (this.remoteState === 'on') {
+      if (this.remoteUrl) {
+        menuEl.append(item('Open on claude.ai', this.remoteUrl, () => invoke('open_url', { url: this.remoteUrl }).catch(err => this.notice(String(err), true)), 'link-external'));
+        menuEl.append(item('Copy link', '', () => copyText(this.remoteUrl), 'copy'));
+      } else {
+        menuEl.append(h('div', { class: 'menu-note', text: 'On. Claude gave no link for this session; open it from the list on claude.ai/code.' }));
+      }
+      menuEl.append(item('Turn off', '', () => this.setRemote(false), 'circle-slash'));
+    } else if (this.remoteState === 'connecting') {
+      menuEl.append(h('div', { class: 'menu-note', text: 'Connecting…' }));
+    } else {
+      if (this.remoteState === 'failed') menuEl.append(h('div', { class: 'menu-note error', text: this.remoteDetail || 'The connection failed.' }));
+      if (this.remote && this.proc == null) {
+        menuEl.append(h('div', { class: 'menu-note', text: 'Turns on when Claude starts for this session.' }));
+        menuEl.append(item('Start Claude now', '', () => this.ensureProcess(), 'play'));
+        menuEl.append(item('Turn off', '', () => this.setRemote(false), 'circle-slash'));
+      } else {
+        menuEl.append(item(this.remoteState === 'failed' ? 'Try again' : 'Turn on', 'Continue this session from claude.ai/code or the Claude app', () => {
+          this.remoteState = 'off';
+          this.setRemote(true);
+        }, 'broadcast'));
+      }
+    }
+    const def = !!app.remoteDefault;
+    menuEl.append(h('div', { class: 'menu-title', text: 'New sessions' }));
+    menuEl.append(h('button', { class: `menu-item${def ? ' checked' : ''}`, onclick: () => { app.remoteDefault = !def; saveState(); refreshMenu(); } },
+      icon(def ? 'check' : 'blank'), h('span', { class: 'menu-main' }, h('span', { class: 'name', text: 'Start with Remote Control on' }))));
+  }
+
+  // ---------- export ----------
+
+  /** The session as Markdown, from what the cell shows: prompts, Claude's text, and a line per tool call. */
+  transcriptMarkdown() {
+    const out = [`# ${this.displayTitle() || 'Session'}`, '', `Folder: ${this.cwd}`, `Exported: ${new Date().toLocaleString()}`, ''];
+    if (this.historyStart > 0) out.push('*Earlier messages of this session are not included: use "Load earlier" in HQ first.*', '');
+    for (const item of this.msgs.children) {
+      if (item.classList.contains('user')) {
+        const stampEl = item.querySelector('.stamp');
+        const bubble = item.querySelector('.bubble');
+        const body = [...(bubble ? bubble.children : [])].filter(c => !c.classList.contains('stamp') && !c.classList.contains('bubble-images')).map(c => c.textContent).join('\n');
+        out.push(`## You${stampEl ? ` (${stampEl.title})` : ''}`, '', body, '');
+      } else if (item.classList.contains('text')) {
+        const md = item.querySelector('.md');
+        const source = md && (md._src || md.textContent);
+        if (source) out.push(item.classList.contains('narration') ? source.replace(/^/gm, '> ') : `## Claude\n\n${source}`, '');
+      } else if (item.classList.contains('tool')) {
+        const name = item.querySelector('.tname');
+        const arg = item.querySelector('.targ');
+        if (name) out.push(`*Tool: ${name.textContent}${arg && arg.textContent ? ` — ${arg.textContent}` : ''}*`, '');
+      }
+    }
+    return out.join('\n');
+  }
+
+  async exportTranscript() {
+    if (this.historyPending) {
+      this.historyPending = false;
+      await this.loadHistory();
+    }
+    const base = (this.displayTitle() || 'session').replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60) || 'session';
+    try {
+      const path = await invoke('save_text_file', { defaultName: `${base}.md`, text: this.transcriptMarkdown() });
+      if (path) this.notice(`Exported to ${path}`);
+    } catch (err) {
+      this.notice(`Could not export: ${err}`, true);
+    }
   }
 }
 
@@ -1602,6 +2380,7 @@ function suggestionLabel(suggestions) {
 
 function autoGrow(ta) {
   ta.style.height = 'auto';
+  if (!ta.scrollHeight) return; // not laid out yet (a detached or collapsed cell): keep the natural height
   ta.style.height = Math.min(ta.scrollHeight, 200) + 'px';
 }
 
@@ -1697,6 +2476,273 @@ function sanitizeMcp(servers) {
 }
 
 // ======================================================================================
+// Context indicator, slash commands, notifications, small helpers
+// ======================================================================================
+
+const CONTEXT_INFO_TTL_MS = 30 * 1000;
+const ctxPop = $('#context-pop');
+let ctxPopCell = null;
+let ctxHideTimer = null;
+let ctxAskTimer = null;
+
+/** 120k, 1M, 22.4k. */
+function formatTokens(n) {
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1).replace(/\.0$/, '')}M`;
+  if (n >= 1e4) return `${Math.round(n / 1e3)}k`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(1).replace(/\.0$/, '')}k`;
+  return String(Math.round(n));
+}
+
+function formatCost(usd) {
+  return usd < 0.01 ? '<$0.01' : `$${usd.toFixed(2)}`;
+}
+
+/**
+ * The window size of the model that answered. `modelUsage` can list several models (title and side
+ * calls use small ones), so the entry is matched by name rather than taken first.
+ */
+function pickContextWindow(modelUsage, model) {
+  if (!modelUsage || typeof modelUsage !== 'object') return null;
+  const entries = Object.entries(modelUsage).filter(([, u]) => u && Number.isFinite(u.contextWindow) && u.contextWindow > 0);
+  if (!entries.length) return null;
+  const bare = name => String(name).replace(/\[[^\]]*\]$/, '');
+  const m = model ? bare(model) : '';
+  const hit = m && (entries.find(([k]) => k === model) || entries.find(([k]) => bare(k) === m) || entries.find(([k]) => bare(k).startsWith(m) || m.startsWith(bare(k))));
+  if (hit) return hit[1].contextWindow;
+  return entries.length === 1 ? entries[0][1].contextWindow : null;
+}
+
+// get_context_usage names its colors after Claude Code's theme, so they are mapped to HQ's own.
+const CONTEXT_COLORS = { claude: 'var(--claude)', warning: 'var(--waiting)', permission: '#89ddff', inactive: '#6e6e6e', promptborder: '#c586c0',
+  cyan: '#4ec9b0', green: '#3fb950', purple: '#a78bfa', blue: '#569cd6', red: '#f14c4c', orange: '#f78c6c', yellow: '#d7ba7d', pink: '#d16d9e' };
+
+/** Keeps the numbers and the used categories of a get_context_usage reply; the rest of the 87 KB is dropped. */
+function sanitizeContext(r) {
+  const num = v => (Number.isFinite(v) ? v : null);
+  return {
+    total: num(r.totalTokens),
+    max: num(r.maxTokens),
+    percentage: num(r.percentage),
+    threshold: num(r.autoCompactThreshold),
+    autoCompact: r.isAutoCompactEnabled !== false,
+    model: typeof r.model === 'string' ? r.model : '',
+    categories: (Array.isArray(r.categories) ? r.categories : []).filter(c => c && c.kind === 'used' && Number.isFinite(c.tokens) && c.tokens > 0)
+      .map(c => ({ name: String(c.name), tokens: c.tokens, color: CONTEXT_COLORS[String(c.color || '').split('_')[0].toLowerCase()] || '#9d9d9d' })),
+  };
+}
+
+function renderContextPop() {
+  const cell = ctxPopCell;
+  if (!cell || ctxPop.classList.contains('hidden')) return;
+  const c = cell.ctx;
+  const info = c.info;
+  const max = (info && info.max) || c.window;
+  const parts = [h('div', { class: 'usage-head' }, h('span', { text: 'Context window' }), info && info.model ? h('span', { class: 'usage-plan', text: info.model }) : null)];
+  if (c.tokens != null) {
+    const percent = max ? Math.round((c.tokens / max) * 100) : null;
+    parts.push(h('div', { class: 'ctx-line' }, h('span', { text: max ? `${formatTokens(c.tokens)} / ${formatTokens(max)} tokens` : `${formatTokens(c.tokens)} tokens` }),
+      percent != null ? h('span', { class: 'usage-pct', text: `${percent}%` }) : null));
+  }
+  if (info) {
+    parts.push(h('div', { class: 'ctx-line muted' }, h('span', { text: info.autoCompact && info.threshold ? `Auto-compact at ${formatTokens(info.threshold)}` : 'Auto-compact off' })));
+    if (info.categories.length) {
+      parts.push(h('div', { class: 'ctx-sep' }));
+      for (const cat of info.categories) {
+        parts.push(h('div', { class: 'ctx-cat' }, h('span', { class: 'swatch', style: `background:${cat.color}` }), h('span', { class: 'name', text: cat.name }), h('span', { class: 'tokens', text: formatTokens(cat.tokens) })));
+      }
+    }
+  } else if (cell.proc != null) {
+    parts.push(h('div', { class: 'ctx-hint', text: c.loading ? 'Loading details…' : 'Details load while Claude is running.' }));
+  } else {
+    parts.push(h('div', { class: 'ctx-hint', text: 'Details are available while Claude is running.' }));
+  }
+  if (cell.cost.usd > 0) parts.push(h('div', { class: 'ctx-line muted' }, h('span', { text: 'Cost this run' }), h('span', { text: formatCost(cell.cost.usd) })));
+  parts.push(h('div', { class: 'ctx-sep' }));
+  parts.push(h('div', { class: 'ctx-hint', text: cell.compacting ? 'Compacting…' : cell.status === 'running' ? 'Wait for the turn to finish' : 'Click to compact · Shift+click to add instructions' }));
+  ctxPop.replaceChildren(...parts);
+  const r = cell.ctxBtn.getBoundingClientRect();
+  let top = r.top - ctxPop.offsetHeight - 6;
+  if (top < 8) top = Math.min(r.bottom + 6, window.innerHeight - ctxPop.offsetHeight - 8);
+  ctxPop.style.top = `${top}px`;
+  ctxPop.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - ctxPop.offsetWidth - 8))}px`;
+}
+
+function showContextPop(cell) {
+  clearTimeout(ctxHideTimer);
+  clearTimeout(ctxAskTimer);
+  ctxPopCell = cell;
+  ctxPop.classList.remove('hidden');
+  renderContextPop();
+  // Asked after a short hover, so passing over the button costs nothing; refreshContext keeps the answer for 30 s.
+  ctxAskTimer = setTimeout(() => cell.refreshContext(false), 250);
+}
+
+function hideContextPop() {
+  clearTimeout(ctxAskTimer);
+  clearTimeout(ctxHideTimer);
+  ctxHideTimer = setTimeout(() => { ctxPop.classList.add('hidden'); ctxPopCell = null; }, 150);
+}
+
+/** Whether a restored transcript stops in the middle of a turn: Claude's tool call or the user's prompt is the last line. */
+function endsMidTurn(m) {
+  const msg = m.message || {};
+  const content = typeof msg.content === 'string' ? [{ type: 'text', text: msg.content }] : msg.content || [];
+  if (m.type === 'assistant') return content.some(b => b.type === 'tool_use' || b.type === 'server_tool_use');
+  if (m.isMeta || m.isCompactSummary) return false;
+  return content.some(b => b.type === 'tool_result' || b.type === 'image'
+    || (b.type === 'text' && b.text && !b.text.startsWith('[Request interrupted') && !/^\s*<(command-|local-command-|system-reminder|task-notification|ide_)/.test(b.text)));
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const area = h('textarea', { style: 'position:fixed;opacity:0' });
+    area.value = text;
+    document.body.append(area);
+    area.select();
+    document.execCommand('copy');
+    area.remove();
+  }
+}
+
+function renderRemoteButtons() {
+  for (const c of app.cells) c.renderRemote();
+}
+
+// ---------- OS notifications ----------
+
+const notified = { cell: null, at: 0 };
+
+function notify(cell, body) {
+  const title = cell.displayTitle() || baseName(cell.cwd) || 'HQ';
+  notified.cell = cell;
+  notified.at = Date.now();
+  invoke('plugin:notification|notify', { options: { title, body } }).catch(err => console.warn('notification failed', err));
+}
+
+/** A finished turn while HQ is not the active window: the taskbar flashes, and a notification names the session and its reply. */
+function notifyTurnDone(cell, m) {
+  if (!app.settings.notify || document.hasFocus()) return;
+  const failed = m.is_error || m.subtype !== 'success';
+  notify(cell, failed ? 'The turn stopped with an error.' : cell.lastReply || 'Finished.');
+}
+
+function notifyWaiting(cell, req) {
+  if (!app.settings.notify || document.hasFocus()) return;
+  notify(cell, `Needs your answer: ${req.display_name || req.tool_name || 'a question'}`);
+}
+
+// A notification click only brings the window forward, so coming back to HQ soon after one opens its cell.
+window.addEventListener('focus', () => {
+  const { cell, at } = notified;
+  notified.cell = null;
+  if (cell && Date.now() - at < 60 * 1000 && app.cells.includes(cell)) revealCell(cell);
+});
+
+// ---------- slash commands ----------
+
+const slashPop = $('#slash-pop');
+const slash = { cell: null, items: [], index: 0 };
+// Commands the CLI lists but answers with "not available here" in a headless session.
+const HIDDEN_COMMANDS = new Set(['focus']);
+
+/** Keeps name, argument hint and a short description of each command the CLI listed. */
+function sanitizeCommands(list) {
+  const seen = new Set();
+  const out = [];
+  for (const c of Array.isArray(list) ? list : []) {
+    if (!c || typeof c.name !== 'string' || !c.name || seen.has(c.name) || HIDDEN_COMMANDS.has(c.name)) continue;
+    seen.add(c.name);
+    out.push({
+      name: c.name,
+      hint: typeof c.argumentHint === 'string' ? c.argumentHint : '',
+      description: typeof c.description === 'string' ? firstLine(c.description, 140) : '',
+      aliases: Array.isArray(c.aliases) ? c.aliases.filter(a => typeof a === 'string') : [],
+    });
+  }
+  return out;
+}
+
+function slashClose(cell) {
+  if (cell && slash.cell !== cell) return;
+  slash.cell = null;
+  slashPop.classList.add('hidden');
+}
+
+/** Shows the commands matching what follows a "/" at the start of the composer. */
+function slashUpdate(cell) {
+  const m = /^\/([^\s]*)$/.exec(cell.input.value);
+  if (!m || !app.commands.length || cell.collapsed) { slashClose(cell); return; }
+  const q = m[1].toLowerCase();
+  const rank = c => {
+    const n = c.name.toLowerCase();
+    if (n === q) return 0;
+    if (n.startsWith(q)) return 1;
+    if (c.aliases.some(a => a.toLowerCase().startsWith(q))) return 2;
+    return n.includes(q) ? 3 : 9;
+  };
+  const items = app.commands.map(c => [rank(c), c]).filter(([r]) => r < 9)
+    .sort((a, b) => a[0] - b[0] || a[1].name.localeCompare(b[1].name)).map(x => x[1]).slice(0, 40);
+  if (!items.length) { slashClose(cell); return; }
+  Object.assign(slash, { cell, items, index: 0 });
+  renderSlash();
+}
+
+function renderSlash() {
+  const cell = slash.cell;
+  if (!cell) return;
+  slashPop.replaceChildren(...slash.items.map((c, i) => {
+    const row = h('button', { class: `slash-item${i === slash.index ? ' active' : ''}`, tabindex: '-1', role: 'option' },
+      h('span', { class: 'name', text: `/${c.name}` }),
+      c.hint ? h('span', { class: 'hint', text: c.hint }) : null,
+      h('span', { class: 'desc', text: c.description, title: c.description }));
+    row.addEventListener('mousedown', e => { e.preventDefault(); slashComplete(cell, c); }); // mousedown: the textarea keeps its focus
+    return row;
+  }));
+  slashPop.classList.remove('hidden');
+  const r = cell.input.getBoundingClientRect();
+  slashPop.style.width = `${Math.min(420, Math.max(240, r.width))}px`;
+  let top = r.top - slashPop.offsetHeight - 4;
+  if (top < 8) top = Math.min(r.bottom + 4, window.innerHeight - slashPop.offsetHeight - 8);
+  slashPop.style.top = `${top}px`;
+  slashPop.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - slashPop.offsetWidth - 8))}px`;
+  slashPop.querySelector('.active').scrollIntoView({ block: 'nearest' });
+}
+
+function slashComplete(cell, command) {
+  cell.input.value = `/${command.name} `;
+  slashClose(cell);
+  autoGrow(cell.input);
+  cell.input.focus();
+  saveState();
+}
+
+/** Arrow keys pick, Tab or Enter completes, Esc closes. Enter on a name that is already complete sends it. */
+function slashKeydown(cell, e) {
+  if (slash.cell !== cell || slashPop.classList.contains('hidden') || e.isComposing) return false;
+  const current = slash.items[slash.index];
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    slash.index = (slash.index + (e.key === 'ArrowDown' ? 1 : slash.items.length - 1)) % slash.items.length;
+    renderSlash();
+    return true;
+  }
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    e.stopPropagation(); // not an interrupt for Claude
+    slashClose(cell);
+    return true;
+  }
+  if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && cell.input.value.trim() !== `/${current.name}`)) {
+    e.preventDefault();
+    slashComplete(cell, current);
+    return true;
+  }
+  return false;
+}
+
+// ======================================================================================
 // Popup menu (model/effort, MCP servers)
 // ======================================================================================
 
@@ -1750,20 +2796,34 @@ const projectKey = path => normPath(path).toLowerCase();
  * Adds a cell right after the last open cell of its project, so the grid, the sessions list
  * and the Ctrl+1..9 keys show sessions grouped by project, projects in the order first opened.
  */
-function addCell(opts, { restore = false } = {}) {
+function addCell(opts, { restore = false, batch = false } = {}) {
   const cell = new Cell(opts);
+  placeCell(cell);
+  // A batch (the restore at startup) lays the board out once, when it is done.
+  if (!batch) layout();
+  focusCell(cell, !batch);
+  // Claude starts on the first message, so an empty cell costs no claude process.
+  if (restore) {
+    if (cell.collapsed) cell.historyPending = true; // drawn when the cell is first opened
+    else cell.loadHistory();
+  } else {
+    rememberFolder(cell.cwd);
+  }
+  if (!batch) {
+    saveState();
+    renderSidebar();
+  }
+  return cell;
+}
+
+/** Puts a cell right after the last open cell of its project, so projects stay grouped in first-opened order. */
+function placeCell(cell) {
+  const i = app.cells.indexOf(cell);
+  if (i >= 0) app.cells.splice(i, 1);
   const key = projectKey(cell.cwd);
   const last = app.cells.findLastIndex(c => projectKey(c.cwd) === key);
   if (last >= 0) app.cells.splice(last + 1, 0, cell);
   else app.cells.push(cell);
-  layout();
-  focusCell(cell, true);
-  // Claude starts on the first message, so an empty cell costs no claude process.
-  if (restore) cell.loadHistory();
-  else rememberFolder(cell.cwd);
-  saveState();
-  renderSidebar();
-  return cell;
 }
 
 /** Opens a new session with the permission mode, model and effort the user picked last. */
@@ -1940,8 +3000,9 @@ function layout() {
     for (const el of want) el.classList.toggle('max', !!app.maximized && el === app.maximized.el);
   });
 
+  // Writes only: a scrollTop past the end is clamped, so scrollHeight is not read once per cell.
   for (const [c, top, stick] of scrolls) {
-    c.msgs.scrollTop = stick ? c.msgs.scrollHeight : top;
+    c.msgs.scrollTop = stick ? 1e9 : top;
   }
   if (menuState.anchor) refreshMenu();
 }
@@ -1975,6 +3036,7 @@ const searchInput = $('#session-search');
 let sidebarFrame = 0;
 
 function stateOf(cell) {
+  if (cell.missing) return ['state-exited', 'Folder missing'];
   if (cell.pending.size) return ['state-waiting', 'Waiting on you'];
   if (cell.status === 'running') return ['state-running', 'Working'];
   if (cell.bgTasks.length) return ['state-bg', `${cell.bgTasks.length} in background`];
@@ -2155,10 +3217,12 @@ const resumeProject = $('#resume-project');
 // `all`: the newest sessions from every folder, which the folder list is built from.
 // `project`: the folder picked in the list ('' for all); its sessions are fetched on their own,
 // so older ones show too. `seq` drops a reply that a newer request has overtaken.
-const resumeState = { sessions: [], all: [], project: '', source: '', loading: false, error: null, seq: 0 };
+const resumeState = { sessions: [], all: [], project: '', source: '', loading: false, error: null, seq: 0,
+  deep: false, hits: [], deepLoading: false, deepError: null, deepSeq: 0 }; // deep: search inside the conversations
 
 async function openResumer() {
   closePicker();
+  closeSettings();
   closeMenu();
   resumer.classList.remove('hidden');
   resumeSearch.value = '';
@@ -2227,7 +3291,62 @@ function timeAgo(ms) {
   return new Date(ms).toLocaleDateString();
 }
 
+/** Matches of the search inside conversations, streamed in by the backend. */
+function renderDeepHits() {
+  const q = resumeSearch.value.trim();
+  const rows = [];
+  for (const hit of resumeState.hits) {
+    const at = Date.parse(hit.timestamp) || 0;
+    const info = { sessionId: hit.sessionId, cwd: hit.cwd, title: hit.title, lastPrompt: hit.snippet, modifiedMs: at };
+    const open = app.cells.find(c => c.sessionId === hit.sessionId);
+    const snippet = h('span', { class: 'snippet' });
+    const lower = hit.snippet.toLowerCase();
+    const i = lower.indexOf(q.toLowerCase());
+    if (i >= 0) snippet.append(hit.snippet.slice(0, i), h('mark', { text: hit.snippet.slice(i, i + q.length) }), hit.snippet.slice(i + q.length));
+    else snippet.textContent = hit.snippet;
+    const row = h('button', { class: 'hit', disabled: hit.cwdExists === false, title: `${hit.cwd}\n${hit.sessionId}` },
+      h('span', { class: 'resume-line' }, h('span', { class: 'resume-title', text: hit.title || '(no title)' }),
+        open ? h('span', { class: 'badge on', text: 'Open in HQ' }) : null,
+        hit.cwdExists === false ? h('span', { class: 'badge err', text: 'Folder missing' }) : null,
+        at ? h('span', { class: 'resume-time', text: timeAgo(at) }) : null),
+      snippet,
+      h('span', { class: 'resume-path', text: `${hit.role === 'user' ? 'You' : 'Claude'} · ${hit.cwd}` }));
+    row.style.setProperty('--proj', projectColor(hit.cwd));
+    row.addEventListener('click', () => resumeSession(info, false));
+    rows.push(row);
+  }
+  if (!rows.length) {
+    const text = resumeState.deepError || (q.length < 2 ? 'Type at least two characters to search inside conversations.' : resumeState.deepLoading ? 'Searching…' : 'No conversation contains that text.');
+    rows.push(h('div', { class: `session-empty${resumeState.deepError ? ' error' : ''}`, text }));
+  } else if (resumeState.deepLoading) {
+    rows.push(h('div', { class: 'session-empty', text: 'Searching…' }));
+  }
+  resumeList.replaceChildren(...rows);
+}
+
+/** Starts the search inside conversations; a newer search (or leaving the mode) drops the older one's hits. */
+function runDeepSearch() {
+  const q = resumeSearch.value.trim();
+  const seq = ++resumeState.deepSeq;
+  resumeState.hits = [];
+  resumeState.deepError = null;
+  resumeState.deepLoading = q.length >= 2;
+  renderResumeList();
+  if (q.length < 2) return;
+  let frame = 0;
+  const channel = new Channel();
+  channel.onmessage = hit => {
+    if (seq !== resumeState.deepSeq) return;
+    for (const one of Array.isArray(hit) ? hit : [hit]) if (one && typeof one.snippet === 'string') resumeState.hits.push(one);
+    if (!frame) frame = requestAnimationFrame(() => { frame = 0; renderResumeList(); });
+  };
+  invoke('search_sessions', { query: q, cwd: resumeState.project || null, limit: 100, onHit: channel })
+    .catch(err => { if (seq === resumeState.deepSeq) resumeState.deepError = String(err); })
+    .finally(() => { if (seq === resumeState.deepSeq) { resumeState.deepLoading = false; renderResumeList(); } });
+}
+
 function renderResumeList() {
+  if (resumeState.deep) { renderDeepHits(); return; }
   if (resumeState.loading && !resumeState.sessions.length) {
     resumeList.replaceChildren(h('div', { class: 'session-empty', text: 'Reading sessions…' }));
     return;
@@ -2287,15 +3406,29 @@ function resumeSession(info, fork) {
   revealCell(cell);
 }
 
-resumeSearch.addEventListener('input', renderResumeList);
+let deepTimer = 0;
+resumeSearch.addEventListener('input', () => {
+  if (!resumeState.deep) { renderResumeList(); return; }
+  clearTimeout(deepTimer);
+  deepTimer = setTimeout(runDeepSearch, 300);
+});
+$('#resume-deep').addEventListener('click', e => {
+  resumeState.deep = !resumeState.deep;
+  e.currentTarget.classList.toggle('on', resumeState.deep);
+  resumeSearch.placeholder = resumeState.deep ? 'Search inside conversations' : 'Search by title, prompt or folder';
+  resumeSearch.focus();
+  if (resumeState.deep) runDeepSearch();
+  else { resumeState.deepSeq++; renderResumeList(); }
+});
 $('#resume-filters').addEventListener('click', e => {
   const btn = e.target.closest('button');
-  if (!btn) return;
+  if (!btn || btn.id === 'resume-deep') return;
   resumeState.source = btn.dataset.source;
   for (const b of $('#resume-filters').querySelectorAll('button')) b.classList.toggle('on', b === btn);
   renderResumeList();
 });
 resumeProject.addEventListener('change', () => {
+  if (resumeState.deep) { resumeState.project = resumeProject.value; resumeProject.classList.toggle('on', !!resumeState.project); runDeepSearch(); return; }
   resumeState.project = resumeProject.value;
   resumeProject.classList.toggle('on', !!resumeState.project);
   if (!resumeState.project) resumeState.sessions = resumeState.all;
@@ -2303,7 +3436,7 @@ resumeProject.addEventListener('change', () => {
   loadResumeSessions();
 });
 resumer.addEventListener('keydown', e => {
-  const items = [...resumeList.querySelectorAll('.resume-item:not([disabled])')];
+  const items = [...resumeList.querySelectorAll('.resume-item:not([disabled]), .hit:not([disabled])')];
   if (e.key === 'Escape') { e.stopPropagation(); closeResumer(); return; }
   if (e.target === resumeProject) return; // the arrow keys pick a folder there
   if (e.key === 'Enter' && document.activeElement === resumeSearch) {
@@ -2519,6 +3652,83 @@ setInterval(() => {
 }, 30000);
 
 // ======================================================================================
+// Settings: what used to be environment variables, plus the theme and notifications
+// ======================================================================================
+
+const settingsPanel = $('#settings');
+
+/** Keeps known keys with the right types, so a hand-edited board.json cannot break the app. */
+function sanitizeSettings(x) {
+  const v = x && typeof x === 'object' ? x : {};
+  return {
+    theme: ['auto', 'dark', 'light'].includes(v.theme) ? v.theme : 'auto',
+    notify: v.notify !== false,
+    autoUpdate: v.autoUpdate !== false,
+    claudePath: typeof v.claudePath === 'string' ? v.claudePath.trim().slice(0, 500) : '',
+  };
+}
+
+function applySettings() {
+  const { theme, claudePath } = app.settings;
+  if (theme === 'auto') delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = theme;
+  invoke('set_claude_path', { path: claudePath || null }).catch(() => {}); // the backend uses it for every claude it starts
+}
+
+function changeSetting(key, value) {
+  app.settings = { ...app.settings, [key]: value };
+  applySettings();
+  saveState();
+}
+
+function renderSettings() {
+  const row = (name, desc, control) => h('div', { class: 'setting' }, h('div', { class: 'setting-main' }, h('span', { class: 'name', text: name }), desc ? h('span', { class: 'desc', text: desc }) : null), control);
+  const toggle = (on, onChange) => {
+    const sw = h('button', { class: `switch${on ? ' on' : ''}`, role: 'switch', 'aria-checked': String(on) });
+    sw.addEventListener('click', () => { onChange(!on); renderSettings(); });
+    return sw;
+  };
+  const select = (value, options, onChange) => {
+    const el = h('select', null, options.map(([v, label]) => h('option', { value: v, text: label })));
+    el.value = value;
+    el.addEventListener('change', () => onChange(el.value));
+    return el;
+  };
+  const path = h('input', { type: 'text', value: app.settings.claudePath, placeholder: 'claude', spellcheck: 'false' });
+  path.addEventListener('change', () => changeSetting('claudePath', path.value.trim()));
+  const models = modelList().map(m => [m.value, m.displayName || m.value]);
+  settingsPanel.querySelector('#settings-body').replaceChildren(
+    row('Theme', 'Auto follows Windows.', select(app.settings.theme, [['auto', 'Auto'], ['dark', 'Dark'], ['light', 'Light']], v => changeSetting('theme', v))),
+    row('Notifications', 'A notification when a turn finishes, or Claude needs you, while HQ is in the background.', toggle(app.settings.notify, v => changeSetting('notify', v))),
+    row('Remote Control for new sessions', 'Continue sessions from claude.ai/code or the Claude app.', toggle(!!app.remoteDefault, v => { app.remoteDefault = v; saveState(); renderRemoteButtons(); })),
+    row('Default model for new sessions', 'The same as picking a model in a session. HQ_MODEL still applies when none is picked.',
+      select(app.defaults.model || 'default', models, v => rememberChoice({ model: v }))),
+    row('Check for HQ updates automatically', 'The Check for updates button in the sessions list always works.', toggle(app.settings.autoUpdate, v => changeSetting('autoUpdate', v))),
+    row('Claude command', 'Path to the claude program, for sessions started from now on. Empty uses HQ_CLAUDE, else claude on PATH.', path));
+}
+
+function openSettings() {
+  closePicker();
+  closeResumer();
+  closeMenu();
+  renderSettings();
+  settingsPanel.classList.remove('hidden');
+}
+
+function closeSettings() {
+  settingsPanel.classList.add('hidden');
+}
+
+$('#open-settings').addEventListener('click', () => (settingsPanel.classList.contains('hidden') ? openSettings() : closeSettings()));
+$('#settings-btn').addEventListener('click', () => (settingsPanel.classList.contains('hidden') ? openSettings() : closeSettings()));
+settingsPanel.addEventListener('keydown', e => {
+  if (e.key === 'Escape') { e.stopPropagation(); closeSettings(); }
+});
+document.addEventListener('mousedown', e => {
+  if (!settingsPanel.classList.contains('hidden') && !settingsPanel.contains(e.target) && !e.target.closest('#open-settings, #settings-btn')) closeSettings();
+});
+
+// ======================================================================================
 // Self-update: download in the background, install when nothing would be interrupted
 // ======================================================================================
 
@@ -2635,7 +3845,10 @@ checkUpdateBtn.addEventListener('click', async () => {
 for (const type of ['keydown', 'pointerdown', 'wheel']) {
   document.addEventListener(type, () => { updater.lastInput = Date.now(); }, { capture: true, passive: true });
 }
-setInterval(checkForUpdate, UPDATE_EVERY_MS);
+function autoCheckForUpdate() {
+  if (app.settings.autoUpdate) checkForUpdate();
+}
+setInterval(autoCheckForUpdate, UPDATE_EVERY_MS);
 setInterval(() => {
   if (updater.ready && !updater.installing && (updater.wanted ? sessionsIdle() : safeToRestart())) installUpdate();
 }, 5 * 1000);
@@ -2666,6 +3879,7 @@ document.addEventListener('keydown', e => {
   if (e.ctrlKey && !e.shiftKey && !e.altKey) {
     if (e.key === 'n' || e.key === 'N') { e.preventDefault(); openPicker(); return; }
     if (e.key === 'o' || e.key === 'O') { e.preventDefault(); openResumer(); return; }
+    if (e.key === ',') { e.preventDefault(); openSettings(); return; }
     if (e.key === 'b' || e.key === 'B') { e.preventDefault(); setSidebar(!app.sidebarOpen, !app.sidebarOpen); return; }
     if ((e.key === 'm' || e.key === 'M') && cell) { e.preventDefault(); toggleMaximize(cell); return; }
     if ((e.key === 'w' || e.key === 'W') && cell) { e.preventDefault(); cell.requestClose(cell.el.querySelector('.act-close')); return; }
@@ -2700,7 +3914,12 @@ document.addEventListener('keydown', e => {
   }
 });
 
-new ResizeObserver(() => layout()).observe(board);
+// One layout per frame while the window is being resized.
+let layoutFrame = 0;
+new ResizeObserver(() => {
+  if (layoutFrame) return;
+  layoutFrame = requestAnimationFrame(() => { layoutFrame = 0; layout(); });
+}).observe(board);
 
 // A file dropped outside a cell would otherwise make the webview navigate to it.
 document.addEventListener('dragover', e => e.preventDefault());
@@ -2717,8 +3936,10 @@ function saveState() {
 }
 
 /** Saves now instead of after the debounce; returns once the board is on disk. */
+let restoring = true; // the board is not saved until the cells are back
 function flushState() {
   clearTimeout(saveTimer);
+  if (restoring) return Promise.resolve();
   const state = {
     version: 2,
     cells: app.cells.map(c => ({
@@ -2735,11 +3956,18 @@ function flushState() {
       progress: c.progressView || undefined,
       fork: c.fork || undefined,
       collapsed: c.collapsed || undefined,
+      remote: c.remote === true ? true : undefined,
+      bridgeSessionId: c.bridgeSessionId || undefined,
+      draft: c.input.value.trim() ? c.input.value : undefined,
     })),
     recent: app.recent,
     models: app.models,
+    commands: app.commands,
     defaults: app.defaults,
     workspaces: app.workspaces,
+    claudeUpdateAt: app.claudeUpdateAt || undefined,
+    remoteDefault: app.remoteDefault == null ? undefined : app.remoteDefault,
+    settings: app.settings,
     sidebarOpen: app.sidebarOpen,
   };
   return invoke('save_state', { json: JSON.stringify(state) }).catch(err => console.error('save failed', err));
@@ -2747,7 +3975,6 @@ function flushState() {
 
 async function restore() {
   await invoke('kill_all_sessions').catch(() => {});
-  updateClaude();
   build = await invoke('build_info').catch(() => build);
   $('#hq-version').textContent = build.version ? `HQ ${build.version}` : 'HQ';
   if (build.profile) {
@@ -2765,19 +3992,25 @@ async function restore() {
   }
   app.recent = Array.isArray(state && state.recent) ? state.recent : [];
   app.models = sanitizeModels(state && state.models);
+  app.commands = sanitizeCommands(state && state.commands);
+  app.claudeUpdateAt = state && Number.isFinite(state.claudeUpdateAt) ? state.claudeUpdateAt : 0;
+  app.remoteDefault = state && typeof state.remoteDefault === 'boolean' ? state.remoteDefault : null;
+  app.settings = sanitizeSettings(state && state.settings);
+  applySettings();
+  // (updateClaude runs at the end: its first save must not write a board that has no cells yet)
   app.defaults = sanitizeDefaults(state && (state.defaults || (state.cells || []).at(-1)));
   app.workspaces = sanitizeWorkspaces(state && state.workspaces);
   app.sidebarOpen = !!(state && state.sidebarOpen);
   sidebar.classList.toggle('hidden', !app.sidebarOpen);
   $('#toggle-sidebar').classList.toggle('on', app.sidebarOpen);
-  for (const c of (state && state.cells) || []) {
-    if (!c || !c.cwd) continue;
+  // Cells whose folder is gone stay on the board, marked, so a rename or an unplugged drive loses nothing.
+  const saved = ((state && state.cells) || []).filter(c => c && c.cwd);
+  const exists = await Promise.all(saved.map(c => invoke('folder_exists', { path: c.cwd }).catch(() => false)));
+  saved.forEach((c, i) => {
     // Version 1 saved the model Claude reported, not one the user picked; drop it so the cell follows the default.
     if ((state.version || 1) < 2) c.model = null;
-    const ok = await invoke('folder_exists', { path: c.cwd }).catch(() => false);
-    if (!ok) continue;
-    addCell(c, { restore: true });
-  }
+    addCell({ ...c, missing: !exists[i], remote: c.remote === true }, { restore: true, batch: true });
+  });
   // Each restored cell took focus in turn; a collapsed one must not keep it.
   if (app.focused && app.focused.collapsed) {
     const open = app.cells.find(c => !c.collapsed);
@@ -2786,8 +4019,13 @@ async function restore() {
   layout();
   updateSummary();
   renderSidebar();
+  for (const c of app.cells) if (!c.collapsed) autoGrow(c.input); // restored drafts, now that the cells are laid out
+  restoring = false;
+  saveState(); // anything saved while the board was coming back
+  updateClaude(); // after the cells are back: it saves the time of the run
+  if (app.focused) focusCell(app.focused, true);
   setTimeout(() => refreshUsage(), 1500);
-  setTimeout(checkForUpdate, UPDATE_FIRST_CHECK_MS);
+  setTimeout(autoCheckForUpdate, UPDATE_FIRST_CHECK_MS);
 }
 
 restore();

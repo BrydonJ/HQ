@@ -2,8 +2,9 @@
 //! (the same stdio protocol the Agent SDKs and the VS Code extension use).
 //!
 //! The backend is deliberately dumb: it never interprets messages. Each stdout line is
-//! forwarded to the frontend verbatim, and each frontend payload is written to stdin
-//! verbatim. Anything Anthropic adds to the protocol flows through untouched.
+//! forwarded to the frontend verbatim (bar lines the frontend provably never uses, and batched
+//! into arrays), and each frontend payload is written to stdin verbatim. Anything Anthropic adds
+//! to the protocol flows through untouched.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -11,16 +12,27 @@ use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use serde::de::IgnoredAny;
 use serde_json::{json, Value};
-use tauri::ipc::Channel;
+use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Manager};
 
 const STDERR_TAIL: usize = 40;
 
+/// Lines read within this long of a batch's first line go to the frontend as one message.
+const BATCH_WINDOW: Duration = Duration::from_millis(16);
+const BATCH_MAX_LINES: usize = 256;
+const BATCH_MAX_BYTES: usize = 1024 * 1024;
+
+/// Remote Control titles a session that has no name yet `<prefix>-<random>`, with the machine
+/// name as the default prefix. HQ sets the folder name instead so such a session is still findable.
+const REMOTE_PREFIX_VAR: &str = "CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX";
+
 pub struct Session {
-    stdin: Mutex<Option<ChildStdin>>,
+    /// Feeds the thread that owns claude's stdin. Dropping the sender closes the pipe.
+    input: Mutex<Option<mpsc::Sender<String>>>,
     child: Arc<Mutex<Child>>,
     #[cfg(windows)]
     _job: Option<job::Job>,
@@ -42,8 +54,24 @@ pub struct SpawnOptions {
     pub fork: bool,
 }
 
+/// The `claude` executable chosen in HQ's own settings, which beats `HQ_CLAUDE`.
+static CLAUDE_PATH: Mutex<Option<String>> = Mutex::new(None);
+
+/// Sets (or, when blank, clears) the executable that every `claude` HQ starts uses. Applies to
+/// the next process started; running sessions are left alone.
+pub fn set_claude_path(path: Option<String>) {
+    // A path pasted from Explorer's "Copy as path" comes wrapped in quotes.
+    let path = path.map(|p| p.trim().trim_matches('"').trim().to_owned()).filter(|p| !p.is_empty());
+    *CLAUDE_PATH.lock().unwrap() = path;
+}
+
 fn claude_program() -> String {
-    std::env::var("HQ_CLAUDE").unwrap_or_else(|_| "claude".into())
+    CLAUDE_PATH
+        .lock()
+        .unwrap()
+        .clone()
+        .or_else(|| std::env::var("HQ_CLAUDE").ok().filter(|p| !p.is_empty()))
+        .unwrap_or_else(|| "claude".into())
 }
 
 fn hide_console(cmd: &mut Command) {
@@ -146,7 +174,8 @@ pub fn update_claude() -> Result<String, String> {
 }
 
 impl Sessions {
-    pub fn spawn(&self, app: &AppHandle, opts: SpawnOptions, events: Channel<String>) -> Result<u64, String> {
+    /// Blocks while the process starts, so callers run it off the UI thread.
+    pub fn spawn(&self, app: &AppHandle, opts: SpawnOptions, events: Channel<InvokeResponseBody>) -> Result<u64, String> {
         if !Path::new(&opts.cwd).is_dir() {
             return Err(format!("Folder does not exist: {}", opts.cwd));
         }
@@ -178,6 +207,10 @@ impl Sessions {
         if let Some(effort) = opts.effort.as_deref().filter(|s| !s.is_empty()) {
             cmd.args(["--effort", effort]);
         }
+        // A prefix the user set themselves wins.
+        if std::env::var_os(REMOTE_PREFIX_VAR).is_none_or(|v| v.is_empty()) {
+            cmd.env(REMOTE_PREFIX_VAR, remote_name_prefix(&opts.cwd));
+        }
         cmd.current_dir(&opts.cwd)
             .env_remove("CLAUDECODE")
             .stdin(Stdio::piped())
@@ -201,7 +234,7 @@ impl Sessions {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let child = Arc::new(Mutex::new(child));
         let session = Arc::new(Session {
-            stdin: Mutex::new(stdin),
+            input: Mutex::new(stdin.map(spawn_stdin_writer)),
             child: child.clone(),
             #[cfg(windows)]
             _job: job,
@@ -214,23 +247,23 @@ impl Sessions {
         Ok(id)
     }
 
-    pub fn send(&self, id: u64, line: &str) -> Result<(), String> {
+    /// Queues a line for the session's writer thread and returns at once. Lines reach claude in the
+    /// order they were queued, so callers must queue from one place in order (a sync command).
+    pub fn send(&self, id: u64, line: String) -> Result<(), String> {
         if line.contains('\n') {
             return Err("payload must be a single JSON line".into());
         }
         let session = self.get(id)?;
-        let mut guard = session.stdin.lock().unwrap();
-        let stdin = guard.as_mut().ok_or("session input is closed")?;
-        stdin
-            .write_all(line.as_bytes())
-            .and_then(|_| stdin.write_all(b"\n"))
-            .and_then(|_| stdin.flush())
-            .map_err(|e| format!("write to claude failed: {e}"))
+        let input = session.input.lock().unwrap();
+        // The writer thread ends when claude stops reading, which means the session is going away.
+        input.as_ref().and_then(|tx| tx.send(line).ok()).ok_or_else(|| "session is not running".to_string())
     }
 
     pub fn kill(&self, id: u64) {
         let Some(session) = self.map.lock().unwrap().remove(&id) else { return };
-        session.stdin.lock().unwrap().take();
+        // Ends the writer thread, which closes claude's stdin.
+        session.input.lock().unwrap().take();
+        // The reader polls and never holds the child lock for long, so this does not wait.
         let _ = session.child.lock().unwrap().kill();
         // Dropping the last Arc closes the job handle, which ends the whole process tree.
     }
@@ -260,14 +293,73 @@ fn spawn_stderr_reader(stderr: impl Read + Send + 'static, tail: Arc<Mutex<VecDe
     });
 }
 
+fn remote_name_prefix(cwd: &str) -> String {
+    match Path::new(cwd).file_name().and_then(|n| n.to_str()).filter(|n| !n.is_empty()) {
+        Some(folder) => format!("HQ-{folder}"),
+        None => "HQ".into(),
+    }
+}
+
+/// Writes queued lines to claude's stdin on a thread of its own, so a multi-MB image payload
+/// never stalls the caller and lines still arrive in the order they were queued.
+fn spawn_stdin_writer(mut stdin: ChildStdin) -> mpsc::Sender<String> {
+    let (tx, rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in rx {
+            let written = stdin
+                .write_all(line.as_bytes())
+                .and_then(|_| stdin.write_all(b"\n"))
+                .and_then(|_| stdin.flush());
+            if written.is_err() {
+                break; // claude stopped reading; the stdout reader reports the exit
+            }
+        }
+    });
+    tx
+}
+
+/// What the stdout reader hands the batcher. The exit is queued behind every line, so it is
+/// always the last thing the frontend sees.
+enum Outgoing {
+    Line(String),
+    Exit(String),
+}
+
+/// True for a line worth forwarding: a JSON object the frontend can use.
+///
+/// Dropped lines are only those the frontend is certain to ignore, because a wrong drop loses
+/// reply text while a wrong keep only costs a little time.
+fn is_forwardable(line: &str) -> bool {
+    line.starts_with('{') && !is_unused_stream_event(line) && serde_json::from_str::<IgnoredAny>(line).is_ok()
+}
+
+/// Streaming noise: events from a subagent (its final messages arrive as whole messages, and the
+/// frontend returns early for these events), and deltas that carry no reply text. A large Write
+/// streams thousands of `input_json_delta`s.
+///
+/// The patterns hold quotes that are escaped inside any string value, so they match JSON
+/// structure only: text that merely quotes a pattern cannot make a line drop.
+fn is_unused_stream_event(line: &str) -> bool {
+    const UNUSED_DELTAS: [&str; 4] = [
+        r#""delta":{"type":"input_json_delta""#,
+        r#""delta":{"type":"thinking_delta""#,
+        r#""delta":{"type":"signature_delta""#,
+        r#""delta":{"type":"citations_delta""#,
+    ];
+    line.contains(r#""type":"stream_event""#)
+        && (line.contains(r#""parent_tool_use_id":""#) || UNUSED_DELTAS.iter().any(|d| line.contains(d)))
+}
+
 fn spawn_stdout_reader(
     app: AppHandle,
     id: u64,
     stdout: impl Read + Send + 'static,
     child: Arc<Mutex<Child>>,
     tail: Arc<Mutex<VecDeque<String>>>,
-    events: Channel<String>,
+    events: Channel<InvokeResponseBody>,
 ) {
+    let (tx, rx) = mpsc::channel::<Outgoing>();
+    std::thread::spawn(move || run_batcher(rx, events));
     std::thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
         let mut buf = Vec::with_capacity(64 * 1024);
@@ -277,18 +369,213 @@ fn spawn_stdout_reader(
                 Ok(0) | Err(_) => break,
                 Ok(_) => {
                     let line = String::from_utf8_lossy(&buf);
-                    let line = line.trim_end();
-                    if !line.is_empty() && events.send(line.to_string()).is_err() {
-                        break; // frontend went away
+                    let line = line.trim();
+                    if is_forwardable(line) && tx.send(Outgoing::Line(line.to_owned())).is_err() {
+                        break; // the batcher stopped: the frontend went away
                     }
                 }
             }
         }
-        let code = child.lock().unwrap().wait().ok().and_then(|s| s.code());
+        let code = wait_for_exit(&child);
         let stderr: Vec<String> = tail.lock().unwrap().iter().cloned().collect();
-        let _ = events.send(json!({ "type": "hq_exit", "code": code, "stderr": stderr }).to_string());
+        let _ = tx.send(Outgoing::Exit(json!({ "type": "hq_exit", "code": code, "stderr": stderr }).to_string()));
         app.state::<Sessions>().map.lock().unwrap().remove(&id);
     });
+}
+
+/// Polls instead of blocking in `wait()`, which would hold the child lock for the life of the
+/// process and make `kill` wait for claude to end by itself.
+fn wait_for_exit(child: &Mutex<Child>) -> Option<i32> {
+    loop {
+        match child.lock().unwrap().try_wait() {
+            Ok(Some(status)) => return status.code(),
+            Ok(None) => {}
+            Err(_) => return None,
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// Sends the reader's lines to the frontend as JSON arrays, each holding what arrived within
+/// `BATCH_WINDOW` of its first line. Tauri pays a webview call per message, and a parsed array
+/// spares the frontend a second JSON parse per line.
+///
+/// The exit goes out in the last array, as its last element, and nothing follows it.
+fn run_batcher(rx: mpsc::Receiver<Outgoing>, events: Channel<InvokeResponseBody>) {
+    let mut batch = String::new();
+    while let Ok(first) = rx.recv() {
+        batch.push('[');
+        let mut count = 0;
+        let mut exited = false;
+        let deadline = Instant::now() + BATCH_WINDOW;
+        let mut item = Some(first);
+        while let Some(out) = item.take() {
+            let text = match out {
+                Outgoing::Line(line) => line,
+                Outgoing::Exit(exit) => {
+                    exited = true;
+                    exit
+                }
+            };
+            if count > 0 {
+                batch.push(',');
+            }
+            batch.push_str(&text);
+            count += 1;
+            if exited || count >= BATCH_MAX_LINES || batch.len() >= BATCH_MAX_BYTES {
+                break;
+            }
+            // A timeout ends the batch, and so does a closed queue (the next recv() then ends the loop).
+            item = rx.recv_timeout(deadline.saturating_duration_since(Instant::now())).ok();
+        }
+        batch.push(']');
+        if events.send(InvokeResponseBody::Json(std::mem::take(&mut batch))).is_err() || exited {
+            return;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drops_subagent_stream_events() {
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}},"session_id":"s","parent_tool_use_id":"toolu_1","uuid":"u"}"#;
+        assert!(is_unused_stream_event(line));
+    }
+
+    #[test]
+    fn drops_deltas_without_reply_text() {
+        for delta in ["input_json_delta\",\"partial_json\":\"{\\\"a\\\"", "thinking_delta\",\"thinking\":\"hm", "signature_delta\",\"signature\":\"abc", "citations_delta\",\"citation\":{}"] {
+            let line = format!(r#"{{"type":"stream_event","event":{{"type":"content_block_delta","index":1,"delta":{{"type":"{delta}"}}}},"session_id":"s","parent_tool_use_id":null,"uuid":"u"}}"#);
+            assert!(is_unused_stream_event(&line), "{line}");
+        }
+    }
+
+    #[test]
+    fn keeps_everything_the_frontend_can_use() {
+        let kept = [
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{}},"session_id":"s","parent_tool_use_id":null,"uuid":"u"}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}},"parent_tool_use_id":null}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}},"parent_tool_use_id":null}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0},"parent_tool_use_id":null}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"future_delta"}},"parent_tool_use_id":null}"#,
+            // A subagent's tool call arrives as a whole message that the frontend renders.
+            r#"{"type":"assistant","message":{"content":[]},"parent_tool_use_id":"toolu_1"}"#,
+            // Reply text that quotes the patterns carries them escaped.
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"\"parent_tool_use_id\":\"x\" and \"delta\":{\"type\":\"input_json_delta\""}},"parent_tool_use_id":null}"#,
+        ];
+        for line in kept {
+            assert!(!is_unused_stream_event(line), "{line}");
+            assert!(is_forwardable(line), "{line}");
+        }
+    }
+
+    #[test]
+    fn forwards_only_valid_json_objects() {
+        assert!(!is_forwardable(""));
+        assert!(!is_forwardable("[1]"));
+        assert!(!is_forwardable("plain text from a wrapper"));
+        assert!(!is_forwardable(r#"{"type":"assistant""#));
+        assert!(!is_forwardable(r#"{"a":1} trailing"#));
+        assert!(is_forwardable(r#"{"type":"system"}"#));
+    }
+
+    fn collecting_channel() -> (Channel<InvokeResponseBody>, Arc<Mutex<Vec<String>>>) {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let sink = sent.clone();
+        let channel = Channel::new(move |body| {
+            let InvokeResponseBody::Json(json) = body else { panic!("expected a JSON body") };
+            sink.lock().unwrap().push(json);
+            Ok(())
+        });
+        (channel, sent)
+    }
+
+    #[test]
+    fn batches_lines_into_arrays_and_sends_the_exit_last() {
+        let (channel, sent) = collecting_channel();
+        let (tx, rx) = mpsc::channel();
+        let batcher = std::thread::spawn(move || run_batcher(rx, channel));
+        for i in 0..600 {
+            tx.send(Outgoing::Line(format!(r#"{{"n":{i}}}"#))).unwrap();
+        }
+        tx.send(Outgoing::Exit(r#"{"type":"hq_exit","code":0,"stderr":[]}"#.into())).unwrap();
+        batcher.join().unwrap();
+
+        let batches: Vec<Vec<Value>> = sent.lock().unwrap().iter().map(|b| serde_json::from_str(b).unwrap()).collect();
+        assert!((3..300).contains(&batches.len()), "{} batches", batches.len());
+        assert!(batches.iter().all(|b| b.len() <= BATCH_MAX_LINES));
+        let all: Vec<&Value> = batches.iter().flatten().collect();
+        assert_eq!(all.len(), 601);
+        for (i, v) in all[..600].iter().enumerate() {
+            assert_eq!(v["n"], i);
+        }
+        assert_eq!(all[600]["type"], "hq_exit");
+        // Nothing can follow the exit: the batcher is gone.
+        assert!(tx.send(Outgoing::Line("{}".into())).is_err());
+    }
+
+    #[test]
+    fn a_slow_trickle_still_arrives_promptly() {
+        let (channel, sent) = collecting_channel();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || run_batcher(rx, channel));
+        tx.send(Outgoing::Line(r#"{"n":1}"#.into())).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(*sent.lock().unwrap(), [r#"[{"n":1}]"#]);
+        tx.send(Outgoing::Exit(r#"{"type":"hq_exit"}"#.into())).unwrap();
+    }
+
+    #[test]
+    fn the_batcher_stops_when_the_frontend_is_gone() {
+        let channel = Channel::<InvokeResponseBody>::new(|_| Err(tauri::Error::WebviewNotFound));
+        let (tx, rx) = mpsc::channel();
+        let batcher = std::thread::spawn(move || run_batcher(rx, channel));
+        tx.send(Outgoing::Line("{}".into())).unwrap();
+        batcher.join().unwrap();
+        assert!(tx.send(Outgoing::Line("{}".into())).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn kill_does_not_wait_for_the_exit_poller() {
+        let child = Command::new("ping").args(["-n", "30", "127.0.0.1"]).stdin(Stdio::null()).stdout(Stdio::null()).spawn().unwrap();
+        let child = Arc::new(Mutex::new(child));
+        let waiter = {
+            let child = child.clone();
+            std::thread::spawn(move || wait_for_exit(&child))
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        let started = Instant::now();
+        child.lock().unwrap().kill().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(waiter.join().unwrap().is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_stdin_writer_keeps_order_and_closes_the_pipe_when_dropped() {
+        let mut child = Command::new("findstr").arg("^").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+        let tx = spawn_stdin_writer(child.stdin.take().unwrap());
+        for i in 0..200 {
+            tx.send(format!("line {i}")).unwrap();
+        }
+        drop(tx);
+        let out: Vec<String> = BufReader::new(child.stdout.take().unwrap()).lines().map(Result::unwrap).collect();
+        child.wait().unwrap();
+        assert_eq!(out.len(), 200);
+        assert_eq!((out[0].as_str(), out[199].as_str()), ("line 0", "line 199"));
+    }
+
+    #[test]
+    fn names_remote_sessions_after_the_folder() {
+        assert_eq!(remote_name_prefix(r"D:\Repos\HQ"), "HQ-HQ");
+        assert_eq!(remote_name_prefix(r"D:\Repos\my app\"), "HQ-my app");
+        assert_eq!(remote_name_prefix(r"D:\"), "HQ");
+        assert_eq!(remote_name_prefix(""), "HQ");
+    }
 }
 
 #[cfg(windows)]

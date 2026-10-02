@@ -21,6 +21,7 @@
     <button id="usage" class="usage empty" title="Plan usage">
       <span class="codicon codicon-dashboard"></span><span class="usage-text">&hellip;</span>
     </button>
+    <button id="settings-btn" class="icon-btn" title="Settings (Ctrl+,)"><span class="codicon codicon-settings-gear"></span></button>
     <button id="resume-session" class="btn" title="Continue a session from VS Code or the terminal (Ctrl+O)">
       <span class="codicon codicon-history"></span> Resume
     </button>
@@ -42,6 +43,7 @@
       <div id="session-list" class="session-list"></div>
       <div class="sidebar-foot">
         <span id="hq-version"></span>
+        <button id="open-settings" class="link-btn">Settings</button>
         <button id="check-update" class="link-btn">Check for updates</button>
       </div>
     </aside>
@@ -78,12 +80,20 @@
       <button data-source="cli">Terminal</button>
       <button data-source="sdk-cli">HQ</button>
       <button data-source="claude-desktop">Desktop</button>
+      <button id="resume-deep" title="Search inside the conversations, not only titles and prompts">In text</button>
       <select id="resume-project" title="Only sessions from this folder"><option value="">All folders</option></select>
     </div>
     <div id="resume-list" class="picker-list resume-list"></div>
   </div>
 
   <div id="usage-pop" class="usage-pop hidden" role="tooltip"></div>
+  <div id="context-pop" class="usage-pop context-pop hidden" role="tooltip"></div>
+  <div id="slash-pop" class="slash-pop hidden" role="listbox"></div>
+
+  <div id="settings" class="picker settings hidden" role="dialog" aria-label="Settings">
+    <div class="picker-title">Settings</div>
+    <div id="settings-body" class="settings-body"></div>
+  </div>
 
   <div id="menu" class="menu hidden" role="menu"></div>
 
@@ -96,6 +106,8 @@
         <span class="cell-state"></span>
         <span class="cell-path"></span>
         <span class="bg-tasks hidden"><span class="codicon codicon-loading codicon-modifier-spin"></span><span class="bg-count"></span></span>
+        <button class="icon-btn act-remote hidden"><span class="codicon codicon-broadcast"></span></button>
+        <button class="icon-btn act-export" title="Export this session as Markdown"><span class="codicon codicon-export"></span></button>
         <button class="icon-btn act-clean"><span class="codicon codicon-eye"></span></button>
         <button class="icon-btn act-progress"><span class="codicon codicon-checklist"></span></button>
         <button class="icon-btn act-code"><span class="codicon codicon-vscode"></span></button>
@@ -110,6 +122,12 @@
         <div class="progress-panel"></div>
       </div>
       <div class="prompts"></div>
+      <div class="missing-bar hidden">
+        <span class="codicon codicon-warning"></span>
+        <span class="missing-text">Folder missing</span>
+        <button class="btn act-locate">Locate folder&hellip;</button>
+        <button class="btn act-drop">Close</button>
+      </div>
       <div class="composer">
         <div class="busy" aria-hidden="true">
           <span class="busy-glyph"><span style="--i:0">&middot;</span><span style="--i:1">&#x2722;</span><span style="--i:2">&#x2733;&#xFE0E;</span><span style="--i:3">&#x2736;</span><span style="--i:4">&#x273B;</span><span style="--i:5">&#x273D;</span><span style="--i:6">&#x273B;</span><span style="--i:7">&#x2736;</span><span style="--i:8">&#x2733;&#xFE0E;</span><span style="--i:9">&#x2722;</span></span>
@@ -127,6 +145,7 @@
           </select>
           <button class="chip act-model" title="Model and effort"><span class="label"></span><span class="codicon codicon-chevron-down"></span></button>
           <button class="icon-btn act-mcp" title="MCP servers"><span class="codicon codicon-plug"></span></button>
+          <button class="ctx-btn act-context hidden" aria-label="Context window"><span class="ctx-ring"></span><span class="ctx-text"></span></button>
           <button class="icon-btn act-attach" title="Attach images (you can also paste or drop them)"><span class="codicon codicon-file-media"></span></button>
           <input type="file" class="file-input hidden" accept="image/png,image/jpeg,image/gif,image/webp" multiple />
           <span class="spacer"></span>

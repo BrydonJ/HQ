@@ -47,11 +47,84 @@ markdown.use({
 });
 
 function renderMarkdown(el, text) {
+  el._src = text || ''; // kept so a reply can be copied or exported as the Markdown it was written in
   try {
     el.innerHTML = markdown.parse(text || '');
   } catch {
     el.textContent = text || '';
   }
+}
+
+/**
+ * Renders text that is still growing without redoing the finished part. The text is lexed into
+ * top-level blocks (cheap); every block but the last is treated as finished and keeps its DOM
+ * nodes while its source text is unchanged, so only the last block is rendered each time, and
+ * only the text from the last finished block on is lexed again.
+ * `state` belongs to one element and starts as `{}`.
+ */
+function renderMarkdownLive(el, text, state) {
+  el._src = text || '';
+  text = text || '';
+  const items = state.items || (state.items = []);
+  state.done = state.done || ''; // the source text of the finished blocks
+  // Lex again from the last finished block, so one that grows into the next (a list) is redrawn.
+  let keep = Math.max(0, items.length - 1);
+  let offset = keep ? items[keep - 1].end : 0;
+  if (offset && text.slice(0, offset) !== state.done.slice(0, offset)) { keep = 0; offset = 0; } // earlier text changed
+  let tokens;
+  try {
+    tokens = markdown.lexer(text.slice(offset));
+  } catch {
+    state.items = null;
+    state.done = '';
+    renderMarkdown(el, text);
+    return;
+  }
+  let k = 0;
+  while (keep + k < items.length && k < tokens.length - 1 && items[keep + k].raw === tokens[k].raw) k++;
+  const idx = keep + k;
+  for (const item of items.splice(idx)) for (const node of item.nodes) node.remove();
+  state.done = state.done.slice(0, idx ? items[idx - 1].end : 0);
+  const render = token => {
+    const box = document.createElement('template');
+    box.innerHTML = markdown.parser([token]);
+    return [...box.content.childNodes];
+  };
+  for (let i = k; i < tokens.length - 1; i++) {
+    const nodes = render(tokens[i]);
+    el.append(...nodes);
+    items.push({ raw: tokens[i].raw, nodes, end: (items.length ? items[items.length - 1].end : 0) + tokens[i].raw.length });
+    state.done += tokens[i].raw;
+  }
+  // The last block is replaced every time.
+  for (const node of state.tail || []) node.remove();
+  const last = tokens[tokens.length - 1];
+  state.tail = last ? render(last) : [];
+  el.append(...state.tail);
+}
+
+// ---------- long text ----------
+
+const LONG_LINES = 400;
+const LONG_CHARS = 40000;
+
+/** A `<pre>` that shows the start of very long text, with a button that shows the rest. */
+function longPre(text, cls) {
+  const full = String(text ?? '');
+  const pre = h('pre', { class: cls || null });
+  const lines = full.split('\n');
+  if (lines.length <= LONG_LINES && full.length <= LONG_CHARS) {
+    pre.textContent = full;
+    return pre;
+  }
+  const head = lines.slice(0, LONG_LINES).join('\n').slice(0, LONG_CHARS);
+  pre.textContent = head;
+  const more = lines.length > LONG_LINES ? `${lines.length - LONG_LINES} more lines` : `${full.length - head.length} more characters`;
+  const box = h('div', { class: 'long' }, pre);
+  const button = h('button', { class: 'btn long-more', text: `Show all (${more})` });
+  button.addEventListener('click', () => { pre.textContent = full; button.remove(); });
+  box.append(button);
+  return box;
 }
 
 // ---------- paths ----------
@@ -141,15 +214,23 @@ async function prepareImage(file) {
 /** A data: URL for an image block from a transcript, or null when the block is not a plain base64 image. */
 function imageBlockUrl(source) {
   if (!source || source.type !== 'base64' || !IMAGE_TYPES.includes(source.media_type)) return null;
-  if (typeof source.data !== 'string' || !/^[A-Za-z0-9+/=]*$/.test(source.data)) return null;
+  // The backend blanks the data of transcript images, so they cost nothing to load; see imageNote().
+  if (typeof source.data !== 'string' || !source.data || !/^[A-Za-z0-9+/=]*$/.test(source.data)) return null;
   return `data:${source.media_type};base64,${source.data}`;
 }
 
-function userBubble(text, imageUrls, ms) {
+/** Stands in for an image of a restored transcript, which is not loaded. */
+function imageNote() {
+  return h('span', { class: 'image-note', text: '[image omitted]' });
+}
+
+function userBubble(text, imageUrls, ms, omitted = 0) {
   return h('div', { class: 'item user' },
     h('div', { class: 'bubble' },
       stamp(ms),
-      imageUrls && imageUrls.length ? h('div', { class: 'bubble-images' }, imageUrls.map(src => h('img', { class: 'thumb', src, alt: 'image' }))) : null,
+      (imageUrls && imageUrls.length) || omitted
+        ? h('div', { class: 'bubble-images' }, (imageUrls || []).map(src => h('img', { class: 'thumb', src, alt: 'image' })), Array.from({ length: omitted }, imageNote))
+        : null,
       text ? h('div', { text }) : null));
 }
 
@@ -206,10 +287,97 @@ function toolSummary(name, input, cwd) {
   }
 }
 
+const DIFF_CONTEXT = 2;
+const DIFF_MAX_CELLS = 1_500_000; // above this the line diff costs too much; the whole edit shows as removed and added
+
+/** A line diff as [' ' | '-' | '+', line] pairs: common ends are peeled off, the middle is an LCS table. */
+function diffLines(oldText, newText) {
+  const a = String(oldText ?? '').split('\n');
+  const b = String(newText ?? '').split('\n');
+  let head = 0;
+  while (head < a.length && head < b.length && a[head] === b[head]) head++;
+  let tail = 0;
+  while (tail < a.length - head && tail < b.length - head && a[a.length - 1 - tail] === b[b.length - 1 - tail]) tail++;
+  const x = a.slice(head, a.length - tail);
+  const y = b.slice(head, b.length - tail);
+  const ops = a.slice(0, head).map(s => [' ', s]);
+  const n = x.length;
+  const m = y.length;
+  if (!n || !m || n * m > DIFF_MAX_CELLS) {
+    for (const s of x) ops.push(['-', s]);
+    for (const s of y) ops.push(['+', s]);
+  } else {
+    // lcs[i][j]: the longest common run of x[i..] and y[j..]
+    const w = m + 1;
+    const lcs = new Int32Array((n + 1) * w);
+    for (let i = n - 1; i >= 0; i--) {
+      for (let j = m - 1; j >= 0; j--) {
+        lcs[i * w + j] = x[i] === y[j] ? lcs[(i + 1) * w + j + 1] + 1 : Math.max(lcs[(i + 1) * w + j], lcs[i * w + j + 1]);
+      }
+    }
+    let i = 0;
+    let j = 0;
+    while (i < n && j < m) {
+      if (x[i] === y[j]) { ops.push([' ', x[i]]); i++; j++; }
+      else if (lcs[(i + 1) * w + j] >= lcs[i * w + j + 1]) ops.push(['-', x[i++]]);
+      else ops.push(['+', y[j++]]);
+    }
+    while (i < n) ops.push(['-', x[i++]]);
+    while (j < m) ops.push(['+', y[j++]]);
+  }
+  for (const s of a.slice(a.length - tail)) ops.push([' ', s]);
+  return ops;
+}
+
+/** Rows for a diff: changed lines, with a few unchanged lines around them and a note for the rest. */
+function diffRows(ops) {
+  const near = new Array(ops.length).fill(false);
+  ops.forEach(([t], i) => {
+    if (t === ' ') return;
+    for (let k = Math.max(0, i - DIFF_CONTEXT); k <= Math.min(ops.length - 1, i + DIFF_CONTEXT); k++) near[k] = true;
+  });
+  const rows = [];
+  for (let i = 0; i < ops.length; i++) {
+    const [t, s] = ops[i];
+    if (!near[i] && t === ' ') {
+      let j = i;
+      while (j < ops.length && !near[j] && ops[j][0] === ' ') j++;
+      rows.push(h('div', { class: 'skip', text: `⋯ ${j - i} unchanged line${j - i === 1 ? '' : 's'}` }));
+      i = j - 1;
+      continue;
+    }
+    const cls = t === '-' ? 'del' : t === '+' ? 'add' : 'ctx';
+    rows.push(h('div', { class: cls, text: `${t === ' ' ? '  ' : t + ' '}${s}` }));
+  }
+  return rows;
+}
+
 function diffView(oldText, newText) {
+  const rows = diffRows(diffLines(oldText, newText));
+  const box = h('div', { class: 'diff' }, rows.slice(0, 600));
+  if (rows.length > 600) box.append(h('div', { class: 'skip', text: `⋯ ${rows.length - 600} more lines` }));
+  return box;
+}
+
+/** The structured patch Claude Code reports for an Edit: hunks of ' ', '-' and '+' lines with real line numbers. */
+function patchView(patch) {
+  const hunks = (Array.isArray(patch) ? patch : []).filter(p => p && Array.isArray(p.lines));
+  if (!hunks.length) return null;
   const box = h('div', { class: 'diff' });
-  for (const line of String(oldText ?? '').split('\n')) box.append(h('div', { class: 'del', text: '- ' + line }));
-  for (const line of String(newText ?? '').split('\n')) box.append(h('div', { class: 'add', text: '+ ' + line }));
+  hunks.forEach((hunk, k) => {
+    if (k) box.append(h('div', { class: 'skip', text: '⋯' }));
+    let oldNo = Number(hunk.oldStart) || 0;
+    let newNo = Number(hunk.newStart) || 0;
+    for (const raw of hunk.lines.slice(0, 600)) {
+      if (raw[0] === '\\') { box.append(h('div', { class: 'skip', text: raw.slice(1).trim() })); continue; } // "\ No newline at end of file"
+      const t = raw[0] === '-' || raw[0] === '+' ? raw[0] : ' ';
+      const no = t === '+' ? newNo : oldNo;
+      if (t !== '+') oldNo++;
+      if (t !== '-') newNo++;
+      box.append(h('div', { class: t === '-' ? 'del' : t === '+' ? 'add' : 'ctx' },
+        h('span', { class: 'ln', text: no ? String(no) : '' }), `${t === ' ' ? '  ' : t + ' '}${raw.slice(1)}`));
+    }
+  });
   return box;
 }
 
@@ -224,10 +392,10 @@ function toolInputView(name, input) {
   const i = input || {};
   if (name === 'Edit') return diffView(i.old_string, i.new_string);
   if (name === 'MultiEdit') return h('div', null, (i.edits || []).map(e => diffView(e.old_string, e.new_string)));
-  if (name === 'Write') return h('pre', { text: i.content ?? '' });
+  if (name === 'Write') return longPre(i.content);
   if (name === 'Bash' || name === 'PowerShell') return h('pre', { text: i.command ?? '' });
   if (name === 'TodoWrite') return todoList(i.todos);
-  return h('pre', { text: JSON.stringify(i, null, 2) });
+  return longPre(JSON.stringify(i, null, 2));
 }
 
 function toolResultText(content) {

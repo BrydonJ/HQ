@@ -9,30 +9,36 @@ mod update;
 use std::path::Path;
 
 use session::{Sessions, SpawnOptions};
-use tauri::ipc::Channel;
+use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Manager, State, UserAttentionType, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
+/// Every message on `on_event` is a JSON array of the session's stdout lines (as objects), and
+/// the last element of the last array is the `hq_exit` object.
 #[tauri::command]
-fn spawn_session(
+async fn spawn_session(
     app: AppHandle,
-    sessions: State<'_, Sessions>,
     cwd: String,
     resume: Option<String>,
     permission_mode: Option<String>,
     model: Option<String>,
     effort: Option<String>,
     fork: Option<bool>,
-    on_event: Channel<String>,
+    on_event: Channel<InvokeResponseBody>,
 ) -> Result<u64, String> {
     let fork = fork.unwrap_or(false);
-    sessions.spawn(&app, SpawnOptions { cwd, resume, permission_mode, model, effort, fork }, on_event)
+    let opts = SpawnOptions { cwd, resume, permission_mode, model, effort, fork };
+    tauri::async_runtime::spawn_blocking(move || app.state::<Sessions>().spawn(&app, opts, on_event))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
+/// Deliberately not `async`: sync commands run in the order the frontend sent them, and the
+/// frontend relies on that (`initialize` goes first). Queuing a line takes no time.
 #[tauri::command]
 fn send_line(sessions: State<'_, Sessions>, id: u64, line: String) -> Result<(), String> {
-    sessions.send(id, &line)
+    sessions.send(id, line)
 }
 
 #[tauri::command]
@@ -55,6 +61,38 @@ async fn pick_folder(window: WebviewWindow) -> Option<String> {
     .await
     .ok()
     .flatten()
+}
+
+/// Asks where to save `text` (as UTF-8, a Markdown file by default) and writes it there.
+/// Returns the chosen path, or `None` when the user cancels.
+#[tauri::command]
+async fn save_text_file(window: WebviewWindow, default_name: String, text: String) -> Result<Option<String>, String> {
+    let app = window.app_handle().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let chosen = app
+            .dialog()
+            .file()
+            .set_parent(&window)
+            .set_title("Save as")
+            .set_file_name(&default_name)
+            .add_filter("Markdown", &["md"])
+            .blocking_save_file();
+        let Some(chosen) = chosen else { return Ok(None) };
+        let mut path = chosen.into_path().map_err(|e| e.to_string())?;
+        if path.extension().is_none() {
+            path.set_extension("md");
+        }
+        std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(Some(path.to_string_lossy().into_owned()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Sets the `claude` executable that sessions start from now on; blank goes back to the default.
+#[tauri::command]
+fn set_claude_path(path: Option<String>) {
+    session::set_claude_path(path);
 }
 
 /// Picks the VS Code workspace file that the cell's VS Code button opens for this folder.
@@ -93,24 +131,46 @@ fn load_state(app: AppHandle) -> Result<Option<String>, String> {
     store::load_state(&app)
 }
 
+/// Not `async` for the same reason as `send_line`: boards must reach the disk in the order they
+/// were saved. The write itself happens on a thread of its own, so this returns at once.
 #[tauri::command]
 fn save_state(app: AppHandle, json: String) -> Result<(), String> {
-    store::save_state(&app, &json)
+    store::save_state(&app, json)
 }
 
 #[tauri::command]
-async fn load_transcript(session_id: String) -> Result<Vec<String>, String> {
-    tauri::async_runtime::spawn_blocking(move || store::load_transcript(&session_id))
+async fn load_transcript(session_id: String, before: Option<u64>) -> Result<store::TranscriptChunk, String> {
+    tauri::async_runtime::spawn_blocking(move || store::load_transcript(&session_id, before))
         .await
         .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-async fn list_sessions(limit: Option<usize>, cwd: Option<String>) -> Result<Vec<store::SessionInfo>, String> {
+async fn list_sessions(app: AppHandle, limit: Option<usize>, cwd: Option<String>) -> Result<Vec<store::SessionInfo>, String> {
     let limit = limit.unwrap_or(80).min(500);
-    tauri::async_runtime::spawn_blocking(move || store::list_sessions(limit, cwd.as_deref()))
+    tauri::async_runtime::spawn_blocking(move || store::list_sessions(&app.state::<store::Index>(), limit, cwd.as_deref()))
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// Streams each matching message to `on_hit` and returns how many it sent. A newer search
+/// cancels an older one, which then returns early with its count so far.
+#[tauri::command]
+async fn search_sessions(
+    app: AppHandle,
+    query: String,
+    cwd: Option<String>,
+    limit: Option<usize>,
+    on_hit: Channel<store::SessionHit>,
+) -> Result<usize, String> {
+    let limit = limit.unwrap_or(100).clamp(1, 500);
+    // Numbered here rather than on the blocking thread, so the order is that of the calls.
+    let generation = app.state::<store::Index>().begin_search();
+    tauri::async_runtime::spawn_blocking(move || {
+        store::search_sessions(&app.state::<store::Index>(), generation, &query, cwd.as_deref(), limit, &on_hit)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -240,8 +300,10 @@ fn main() {
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Sessions::default())
+        .manage(store::Index::default())
         .manage(update::PendingUpdate::default())
         .manage(Profile(profile))
         .invoke_handler(tauri::generate_handler![
@@ -249,6 +311,8 @@ fn main() {
             send_line,
             kill_session,
             pick_folder,
+            save_text_file,
+            set_claude_path,
             pick_workspace,
             find_workspaces,
             folder_exists,
@@ -256,6 +320,7 @@ fn main() {
             save_state,
             load_transcript,
             list_sessions,
+            search_sessions,
             probe_usage,
             update_claude,
             open_url,
@@ -272,6 +337,8 @@ fn main() {
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
                 app.state::<Sessions>().kill_all();
+                // The frontend's last save may still be waiting for the writer thread.
+                store::flush_state();
                 // An update that never found an idle moment installs as HQ closes.
                 if update::is_ready(app) {
                     let _ = update::install(app, false);

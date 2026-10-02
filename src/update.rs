@@ -82,6 +82,8 @@ pub fn install(app: &AppHandle, restart: bool) -> Result<(), String> {
         return Err("No update has been downloaded.".into());
     };
     app.state::<Sessions>().kill_all();
+    // Installing exits HQ without the usual exit event, so queued saves are flushed here.
+    crate::store::flush_state();
     update.restart_after_install(restart).install(bytes).map_err(|e| e.to_string())?;
     // Only reached on platforms where installing does not exit the app.
     if restart {
