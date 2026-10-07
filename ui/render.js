@@ -38,6 +38,9 @@ markdown.use({
     image({ href, text }) {
       return escapeHtml(`![${text || ''}](${href || ''})`);
     },
+    code({ text, lang }) {
+      return codeBlock(text || '', (lang || '').trim().split(/\s+/)[0]);
+    },
     link({ href, tokens }) {
       const inner = this.parser.parseInline(tokens);
       if (!/^https?:\/\//i.test(href || '')) return inner;
@@ -45,6 +48,25 @@ markdown.use({
     },
   },
 });
+
+/**
+ * A fenced code block with its language and a copy button (handled in app.js). Code tagged with
+ * a language highlight.js knows is coloured; untagged code is not guessed at, since a block that
+ * is still streaming would change colours as it grows.
+ */
+function codeBlock(code, lang) {
+  const known = lang && window.hljs && hljs.getLanguage(lang) ? lang : '';
+  let body = escapeHtml(code);
+  if (known) {
+    try {
+      body = hljs.highlight(code, { language: known, ignoreIllegals: true }).value;
+    } catch { /* shown plain */ }
+  }
+  const cls = known ? ` class="hljs language-${escapeHtml(known.replace(/[^\w+#-]/g, ''))}"` : '';
+  return `<div class="code-block"><div class="code-head"><span class="code-lang">${escapeHtml(lang || 'text')}</span>`
+    + '<button class="code-copy" title="Copy code" tabindex="-1"><span class="codicon codicon-copy"></span></button></div>'
+    + `<pre><code${cls}>${body}</code></pre></div>`;
+}
 
 function renderMarkdown(el, text) {
   el._src = text || ''; // kept so a reply can be copied or exported as the Markdown it was written in
@@ -149,12 +171,17 @@ function baseName(p) {
 
 /**
  * A stable color per project folder, so cells and list entries for the same folder match.
- * The palette avoids the amber, green and red that the status cues use.
+ * Soft pastels that avoid the amber, green and red that the status cues use. A folder's colour
+ * can be shuffled (click the project name); the picks live in `projectColorPicks`, keyed by
+ * lower-cased folder, and are saved with the board.
  */
-const PROJECT_COLORS = ['#569cd6', '#4ec9b0', '#c586c0', '#ce9178', '#d7ba7d', '#9cdcfe',
-  '#d16d9e', '#a78bfa', '#80cbc4', '#f78c6c', '#b5cea8', '#89ddff'];
+const PROJECT_COLORS = ['#8ab4f8', '#8fd3c7', '#c3a6e8', '#f2a7c3', '#f5b78e', '#e6d38f',
+  '#a5c8e4', '#b6a8f0', '#93d0d8', '#f0a6a0', '#d7b8e3', '#c9b79c'];
+let projectColorPicks = {};
 
 function projectColor(path) {
+  const key = normPath(path).toLowerCase();
+  if (Object.hasOwn(projectColorPicks, key)) return projectColorPicks[key];
   let hash = 0x811c9dc5; // FNV-1a
   for (const ch of normPath(path).toLowerCase()) {
     hash ^= ch.charCodeAt(0);

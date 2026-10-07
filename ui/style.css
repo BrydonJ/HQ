@@ -1,26 +1,32 @@
-/* VS Code "Dark Modern" palette, so cells read like the Claude Code extension panel. */
+/* VS Code Dark Modern backgrounds and borders, with soft periwinkle and peach accents matched to the pastel project colours. */
 :root {
   --bg: #1f1f1f;
   --bg-alt: #181818;
   --bg-raised: #252526;
   --border: #2b2b2b;
   --border-strong: #3c3c3c;
-  --fg: #cccccc;
-  --fg-strong: #e7e7e7;
-  --fg-muted: #9d9d9d;
-  --fg-faint: #6e6e6e;
-  --accent: #0078d4;
-  --accent-hover: #026ec1;
-  --link: #4daafc;
+  --fg: #cfd2e3;
+  --fg-strong: #eef0fa;
+  --fg-muted: #9b9fb8;
+  --fg-faint: #6b6f88;
+  --accent: #7c9ef5;
+  --accent-hover: #93b0fa;
+  --on-accent: #12131b; /* text on accent fills; white is too faint on the pastel accent */
+  --link: #8ab4f8;
   --input-bg: #313131;
   --hover: #2a2d2e;
   --code-bg: #181818;
-  --claude: #d97757;
-  --waiting: #e5a50a;
-  --done: #3fb950;
-  --error: #f14c4c;
+  --claude: #eb9b7b;
+  --waiting: #ebc37d;
+  --done: #8fd1a0;
+  --error: #f08c8c;
   --diff-add: rgba(46, 160, 67, 0.18);
   --diff-del: rgba(248, 81, 73, 0.18);
+  /* Markdown and syntax colours, from the same pastel family. */
+  --md-h1: #f5b78e; --md-h2: #8ab4f8; --md-strong: #f0d49c; --md-em: #c3a6e8; --md-code: #f2a7c3; --md-marker: #eb9b7b;
+  --hl-keyword: #c3a6e8; --hl-control: #f2a7c3; --hl-string: #a8dba0; --hl-number: #f5b78e; --hl-comment: #6f7592;
+  --hl-function: #8ab4f8; --hl-type: #e6d38f; --hl-variable: #cfd6f2; --hl-tag: #8fd3c7; --hl-attr: #e6d38f;
+  --hl-regexp: #f0a6a0; --hl-meta: #93d0d8; --hl-punct: #959ab4;
   --font: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", system-ui, sans-serif;
   --mono: "Cascadia Code", Consolas, "Courier New", monospace;
 }
@@ -66,7 +72,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   border: 1px solid var(--border-strong); background: var(--input-bg);
 }
 .btn:hover { background: var(--hover); }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 .btn.primary:hover { background: var(--accent-hover); }
 .btn.danger { border-color: var(--error); }
 .icon-btn {
@@ -104,10 +110,10 @@ button, input, select, textarea { font: inherit; color: inherit; }
 }
 .cell.focused { border-color: var(--accent); }
 /* Animating box-shadow repaints the cell on every frame; fading a fixed overlay stays on the compositor. */
-.cell.state-waiting { border-color: var(--waiting); box-shadow: 0 0 0 1px rgba(229, 165, 10, 0.55), 0 0 16px rgba(229, 165, 10, 0.25); }
+.cell.state-waiting { border-color: var(--waiting); box-shadow: 0 0 0 1px color-mix(in srgb, var(--waiting) 55%, transparent), 0 0 16px color-mix(in srgb, var(--waiting) 25%, transparent); }
 .cell.state-waiting::after {
   content: ""; position: absolute; inset: 0; z-index: 2; pointer-events: none; border-radius: 5px;
-  box-shadow: inset 0 0 0 1px rgba(229, 165, 10, 0.9), inset 0 0 22px rgba(229, 165, 10, 0.35);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--waiting) 90%, transparent), inset 0 0 22px color-mix(in srgb, var(--waiting) 35%, transparent);
   animation: glow-wait 1.6s ease-in-out infinite;
 }
 @keyframes glow-wait {
@@ -170,7 +176,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   flex: 0 1 260px; min-width: 60px; padding: 1px 4px; font: inherit; color: var(--fg-strong);
   background: var(--input-bg); border: 1px solid var(--accent); border-radius: 3px; outline: none;
 }
-.act-clean.on, .act-progress.on { color: var(--link); }
+.act-detail.on, .act-progress.on { color: var(--link); }
 /* The task list's progress along the header's bottom edge, visible without opening the panel. */
 .head-progress {
   position: absolute; left: 0; bottom: -1px; height: 2px; width: var(--pct, 0%); pointer-events: none;
@@ -186,7 +192,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   content: "Drop images to attach"; position: absolute; inset: 0; z-index: 3; pointer-events: none;
   display: flex; align-items: center; justify-content: center;
   border: 2px dashed var(--accent); border-radius: 6px;
-  background: rgba(0, 120, 212, 0.12); color: var(--fg-strong); font-weight: 600;
+  background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--fg-strong); font-weight: 600;
 }
 .bg-tasks {
   display: inline-flex; align-items: center; gap: 3px; flex: none; height: 18px; padding: 0 7px 0 5px;
@@ -203,9 +209,10 @@ button, input, select, textarea { font: inherit; color: inherit; }
 #dock:empty { display: none; }
 #dock .cell { flex: 0 1 300px; min-width: 190px; }
 .cell.collapsed .stage, .cell.collapsed .prompts, .cell.collapsed .composer, .cell.collapsed .cell-path,
-.cell.collapsed .act-clean, .cell.collapsed .act-progress, .cell.collapsed .act-code, .cell.collapsed .act-reveal,
+.cell.collapsed .act-detail, .cell.collapsed .act-handoff, .cell.collapsed .act-progress, .cell.collapsed .act-code, .cell.collapsed .act-reveal,
 .cell.collapsed .act-max { display: none; }
 .cell.collapsed .cell-head { border-bottom: 0; cursor: pointer; }
+.cell:not(.collapsed) .cell-project { cursor: pointer; }
 .cell.collapsed .cell-title { flex: 1 1 0; cursor: pointer; }
 .cell.collapsed .cell-title:hover { background: none; }
 /* The state in words, since a collapsed cell has no chat to show it. */
@@ -223,17 +230,23 @@ button, input, select, textarea { font: inherit; color: inherit; }
   padding: 10px 12px 12px 12px; user-select: text; transition: opacity 0.2s; /* the bottom leaves room for .busy */
 }
 
-/* ---------- progress view (the checklist button): the chat fades behind a progress panel ---------- */
+/* ---------- progress view (the checklist button): a card over the top-right of the chat ---------- */
 .progress-panel { display: none; }
-/* Faded under a mostly opaque panel, so the chat behind never reads as part of it. No blur: a
-   filter would be redrawn on every streamed token, in every cell showing the panel. */
-.cell.progress-view .messages { opacity: 0.15; pointer-events: none; }
+/* A small card, so the chat stays readable and scrollable beside it. No blur: a filter would be
+   redrawn on every streamed token, in every cell showing the panel. */
 .cell.progress-view .progress-panel {
-  display: block; position: absolute; inset: 0; overflow-y: auto; padding: 12px 14px;
-  background: color-mix(in srgb, var(--bg) 85%, transparent); user-select: text;
-  animation: pv-in 0.2s ease-out;
+  display: block; position: absolute; top: 8px; right: 14px; z-index: 2; width: min(340px, calc(100% - 28px));
+  max-height: min(50%, 360px); overflow-y: auto; padding: 8px 10px 10px; user-select: text;
+  background: var(--bg-raised); border: 1px solid var(--border-strong); border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35); font-size: 12.5px;
+  animation: pv-in 0.15s ease-out;
 }
-@keyframes pv-in { from { opacity: 0; } }
+@keyframes pv-in { from { opacity: 0; transform: translateY(-4px); } }
+.pv-close { flex: none; margin-right: -4px; }
+.pv-agents li { align-items: flex-start; }
+.pv-agent-main { flex: 1; min-width: 0; }
+.pv-stop { flex: none; color: var(--error); }
+.pv-stop[disabled] { opacity: 0.5; cursor: default; }
 .pv-head { display: flex; align-items: center; gap: 10px; color: var(--fg-muted); font-size: 12px; }
 .pv-head .spacer { flex: 1; }
 .pv-state { display: inline-flex; align-items: center; gap: 6px; color: var(--fg-strong); font-weight: 600; font-size: 13px; }
@@ -245,7 +258,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .pv-elapsed { font-variant-numeric: tabular-nums; }
 .pv-ask { font-size: 12px; padding: 2px 8px; }
 .pv-ask[disabled] { opacity: 0.5; cursor: default; }
-.pv-progress { margin-top: 12px; }
+.pv-progress { margin-top: 8px; }
 .pv-bar { position: relative; height: 6px; border-radius: 3px; background: var(--input-bg); overflow: hidden; }
 .pv-bar > span {
   position: absolute; top: 0; bottom: 0; left: 0; width: var(--pct, 0%); border-radius: 3px;
@@ -255,11 +268,11 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .pv-bar.indeterminate > span { width: 30%; animation: pv-slide 1.6s ease-in-out infinite; }
 @keyframes pv-slide { from { transform: translateX(-100%); } to { transform: translateX(333%); } }
 .pv-label { margin-top: 4px; color: var(--fg-muted); font-size: 11px; }
-.pv-now { display: flex; align-items: baseline; gap: 6px; margin-top: 12px; color: var(--fg); min-width: 0; }
+.pv-now { display: flex; align-items: baseline; gap: 6px; margin-top: 8px; color: var(--fg); min-width: 0; }
 .pv-now .codicon { flex: none; color: var(--link); font-size: 12px; }
 .pv-now .tname { font-weight: 600; flex: none; }
 .pv-now .targ { color: var(--fg-muted); font-family: var(--mono); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.pv-section { margin-top: 16px; }
+.pv-section { margin-top: 10px; }
 .pv-title { margin-bottom: 4px; color: var(--fg-faint); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
 .pv-title .stamp { text-transform: none; letter-spacing: 0; float: none; }
 .pv-tasks, .pv-agents { list-style: none; margin: 0; padding: 0; }
@@ -275,7 +288,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .pv-agents .desc { color: var(--fg-muted); font-size: 11.5px; }
 .pv-answer { white-space: pre-wrap; color: var(--fg-strong); }
 .pv-answer.error { color: var(--error); }
-.pv-empty { margin-top: 16px; color: var(--fg-faint); }
+.pv-empty { margin-top: 10px; color: var(--fg-faint); }
 .item { position: relative; padding-left: 16px; margin: 0 0 10px 0; }
 .item::before {
   content: ""; position: absolute; left: 1px; top: 7px;
@@ -290,9 +303,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .item.notice { color: var(--fg-muted); font-size: 12px; }
 .item.notice.error { color: var(--error); }
 .item.notice::before { background: transparent; }
-/* Prompts and replies only (the eye button). The last words of a stopped turn stay. */
-.cell.clean .item.tool, .cell.clean .item.thinking, .cell.clean .item.notice:not(.error),
-.cell.clean .item.text.narration:not(.tail) { display: none; }
+/* The eye button's levels: 2 (the default) hides tool calls; 3 also hides thinking and the narration between steps. */
+.cell.detail-2 .item.tool, .cell.detail-3 .item.tool, .cell.detail-3 .item.thinking,
+.cell.detail-3 .item.text.narration:not(.tail) { display: none; }
 
 /* Claude's text: narration while it works is muted; the reply that ends a turn is a card. */
 .item.text.narration { color: var(--fg-muted); font-size: 12.5px; }
@@ -375,13 +388,44 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .md p, .md ul, .md ol, .md pre, .md table, .md blockquote { margin: 0 0 8px 0; }
 .md ul, .md ol { padding-left: 20px; }
 .md h1, .md h2, .md h3, .md h4 { color: var(--fg-strong); margin: 12px 0 6px; line-height: 1.3; }
+.md h1 { color: var(--md-h1); } .md h2, .md h3 { color: var(--md-h2); }
+.md strong { color: var(--md-strong); font-weight: 600; }
+.md em { color: var(--md-em); }
+.md li::marker { color: var(--md-marker); }
+.md :not(pre) > code { color: var(--md-code); }
 .md h1 { font-size: 1.35em; } .md h2 { font-size: 1.2em; } .md h3 { font-size: 1.08em; } .md h4 { font-size: 1em; }
 .md a { color: var(--link); text-decoration: none; }
 .md a:hover { text-decoration: underline; }
 .md code { font-family: var(--mono); font-size: 12px; background: rgba(255, 255, 255, 0.07); padding: 1px 4px; border-radius: 3px; }
 .md pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 4px; padding: 8px 10px; overflow-x: auto; }
-.md pre code { background: none; padding: 0; white-space: pre; }
-.md blockquote { border-left: 3px solid var(--border-strong); margin-left: 0; padding-left: 10px; color: var(--fg-muted); }
+.md pre code { background: none; padding: 0; white-space: pre; color: var(--fg); }
+/* A fenced block: language and copy button on a strip above the code. */
+.md .code-block { margin: 0 0 8px 0; border: 1px solid var(--border); border-radius: 5px; overflow: hidden; background: var(--code-bg); }
+.md .code-block:last-child { margin-bottom: 0; }
+.code-head { display: flex; align-items: center; height: 24px; padding: 0 4px 0 10px; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--code-bg) 70%, var(--bg-raised)); }
+.code-lang { flex: 1; color: var(--fg-faint); font-family: var(--mono); font-size: 11px; text-transform: lowercase; }
+.code-copy { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 20px; padding: 0; border: 0; border-radius: 3px; background: transparent; color: var(--fg-muted); cursor: pointer; }
+.code-copy:hover { background: var(--hover); color: var(--fg-strong); }
+.code-copy.done { color: var(--done); }
+.code-copy .codicon { font-size: 13px; }
+.md .code-block pre { margin: 0; border: 0; border-radius: 0; background: transparent; }
+/* highlight.js tokens */
+.hljs-keyword, .hljs-literal, .hljs-selector-tag { color: var(--hl-keyword); }
+.hljs-doctag, .hljs-template-tag, .hljs-template-variable { color: var(--hl-control); }
+.hljs-string, .hljs-char, .hljs-addition, .hljs-meta .hljs-string { color: var(--hl-string); }
+.hljs-number, .hljs-symbol, .hljs-bullet { color: var(--hl-number); }
+.hljs-comment, .hljs-quote { color: var(--hl-comment); font-style: italic; }
+.hljs-title, .hljs-title.class_, .hljs-type, .hljs-built_in { color: var(--hl-type); }
+.hljs-title.function_, .hljs-function .hljs-title { color: var(--hl-function); }
+.hljs-variable, .hljs-params, .hljs-property, .hljs-attr, .hljs-variable.language_ { color: var(--hl-variable); }
+.hljs-name, .hljs-selector-id, .hljs-selector-class { color: var(--hl-tag); }
+.hljs-attribute, .hljs-selector-attr, .hljs-selector-pseudo { color: var(--hl-attr); }
+.hljs-regexp, .hljs-link, .hljs-deletion { color: var(--hl-regexp); }
+.hljs-meta, .hljs-section, .hljs-meta .hljs-keyword { color: var(--hl-meta); }
+.hljs-punctuation, .hljs-operator { color: var(--hl-punct); }
+.hljs-section { font-weight: 600; }
+.hljs-emphasis { font-style: italic; } .hljs-strong { font-weight: 600; }
+.md blockquote { border-left: 3px solid color-mix(in srgb, var(--md-marker) 60%, var(--border-strong)); margin-left: 0; padding-left: 10px; color: var(--fg-muted); }
 .md table { border-collapse: collapse; display: block; overflow-x: auto; }
 .md th, .md td { border: 1px solid var(--border-strong); padding: 3px 8px; }
 .md th { background: var(--bg-raised); }
@@ -393,7 +437,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .prompts:empty { display: none; }
 .prompt {
   margin: 6px 10px; padding: 8px 10px; border-radius: 6px;
-  border: 1px solid var(--waiting); background: rgba(229, 165, 10, 0.06);
+  border: 1px solid var(--waiting); background: color-mix(in srgb, var(--waiting) 6%, transparent);
 }
 .prompt-title { font-weight: 600; color: var(--fg-strong); margin-bottom: 6px; }
 .prompt-title .targ { font-weight: 400; color: var(--fg-muted); }
@@ -410,7 +454,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   padding: 4px 8px; border-radius: 4px; cursor: pointer;
   border: 1px solid var(--border-strong); background: var(--input-bg);
 }
-.choice:hover, .choice.selected { border-color: var(--accent); background: rgba(0, 120, 212, 0.15); }
+.choice:hover, .choice.selected { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 15%, transparent); }
 .choice .key { color: var(--fg-faint); font-family: var(--mono); font-size: 11px; }
 .choice .desc { color: var(--fg-muted); font-size: 12px; }
 .prompt input[type=text], .prompt textarea {
@@ -433,15 +477,18 @@ button, input, select, textarea { font: inherit; color: inherit; }
  * gap over the composer, so it never moves the chat, and only opacity and transforms animate.
  */
 .busy {
-  position: absolute; left: 2px; bottom: calc(100% + 1px); height: 16px; display: none; align-items: center; gap: 5px;
-  padding: 0 6px; font-size: 11.5px; line-height: 16px; white-space: nowrap; pointer-events: none;
+  position: absolute; left: 0; bottom: calc(100% + 3px); height: 20px; max-width: 100%; display: none; align-items: center; gap: 7px;
+  padding: 0 10px 0 8px; font-size: 12px; line-height: 20px; white-space: nowrap; overflow: hidden; pointer-events: none;
+  background: var(--bg); border-radius: 10px;
 }
 .cell.state-running .busy { display: flex; }
-.busy-glyph { display: inline-grid; width: 12px; justify-items: center; color: var(--claude); font-size: 13px; }
+/* Room under the last message for the line above, so it never covers the chat. */
+.cell.state-running .messages { padding-bottom: 30px; }
+.busy-glyph { display: inline-grid; flex: none; width: 12px; justify-items: center; color: var(--claude); font-size: 13px; }
 .busy-glyph > span { grid-area: 1 / 1; opacity: 0; animation: busy-glyph 1.2s step-end infinite; animation-delay: calc(var(--i) * 0.12s); }
 @keyframes busy-glyph { 0% { opacity: 1; } 10%, 100% { opacity: 0; } }
-.busy-verb { position: relative; color: color-mix(in srgb, var(--claude) 75%, var(--fg-muted)); }
-.busy .sweep-name { color: #ffe6db; text-shadow: 0 0 6px rgba(217, 119, 87, 0.9); }
+.busy-verb { position: relative; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: color-mix(in srgb, var(--claude) 75%, var(--fg-muted)); }
+.busy .sweep-name { color: color-mix(in srgb, var(--claude) 25%, #fff); text-shadow: 0 0 6px color-mix(in srgb, var(--claude) 90%, transparent); }
 .composer:focus-within { border-color: var(--accent); }
 .composer textarea {
   display: block; width: 100%; max-height: 200px; resize: none; border: 0; outline: none;
@@ -489,7 +536,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   display: flex; align-items: center; gap: 8px; width: 100%;
   padding: 5px 8px; border: 0; border-radius: 4px; background: transparent; cursor: pointer; text-align: left;
 }
-.picker-item:hover, .picker-item.active { background: rgba(0, 120, 212, 0.25); }
+.picker-item:hover, .picker-item.active { background: color-mix(in srgb, var(--accent) 25%, transparent); }
 .picker-item .name { color: var(--fg-strong); white-space: nowrap; }
 .picker-item .path { color: var(--fg-faint); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .picker-item .forget { margin-left: auto; visibility: hidden; }
@@ -508,7 +555,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   display: flex; align-items: flex-start; gap: 6px; width: 100%;
   padding: 4px 8px; border: 0; border-radius: 4px; background: transparent; cursor: pointer; text-align: left;
 }
-.menu-item:hover { background: rgba(0, 120, 212, 0.25); }
+.menu-item:hover { background: color-mix(in srgb, var(--accent) 25%, transparent); }
 .menu-item > .codicon { margin-top: 2px; font-size: 13px; color: var(--link); }
 .menu-main { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 .menu-main .name { color: var(--fg-strong); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -523,7 +570,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 }
 .segmented button:first-child { border-left: 0; }
 .segmented button:hover { background: var(--hover); color: var(--fg); }
-.segmented button.on { background: var(--accent); color: #fff; }
+.segmented button.on { background: var(--accent); color: var(--on-accent); }
 .mcp-row { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 4px; }
 .mcp-row:hover { background: var(--hover); }
 .mcp-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--fg-faint); }
@@ -572,7 +619,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 }
 .session:hover { background: var(--hover); }
 .session:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
-.session.active { background: rgba(0, 120, 212, 0.2); }
+.session.active { background: color-mix(in srgb, var(--accent) 20%, transparent); }
 .session .status-dot { margin-top: 6px; }
 .session-main { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 .session-line { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
@@ -597,9 +644,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .update-pill {
   display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px;
   border: 1px solid var(--accent); border-radius: 3px; cursor: pointer; font-size: 12px; white-space: nowrap;
-  background: rgba(0, 120, 212, 0.18); color: var(--fg-strong);
+  background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--fg-strong);
 }
-.update-pill:hover { background: rgba(0, 120, 212, 0.3); }
+.update-pill:hover { background: color-mix(in srgb, var(--accent) 30%, transparent); }
 .update-pill .codicon { font-size: 13px; color: var(--link); }
 
 /* ---------- plan usage pill + popup ---------- */
@@ -637,7 +684,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   background: transparent; color: var(--fg-muted); font-size: 12px; cursor: pointer;
 }
 .filters button:hover { color: var(--fg); }
-.filters button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.filters button.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 .filters select {
   margin-left: auto; max-width: 240px; padding: 0 4px; border: 1px solid var(--border-strong); border-radius: 10px;
   background: transparent; color: var(--fg-muted); font-size: 12px; outline: none; cursor: pointer;
@@ -652,7 +699,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   padding: 6px 8px 6px 10px; border: 0; border-radius: 4px; background: transparent; cursor: pointer; text-align: left;
   box-shadow: inset 3px 0 0 var(--proj, transparent);
 }
-.resume-item:hover, .resume-item:focus-visible { background: rgba(0, 120, 212, 0.2); outline: none; }
+.resume-item:hover, .resume-item:focus-visible { background: color-mix(in srgb, var(--accent) 20%, transparent); outline: none; }
 .resume-item[disabled] { opacity: 0.5; cursor: default; }
 .resume-main { display: flex; flex-direction: column; min-width: 0; flex: 1; gap: 1px; }
 .resume-line { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
@@ -704,6 +751,20 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .ctx-sep { border-top: 1px solid var(--border); margin: 5px 0; }
 .ctx-hint { color: var(--fg-faint); font-size: 11px; }
 
+/* ---------- image viewer ---------- */
+.bubble-images .thumb[src^="data:"], .bubble-images .thumb[src^="blob:"], .attachment img { cursor: zoom-in; }
+.lightbox {
+  position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center; padding: 24px;
+  background: rgba(0, 0, 0, 0.8); cursor: zoom-out; animation: pv-in 0.12s ease-out;
+}
+.lightbox img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 4px; box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6); background: var(--bg-alt); }
+
+/* ---------- resume list: where and when a session started ---------- */
+.resume-started { color: var(--fg-faint); font-size: 11px; flex: none; }
+.resume-path.filter-link { cursor: pointer; }
+.resume-path.filter-link:hover { text-decoration: underline; }
+.resume-moved { color: var(--fg-faint); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+
 /* ---------- Remote Control ---------- */
 .act-remote.on { color: var(--done); }
 .act-remote.connecting { color: var(--link); animation: pulse 1s infinite; }
@@ -714,7 +775,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .missing-bar .codicon { color: var(--waiting); }
 .missing-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .cell.missing .composer { display: none; }
-.cell.missing .act-remote, .cell.missing .act-code, .cell.missing .act-reveal { display: none; }
+.cell.missing .act-handoff, .cell.missing .act-code, .cell.missing .act-reveal { display: none; }
 .item.user.unsent .bubble { opacity: 0.55; border-style: dashed; }
 .unsent-tag { color: var(--error); font-size: 11px; }
 .msg-action {
@@ -732,7 +793,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   background: var(--bg-raised); border: 1px solid var(--border-strong); border-radius: 6px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
 }
 .slash-item { display: flex; align-items: baseline; gap: 8px; width: 100%; padding: 3px 8px; border: 0; border-radius: 4px; background: transparent; text-align: left; cursor: pointer; }
-.slash-item:hover, .slash-item.active { background: rgba(0, 120, 212, 0.25); }
+.slash-item:hover, .slash-item.active { background: color-mix(in srgb, var(--accent) 25%, transparent); }
 .slash-item .name { color: var(--fg-strong); font-family: var(--mono); font-size: 12px; white-space: nowrap; }
 .slash-item .hint { color: var(--fg-muted); font-size: 11px; white-space: nowrap; }
 .slash-item .desc { color: var(--fg-faint); font-size: 11px; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -749,28 +810,36 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .setting input[type=text]:focus { border-color: var(--accent); }
 .setting select { background: var(--input-bg); border: 1px solid var(--border-strong); border-radius: 3px; padding: 1px 4px; }
 .hit { display: flex; flex-direction: column; gap: 1px; width: 100%; padding: 5px 8px 5px 10px; border: 0; border-radius: 4px; background: transparent; text-align: left; cursor: pointer; box-shadow: inset 3px 0 0 var(--proj, transparent); }
-.hit:hover, .hit:focus-visible { background: rgba(0, 120, 212, 0.2); outline: none; }
+.hit:hover, .hit:focus-visible { background: color-mix(in srgb, var(--accent) 20%, transparent); outline: none; }
 .hit .snippet { color: var(--fg-muted); font-size: 12px; overflow-wrap: anywhere; }
-.hit mark { background: rgba(229, 165, 10, 0.35); color: var(--fg-strong); border-radius: 2px; }
+.hit mark { background: color-mix(in srgb, var(--waiting) 35%, transparent); color: var(--fg-strong); border-radius: 2px; }
 
 /* ---------- light theme: follows the system, or the choice in Settings ---------- */
 :root { color-scheme: dark; }
 :root[data-theme="light"] { color-scheme: light; }
 :root[data-theme="light"] {
   --bg: #ffffff; --bg-alt: #f3f3f3; --bg-raised: #ffffff; --border: #e5e5e5; --border-strong: #cecece;
-  --fg: #3b3b3b; --fg-strong: #1f1f1f; --fg-muted: #616161; --fg-faint: #8a8a8a;
-  --accent: #005fb8; --accent-hover: #0258a8; --link: #005fb8; --input-bg: #f0f0f0; --hover: #ececec; --code-bg: #f3f3f3;
-  --claude: #c2410c; --waiting: #b5760a; --done: #1a7f37; --error: #cd3131;
+  --fg: #3c3f53; --fg-strong: #1d1f2e; --fg-muted: #62667f; --fg-faint: #8b8fa7;
+  --accent: #4f6bd8; --accent-hover: #435fc9; --on-accent: #ffffff; --link: #3f5fd0; --input-bg: #f0f0f0; --hover: #ececec; --code-bg: #f3f3f3;
+  --claude: #c4542c; --waiting: #a36d0a; --done: #2c8644; --error: #c63b3b;
   --diff-add: rgba(46, 160, 67, 0.16); --diff-del: rgba(248, 81, 73, 0.14);
+  --md-h1: #c25a2c; --md-h2: #3f5fd0; --md-strong: #875800; --md-em: #7a4cbc; --md-code: #b5346b; --md-marker: #c4542c;
+  --hl-keyword: #8839ef; --hl-control: #cc3a78; --hl-string: #3f8f2b; --hl-number: #c9560a; --hl-comment: #8c8fa1;
+  --hl-function: #1e66f5; --hl-type: #a26f00; --hl-variable: #4c4f69; --hl-tag: #14857f; --hl-attr: #a26f00;
+  --hl-regexp: #cc1f40; --hl-meta: #14857f; --hl-punct: #6c6f85;
 }
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) { color-scheme: light; }
   :root:not([data-theme="dark"]) {
     --bg: #ffffff; --bg-alt: #f3f3f3; --bg-raised: #ffffff; --border: #e5e5e5; --border-strong: #cecece;
-    --fg: #3b3b3b; --fg-strong: #1f1f1f; --fg-muted: #616161; --fg-faint: #8a8a8a;
-    --accent: #005fb8; --accent-hover: #0258a8; --link: #005fb8; --input-bg: #f0f0f0; --hover: #ececec; --code-bg: #f3f3f3;
-    --claude: #c2410c; --waiting: #b5760a; --done: #1a7f37; --error: #cd3131;
+    --fg: #3c3f53; --fg-strong: #1d1f2e; --fg-muted: #62667f; --fg-faint: #8b8fa7;
+    --accent: #4f6bd8; --accent-hover: #435fc9; --on-accent: #ffffff; --link: #3f5fd0; --input-bg: #f0f0f0; --hover: #ececec; --code-bg: #f3f3f3;
+    --claude: #c4542c; --waiting: #a36d0a; --done: #2c8644; --error: #c63b3b;
     --diff-add: rgba(46, 160, 67, 0.16); --diff-del: rgba(248, 81, 73, 0.14);
+    --md-h1: #c25a2c; --md-h2: #3f5fd0; --md-strong: #875800; --md-em: #7a4cbc; --md-code: #b5346b; --md-marker: #c4542c;
+    --hl-keyword: #8839ef; --hl-control: #cc3a78; --hl-string: #3f8f2b; --hl-number: #c9560a; --hl-comment: #8c8fa1;
+    --hl-function: #1e66f5; --hl-type: #a26f00; --hl-variable: #4c4f69; --hl-tag: #14857f; --hl-attr: #a26f00;
+    --hl-regexp: #cc1f40; --hl-meta: #14857f; --hl-punct: #6c6f85;
   }
 }
 

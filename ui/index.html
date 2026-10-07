@@ -6,6 +6,7 @@
   <link rel="stylesheet" href="vendor/codicon.css" />
   <link rel="stylesheet" href="style.css" />
   <script src="vendor/marked.umd.js"></script>
+  <script src="vendor/highlight.min.js"></script>
   <script src="render.js" defer></script>
   <script src="app.js" defer></script>
 </head>
@@ -97,6 +98,8 @@
 
   <div id="menu" class="menu hidden" role="menu"></div>
 
+  <div id="lightbox" class="lightbox hidden" role="dialog" aria-label="Image"><img alt="" /></div>
+
   <template id="cell-template">
     <section class="cell" tabindex="-1">
       <div class="cell-head">
@@ -106,9 +109,8 @@
         <span class="cell-state"></span>
         <span class="cell-path"></span>
         <span class="bg-tasks hidden"><span class="codicon codicon-loading codicon-modifier-spin"></span><span class="bg-count"></span></span>
-        <button class="icon-btn act-remote hidden"><span class="codicon codicon-broadcast"></span></button>
-        <button class="icon-btn act-export" title="Export this session as Markdown"><span class="codicon codicon-export"></span></button>
-        <button class="icon-btn act-clean"><span class="codicon codicon-eye"></span></button>
+        <button class="icon-btn act-handoff" title="Handoff: Claude writes a Markdown summary another session can continue from"><span class="codicon codicon-note"></span></button>
+        <button class="icon-btn act-detail"><span class="codicon codicon-eye-closed"></span></button>
         <button class="icon-btn act-progress"><span class="codicon codicon-checklist"></span></button>
         <button class="icon-btn act-code"><span class="codicon codicon-vscode"></span></button>
         <button class="icon-btn act-reveal" title="Open folder in Explorer"><span class="codicon codicon-folder"></span></button>
@@ -145,6 +147,7 @@
           </select>
           <button class="chip act-model" title="Model and effort"><span class="label"></span><span class="codicon codicon-chevron-down"></span></button>
           <button class="icon-btn act-mcp" title="MCP servers"><span class="codicon codicon-plug"></span></button>
+          <button class="icon-btn act-remote hidden"><span class="codicon codicon-broadcast"></span></button>
           <button class="ctx-btn act-context hidden" aria-label="Context window"><span class="ctx-ring"></span><span class="ctx-text"></span></button>
           <button class="icon-btn act-attach" title="Attach images (you can also paste or drop them)"><span class="codicon codicon-file-media"></span></button>
           <input type="file" class="file-input hidden" accept="image/png,image/jpeg,image/gif,image/webp" multiple />

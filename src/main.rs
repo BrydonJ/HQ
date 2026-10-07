@@ -63,20 +63,17 @@ async fn pick_folder(window: WebviewWindow) -> Option<String> {
     .flatten()
 }
 
-/// Asks where to save `text` (as UTF-8, a Markdown file by default) and writes it there.
-/// Returns the chosen path, or `None` when the user cancels.
+/// Asks where to save `text` (as UTF-8, a Markdown file by default) and writes it there, starting
+/// in `directory` when given. Returns the chosen path, or `None` when the user cancels.
 #[tauri::command]
-async fn save_text_file(window: WebviewWindow, default_name: String, text: String) -> Result<Option<String>, String> {
+async fn save_text_file(window: WebviewWindow, default_name: String, text: String, directory: Option<String>) -> Result<Option<String>, String> {
     let app = window.app_handle().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let chosen = app
-            .dialog()
-            .file()
-            .set_parent(&window)
-            .set_title("Save as")
-            .set_file_name(&default_name)
-            .add_filter("Markdown", &["md"])
-            .blocking_save_file();
+        let mut dialog = app.dialog().file().set_parent(&window).set_title("Save as").set_file_name(&default_name).add_filter("Markdown", &["md"]);
+        if let Some(dir) = directory.filter(|d| std::path::Path::new(d).is_dir()) {
+            dialog = dialog.set_directory(dir);
+        }
+        let chosen = dialog.blocking_save_file();
         let Some(chosen) = chosen else { return Ok(None) };
         let mut path = chosen.into_path().map_err(|e| e.to_string())?;
         if path.extension().is_none() {

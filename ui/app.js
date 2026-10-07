@@ -19,6 +19,7 @@ const app = {
   models: [],          // model list from the last initialize reply, so idle cells can offer it too
   defaults: {},        // permission mode, model and effort last picked, for new sessions
   workspaces: {},      // projectKey(folder) -> .code-workspace file the VS Code button opens
+  // (project colour picks live in render.js's projectColorPicks; saved as `projectColors`)
   commands: [],        // slash commands from the last initialize reply, for the composer's autocomplete
   claudeUpdateAt: 0,   // when `claude update` last ran (ms), so a restart does not repeat it
   remoteDefault: null, // new sessions start with Remote Control on; null until seeded from the account
@@ -41,9 +42,19 @@ const FALLBACK_MODELS = [
 const ALL_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 // Shown above the prompt box while Claude works, one per turn, in the spirit of the CLI's spinner.
-const BUSY_VERBS = ['Brewing', 'Cogitating', 'Clauding', 'Conjuring', 'Deliberating', 'Finagling', 'Hatching', 'Herding',
-  'Marinating', 'Moseying', 'Mulling', 'Musing', 'Noodling', 'Percolating', 'Pondering', 'Puttering', 'Reticulating',
-  'Ruminating', 'Schlepping', 'Simmering', 'Smooshing', 'Stewing', 'Tinkering', 'Transmuting', 'Whirring', 'Wrangling'];
+const BUSY_VERBS = ['Cooking', 'Locking in', 'Vibe coding', 'Aura farming', 'Manifesting', 'Speedrunning', 'Main charactering',
+  'Big braining', 'Rizzing up the compiler', 'Sending it', 'Yapping internally', 'Touching grass (briefly)', 'Lowkey grinding',
+  'Highkey grinding', 'Gatekeeping bugs', 'Glazing the codebase', 'Rawdogging the stack', 'Delulu debugging',
+  'Doomscrolling the docs', 'Entering goblin mode', 'Clauding', 'Letting it cook', 'Mewing', 'No-capping', 'Slaying',
+  'Understanding the assignment', 'Living rent free in RAM', 'Being so real', 'Eating (no crumbs)',
+  'Giving it main quest energy', 'Pulling an all-nighter', 'Spilling the tea', 'Running it back', 'Hitting the griddy'];
+
+// The eye button's levels: [icon, what shows, what the next click shows].
+const DETAIL_LEVELS = {
+  1: ['eye', 'everything', 'replies, thinking and narration'],
+  2: ['eye-closed', 'replies, thinking and narration', 'replies only'],
+  3: ['comment', 'replies only', 'everything'],
+};
 
 // Claude Code only updates itself from interactive sessions, and HQ runs it headless, so HQ
 // runs `claude update` before the first session starts and again once the last run is old.
@@ -77,7 +88,7 @@ const nextRequestId = () => `hq-${Date.now().toString(36)}-${++reqSeq}`;
 
 class Cell {
   constructor({ cwd, sessionId = null, permissionMode = 'default', model = null, effort = null, title = '', aiTitle = false,
-    customTitle = null, renamePending = false, clean = false, progress = false, fork = false, collapsed = false,
+    customTitle = null, renamePending = false, detail, clean, progress = false, fork = false, collapsed = false,
     missing = false, remote = null, bridgeSessionId = null, draft = '' }) {
     this.cwd = cwd;
     this.sessionId = sessionId;
@@ -95,7 +106,10 @@ class Cell {
     this.titleAsked = '';          // the prompt text Claude was last asked to title
     this.promptText = '';          // the prompts sent so far, which Claude titles the session from
     this.renaming = false;
-    this.clean = !!clean;          // prompts and replies only (the eye button)
+    // How much of the chat shows (the eye button): 1 everything, 2 no tool calls, 3 replies only (no thinking or narration).
+    // Cells saved before the levels had a `clean` flag: true was the prompts-and-replies view,
+    // false showed everything. Cells with no flag start at the new default, 2.
+    this.detail = [1, 2, 3].includes(detail) ? detail : clean === true ? 3 : clean === false ? 1 : 2;
     this.progressView = !!progress; // the progress panel over the chat (the checklist button)
     this.collapsed = !!collapsed;  // only the header shows, in the dock under the grid
     this.savedScroll = null;       // [scrollTop, stickToBottom] from when the chat was collapsed
@@ -128,6 +142,7 @@ class Cell {
     this.taskCreates = new Map(); // TaskCreate tool_use_id -> task, until its result gives the id
     this.tasksStale = false;   // the list is a finished one from an earlier prompt
     this.taskProgress = new Map(); // task_id -> latest task_progress of an agent Claude started
+    this.stoppingTasks = new Set(); // task ids a stop_task was sent for and not yet answered
     this.ctx = { tokens: null, window: null, info: null, infoAt: 0, loading: null, model: null }; // context window use
     this.compacting = false;   // a compaction is running (the CLI's status 'compacting')
     this.cost = { usd: 0, tokens: 0, procUsd: 0, procTokens: 0 }; // this HQ run's spend; proc* = last total of the current process
@@ -167,7 +182,7 @@ class Cell {
     this.metaEl = el.querySelector('.meta');
     this.stopBtn = el.querySelector('.act-stop');
     this.titleEl = el.querySelector('.cell-title');
-    this.cleanBtn = el.querySelector('.act-clean');
+    this.detailBtn = el.querySelector('.act-detail');
     this.progressBtn = el.querySelector('.act-progress');
     this.progressEl = el.querySelector('.progress-panel');
     this.headBar = el.querySelector('.head-progress');
@@ -184,7 +199,7 @@ class Cell {
     el.querySelector('.cell-path').textContent = this.cwd;
     this.modeSel.value = this.permissionMode;
     this.setTitle(this.title);
-    this.applyClean();
+    this.applyDetail();
     this.applyProgressView();
     this.applyCollapsed();
     this.applyMissing();
@@ -206,10 +221,17 @@ class Cell {
     });
     head.addEventListener('dblclick', e => {
       if (Date.now() - this.expandedAt < 600) return; // the first click of this double-click expanded the cell
-      if (!e.target.closest('button, .cell-title, .cell-rename')) toggleMaximize(this);
+      if (!e.target.closest('button, .cell-title, .cell-rename, .cell-project')) toggleMaximize(this);
     });
     this.titleEl.addEventListener('click', () => { if (!this.collapsed) this.startRename(); });
-    this.cleanBtn.addEventListener('click', () => this.setClean(!this.clean));
+    const proj = el.querySelector('.cell-project');
+    proj.title = 'Click for another colour';
+    proj.addEventListener('click', e => {
+      if (this.collapsed) return; // the click opens the cell instead
+      e.stopPropagation();
+      shuffleProjectColor(this.cwd);
+    });
+    this.detailBtn.addEventListener('click', () => this.setDetail(this.detail % 3 + 1));
     this.progressBtn.addEventListener('click', () => this.setProgressView(!this.progressView));
     el.querySelector('.act-max').addEventListener('click', () => toggleMaximize(this));
     el.querySelector('.act-close').addEventListener('click', e => this.requestClose(e.currentTarget));
@@ -223,7 +245,8 @@ class Cell {
     this.ctxBtn.addEventListener('focus', () => showContextPop(this));
     this.ctxBtn.addEventListener('blur', hideContextPop);
     this.remoteBtn.addEventListener('click', () => openMenu(this.remoteBtn, this, menuEl => this.buildRemoteMenu(menuEl)));
-    el.querySelector('.act-export').addEventListener('click', () => this.exportTranscript());
+    this.handoffBtn = el.querySelector('.act-handoff');
+    this.handoffBtn.addEventListener('click', () => this.writeHandoff());
     el.querySelector('.act-locate').addEventListener('click', () => this.locateFolder());
     el.querySelector('.act-drop').addEventListener('click', () => closeCell(this));
     el.querySelector('.act-send').addEventListener('click', () => this.submit());
@@ -277,13 +300,19 @@ class Cell {
       saveState(); // the unsent text is kept in board.json
     });
     this.input.addEventListener('blur', () => slashClose(this));
+    this.input.addEventListener('click', () => slashUpdate(this)); // the caret moved into or out of a "/name"
+    this.input.addEventListener('keyup', e => { if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Home' || e.key === 'End') slashUpdate(this); });
     this.msgs.addEventListener('scroll', () => {
       if (this.collapsed) return; // a hidden scroller reads as scrolled to the bottom
       const m = this.msgs;
       this.stickToBottom = m.scrollHeight - m.scrollTop - m.clientHeight < 40;
     });
     this.msgs.addEventListener('click', onLinkClick);
+    this.msgs.addEventListener('click', onCodeCopyClick);
+    this.msgs.addEventListener('click', onImageClick);
+    this.attachEl.addEventListener('click', onImageClick);
     this.prompts.addEventListener('click', onLinkClick);
+    this.prompts.addEventListener('click', onCodeCopyClick);
   }
 
   append(node, parent) {
@@ -423,19 +452,20 @@ class Cell {
     }
   }
 
-  /** Prompts and replies only: hides tool calls, thinking, narration and status notes. */
-  setClean(on) {
-    this.clean = on;
-    this.applyClean();
+  /** Sets how much of the chat shows: 1 everything, 2 no tool calls, 3 only prompts and replies. */
+  setDetail(level) {
+    this.detail = [1, 2, 3].includes(level) ? level : 2;
+    this.applyDetail();
     this.scroll();
     saveState();
   }
 
-  applyClean() {
-    this.el.classList.toggle('clean', this.clean);
-    this.cleanBtn.classList.toggle('on', this.clean);
-    this.cleanBtn.querySelector('.codicon').className = `codicon codicon-${this.clean ? 'eye-closed' : 'eye'}`;
-    this.cleanBtn.title = this.clean ? 'Show tools, thinking and narration' : 'Show only prompts and replies';
+  applyDetail() {
+    for (const n of [1, 2, 3]) this.el.classList.toggle(`detail-${n}`, this.detail === n);
+    const [icon, now, next] = DETAIL_LEVELS[this.detail];
+    this.detailBtn.classList.toggle('on', this.detail !== 2); // lit when off the default
+    this.detailBtn.querySelector('.codicon').className = `codicon codicon-${icon}`;
+    this.detailBtn.title = `Showing ${now}. Click to show ${next}.`;
   }
 
   /** Fades the chat and shows Claude's task list, what it is doing now, and its background work. */
@@ -661,6 +691,20 @@ class Cell {
     this.renderProgress();
   }
 
+  /** Stops one background agent or shell, or an agent Claude is waiting on; the rest of the turn goes on. */
+  async stopTask(id) {
+    const key = String(id);
+    if (this.proc == null || this.stoppingTasks.has(key)) return;
+    this.stoppingTasks.add(key);
+    this.renderProgress();
+    const epoch = this.epoch;
+    const reply = await this.control({ subtype: 'stop_task', task_id: key });
+    if (epoch !== this.epoch) return; // /clear started over meanwhile
+    this.stoppingTasks.delete(key);
+    if (reply && reply.subtype === 'error') this.notice(`Could not stop the task: ${reply.error || 'rejected by Claude'}`, true);
+    this.renderProgress();
+  }
+
   /** The elapsed time ticks once a second while the panel is open and Claude is working. */
   syncProgressTimer() {
     const need = this.progressView && (this.status === 'running' || this.bgTasks.length > 0);
@@ -723,7 +767,8 @@ class Cell {
       turnActive ? h('span', { class: 'pv-elapsed', text: formatDuration(Date.now() - this.turnStart) }) : null,
       turnActive && this.turnTools ? h('span', { text: `${this.turnTools} tool call${this.turnTools === 1 ? '' : 's'}` }) : null,
       h('span', { class: 'spacer' }),
-      ask);
+      ask,
+      h('button', { class: 'icon-btn pv-close', title: 'Close', onclick: () => this.setProgressView(false) }, icon('close')));
 
     let bar = null;
     if (pct != null || running) {
@@ -752,18 +797,21 @@ class Cell {
         ))));
     }
 
-    const agents = this.bgTasks.map(t => ({ label: `${BG_LABELS[t.type] || 'Task'}: ${t.description}`, p: this.taskProgress.get(t.id) }));
+    const agents = this.bgTasks.map(t => ({ id: t.id, label: `${BG_LABELS[t.type] || 'Task'}: ${t.description}`, p: this.taskProgress.get(t.id) }));
     for (const [id, p] of this.taskProgress) {
-      if (!this.bgTasks.some(t => t.id === id)) agents.push({ label: `Agent: ${p.description}`, p });
+      if (!this.bgTasks.some(t => t.id === id)) agents.push({ id, label: `Agent: ${p.description}`, p });
     }
     const agentsEl = agents.length ? h('div', { class: 'pv-section' },
       h('div', { class: 'pv-title', text: 'Agents and shells' }),
-      h('ul', { class: 'pv-agents' }, agents.map(({ label, p }) => {
+      h('ul', { class: 'pv-agents' }, agents.map(({ id, label, p }) => {
         const detail = p ? [p.lastTool && `last: ${p.lastTool}`, p.toolUses != null && `${p.toolUses} tool uses`,
           p.durationMs != null && formatDuration(p.durationMs)].filter(Boolean).join('  ·  ') : '';
+        const stopping = this.stoppingTasks.has(String(id));
+        const stop = h('button', { class: 'icon-btn pv-stop', disabled: stopping || this.proc == null,
+          title: stopping ? 'Stopping…' : 'Stop this agent or shell', onclick: () => this.stopTask(id) }, icon(stopping ? 'loading codicon-modifier-spin' : 'debug-stop'));
         return h('li', null, h('span', { class: 'codicon codicon-loading codicon-modifier-spin' }),
-          h('div', null, h('div', { text: label }), detail ? h('div', { class: 'desc', text: detail }) : null,
-            p && p.summary ? h('div', { class: 'desc', text: p.summary }) : null));
+          h('div', { class: 'pv-agent-main' }, h('div', { text: label }), detail ? h('div', { class: 'desc', text: detail }) : null,
+            p && p.summary ? h('div', { class: 'desc', text: p.summary }) : null), stop);
       }))) : null;
 
     const answerEl = answer && answer.at ? h('div', { class: 'pv-section' },
@@ -1128,11 +1176,25 @@ class Cell {
   }
 
   async submit() {
-    if (this.missing) return;
+    if (this.missing || this.clearing) return;
     if (this.historyLoading) await this.historyLoading; // the transcript is drawn first, so live messages follow it
     const text = this.input.value.trim();
     const images = this.attachments;
     if (!text && !images.length) return;
+    // /clear (and its aliases) is answered here: Claude's own /clear would change the session
+    // behind HQ's back. The cell starts a new session; the old one stays on disk for Resume.
+    const clear = !images.length && /^\/(?:clear|reset|new)(?:\s+([\s\S]*))?$/.exec(text);
+    if (clear) {
+      if (this.status === 'running' || this.pending.size || this.spawning) {
+        this.notice('Claude is still working. Stop it (Esc) before you clear the conversation.', true);
+        return;
+      }
+      this.input.value = '';
+      autoGrow(this.input);
+      slashClose(this);
+      await this.clearConversation(clear[1] || '');
+      return;
+    }
     for (const old of this.msgs.querySelectorAll('.item.user.unsent')) old.remove(); // a prompt that failed to send is replaced by this one
     const draft = { text, images, cancelled: false, bubble: null, addedPrompt: false, titled: false };
     this.input.value = '';
@@ -1236,6 +1298,51 @@ class Cell {
     if (this.proc == null) return;
     this.forced = true;
     invoke('kill_session', { id: this.proc });
+  }
+
+  /** Ends the process and starts the cell over as a new session in the same folder. `name` titles it. */
+  async clearConversation(name) {
+    this.clearing = true;
+    try {
+      await this.resetSession(name);
+    } finally {
+      this.clearing = false;
+    }
+  }
+
+  async resetSession(name) {
+    this.epoch = (this.epoch || 0) + 1; // a handoff still being written belongs to the old session
+    if (this.proc != null) {
+      this.quietExit = true;
+      const exited = new Promise(resolve => { this.exitWaiter = resolve; });
+      invoke('kill_session', { id: this.proc });
+      await withTimeout(exited, 5000);
+      this.exitWaiter = null;
+      if (this.proc != null) { // the process did not end; quietExit stays set so its late exit says nothing
+        this.notice('Could not clear: Claude did not stop. Try again.', true);
+        return;
+      }
+    }
+    for (const id of [...this.pending.keys()]) this.dropPrompt(id);
+    Object.assign(this, {
+      sessionId: null, fork: false, bridgeSessionId: null, aiTitle: false, renamePending: false, titleTries: 0,
+      titleAsked: '', promptText: '', sentPrompts: [], lastReply: '', turnTexts: [], tasksStale: false, lastDuration: '',
+      historyStart: 0, historyPending: false, statusAnswer: null, live: null, promptWritten: false, lastSent: null,
+      remoteAsked: false, currentTool: null, turnStart: null, turnTools: 0, resumeWarning: null,
+    });
+    const title = name.replace(/\s+/g, ' ').trim();
+    this.customTitle = title || null;
+    this.renamePending = !!title; // saved in the new transcript once Claude has written it
+    this.ctx = { tokens: null, window: null, info: null, infoAt: 0, loading: null, model: null };
+    for (const m of [this.tools, this.tasks, this.taskCreates, this.taskProgress, this.openTools, this.stoppingTasks]) m.clear();
+    this.msgs.replaceChildren();
+    this.stickToBottom = true;
+    this.setTitle('');
+    this.setStatus('idle');
+    this.renderContext();
+    this.renderProgress();
+    saveState();
+    this.notice('Conversation cleared. The previous session stays on disk: Resume can open it again.');
   }
 
   async setMode(mode) {
@@ -1708,7 +1815,10 @@ class Cell {
     this.remoteUrl = null;
     this.renderRemote();
     this.renderContext();
-    if (forced) {
+    if (this.quietExit) { // /clear ended it: the cell starts over, so nothing is said
+      this.quietExit = false;
+      this.setStatus('idle');
+    } else if (forced) {
       this.notice('Stopped. Claude resumes this session when you send a message.');
       this.setStatus('idle');
     } else if (m.code !== 0 && m.code != null) {
@@ -1719,6 +1829,7 @@ class Cell {
     } else {
       this.setStatus(wasRunning ? 'exited' : 'idle');
     }
+    if (this.exitWaiter) this.exitWaiter();
   }
 
   // ---------- prompts: permission, questions, plan approval ----------
@@ -2317,43 +2428,44 @@ class Cell {
       icon(def ? 'check' : 'blank'), h('span', { class: 'menu-main' }, h('span', { class: 'name', text: 'Start with Remote Control on' }))));
   }
 
-  // ---------- export ----------
+  // ---------- handoff ----------
 
-  /** The session as Markdown, from what the cell shows: prompts, Claude's text, and a line per tool call. */
-  transcriptMarkdown() {
-    const out = [`# ${this.displayTitle() || 'Session'}`, '', `Folder: ${this.cwd}`, `Exported: ${new Date().toLocaleString()}`, ''];
-    if (this.historyStart > 0) out.push('*Earlier messages of this session are not included: use "Load earlier" in HQ first.*', '');
-    for (const item of this.msgs.children) {
-      if (item.classList.contains('user')) {
-        const stampEl = item.querySelector('.stamp');
-        const bubble = item.querySelector('.bubble');
-        const body = [...(bubble ? bubble.children : [])].filter(c => !c.classList.contains('stamp') && !c.classList.contains('bubble-images')).map(c => c.textContent).join('\n');
-        out.push(`## You${stampEl ? ` (${stampEl.title})` : ''}`, '', body, '');
-      } else if (item.classList.contains('text')) {
-        const md = item.querySelector('.md');
-        const source = md && (md._src || md.textContent);
-        if (source) out.push(item.classList.contains('narration') ? source.replace(/^/gm, '> ') : `## Claude\n\n${source}`, '');
-      } else if (item.classList.contains('tool')) {
-        const name = item.querySelector('.tname');
-        const arg = item.querySelector('.targ');
-        if (name) out.push(`*Tool: ${name.textContent}${arg && arg.textContent ? ` — ${arg.textContent}` : ''}*`, '');
-      }
+  /**
+   * Asks Claude, beside the conversation, for a Markdown handoff another session can continue
+   * from, then asks where to save it (HANDOFF.md in the session's folder by default). A side
+   * question adds no turn to the session.
+   */
+  async writeHandoff() {
+    if (this.missing || this.handoffBusy) return;
+    if (!this.sessionId && !this.promptWritten) {
+      this.notice('Nothing to hand off yet: send Claude a message first.');
+      return;
     }
-    return out.join('\n');
+    this.setHandoffBusy(true);
+    const epoch = this.epoch;
+    try {
+      if (this.proc == null && !(await this.ensureProcess())) return;
+      const reply = await this.control({ subtype: 'side_question', question: HANDOFF_QUESTION });
+      if (this.epoch !== epoch || this.closing) return; // /clear started the cell over meanwhile
+      const r = reply && reply.subtype === 'success' && reply.response;
+      const text = r && typeof r.response === 'string' ? r.response.trim() : '';
+      if (!text) {
+        this.notice(`Could not write the handoff: ${reply && reply.subtype === 'error' ? reply.error || 'rejected by Claude' : 'Claude gave no answer.'}`, true);
+        return;
+      }
+      const path = await invoke('save_text_file', { defaultName: 'HANDOFF.md', text: `${text}\n`, directory: this.cwd });
+      if (path) this.notice(`Handoff saved to ${path}`);
+    } catch (err) {
+      this.notice(`Could not save the handoff: ${err}`, true);
+    } finally {
+      this.setHandoffBusy(false);
+    }
   }
 
-  async exportTranscript() {
-    if (this.historyPending) {
-      this.historyPending = false;
-      await this.loadHistory();
-    }
-    const base = (this.displayTitle() || 'session').replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60) || 'session';
-    try {
-      const path = await invoke('save_text_file', { defaultName: `${base}.md`, text: this.transcriptMarkdown() });
-      if (path) this.notice(`Exported to ${path}`);
-    } catch (err) {
-      this.notice(`Could not export: ${err}`, true);
-    }
+  setHandoffBusy(on) {
+    this.handoffBusy = on;
+    this.handoffBtn.disabled = on;
+    this.handoffBtn.querySelector('.codicon').className = `codicon codicon-${on ? 'loading codicon-modifier-spin' : 'note'}`;
   }
 }
 
@@ -2390,6 +2502,49 @@ function onLinkClick(e) {
   e.preventDefault();
   if (a.dataset.external) invoke('open_url', { url: a.getAttribute('href') }).catch(() => {});
 }
+
+/** The copy button on a code block copies the code, without the button's own label. */
+function onCodeCopyClick(e) {
+  const btn = e.target.closest('.code-copy');
+  if (!btn) return;
+  const code = btn.closest('.code-block')?.querySelector('code');
+  if (!code) return;
+  copyText(code.textContent);
+  btn.classList.add('done');
+  btn.querySelector('.codicon').className = 'codicon codicon-check';
+  clearTimeout(btn._timer);
+  btn._timer = setTimeout(() => {
+    btn.classList.remove('done');
+    btn.querySelector('.codicon').className = 'codicon codicon-copy';
+  }, 1500);
+}
+
+// ---------- image viewer: a sent or attached image, full size ----------
+
+const lightbox = $('#lightbox');
+const lightboxImg = lightbox.querySelector('img');
+
+/** Opens an image from the chat or the composer full size. Restored images that were not loaded have no source to show. */
+function onImageClick(e) {
+  const img = e.target.closest('.bubble-images .thumb, .attachment img');
+  if (!img || !/^(data|blob):/i.test(img.currentSrc || img.src || '')) return;
+  lightboxImg.src = img.currentSrc || img.src;
+  lightbox.classList.remove('hidden');
+}
+
+function closeLightbox() {
+  lightbox.classList.add('hidden');
+  lightboxImg.removeAttribute('src');
+}
+
+lightbox.addEventListener('click', closeLightbox);
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && !lightbox.classList.contains('hidden')) {
+    e.preventDefault();
+    e.stopImmediatePropagation(); // not an interrupt for Claude
+    closeLightbox();
+  }
+}, true);
 
 function modelList() {
   return app.models.length ? app.models : FALLBACK_MODELS;
@@ -2440,6 +2595,11 @@ function parseAnswers(text) {
 const BG_LABELS = { local_agent: 'Agent', local_bash: 'Shell' };
 
 // Sent as a side question (like /btw), so Claude answers beside the running turn without stopping it.
+const HANDOFF_QUESTION = 'Write a handoff document for this session in Markdown, so that a fresh Claude session with none of '
+  + 'this context can pick the work up. Reply with the document only, no preamble. Start with a "# Handoff: <topic>" heading, '
+  + 'then these sections: Goal; Current state (what is done and verified, what is not); Key decisions and why; Files touched '
+  + '(paths, one line each); Open problems and gotchas; Next steps (numbered, most important first). Be concrete: name files, '
+  + 'commands, errors and IDs. Skip a section that has nothing in it.';
 const STATUS_QUESTION = 'Progress check from the user\'s dashboard. Reply in exactly this form: a first line "Progress: N%" '
   + 'with your rough estimate of how much of the current request is done, then at most three short sentences on what '
   + 'you are doing now and what is left. If nothing is in progress, say so.';
@@ -2513,8 +2673,8 @@ function pickContextWindow(modelUsage, model) {
 }
 
 // get_context_usage names its colors after Claude Code's theme, so they are mapped to HQ's own.
-const CONTEXT_COLORS = { claude: 'var(--claude)', warning: 'var(--waiting)', permission: '#89ddff', inactive: '#6e6e6e', promptborder: '#c586c0',
-  cyan: '#4ec9b0', green: '#3fb950', purple: '#a78bfa', blue: '#569cd6', red: '#f14c4c', orange: '#f78c6c', yellow: '#d7ba7d', pink: '#d16d9e' };
+const CONTEXT_COLORS = { claude: 'var(--claude)', warning: 'var(--waiting)', permission: '#93d0d8', inactive: 'var(--fg-faint)', promptborder: '#c3a6e8',
+  cyan: '#8fd3c7', green: '#a8dba0', purple: '#b6a8f0', blue: '#8ab4f8', red: '#f0a6a0', orange: '#f5b78e', yellow: '#e6d38f', pink: '#f2a7c3' };
 
 /** Keeps the numbers and the used categories of a get_context_usage reply; the rest of the 87 KB is dropped. */
 function sanitizeContext(r) {
@@ -2527,7 +2687,7 @@ function sanitizeContext(r) {
     autoCompact: r.isAutoCompactEnabled !== false,
     model: typeof r.model === 'string' ? r.model : '',
     categories: (Array.isArray(r.categories) ? r.categories : []).filter(c => c && c.kind === 'used' && Number.isFinite(c.tokens) && c.tokens > 0)
-      .map(c => ({ name: String(c.name), tokens: c.tokens, color: CONTEXT_COLORS[String(c.color || '').split('_')[0].toLowerCase()] || '#9d9d9d' })),
+      .map(c => ({ name: String(c.name), tokens: c.tokens, color: CONTEXT_COLORS[String(c.color || '').split('_')[0].toLowerCase()] || 'var(--fg-muted)' })),
   };
 }
 
@@ -2643,7 +2803,9 @@ window.addEventListener('focus', () => {
 // ---------- slash commands ----------
 
 const slashPop = $('#slash-pop');
-const slash = { cell: null, items: [], index: 0 };
+// start..end: the "/name" being typed. `picked`: an arrow key chose an item, so Enter completes
+// a "/name" typed mid-prompt; otherwise Enter there sends the prompt (it may end in a path).
+const slash = { cell: null, items: [], index: 0, start: 0, end: 0, picked: false };
 // Commands the CLI lists but answers with "not available here" in a headless session.
 const HIDDEN_COMMANDS = new Set(['focus']);
 
@@ -2670,11 +2832,27 @@ function slashClose(cell) {
   slashPop.classList.add('hidden');
 }
 
-/** Shows the commands matching what follows a "/" at the start of the composer. */
+/**
+ * The "/name" the caret is in, at the start of the composer or after a space or line break, so
+ * a skill can be named mid-prompt. Null when the caret is not in one.
+ */
+function slashToken(input) {
+  const caret = input.selectionStart;
+  if (caret == null || caret !== input.selectionEnd) return null;
+  const value = input.value;
+  const m = /(^|\s)\/([^\s/]*)$/.exec(value.slice(0, caret));
+  if (!m) return null;
+  const start = m.index + m[1].length;
+  const rest = /^[^\s]*/.exec(value.slice(caret))[0];
+  return { start, end: caret + rest.length, query: m[2] + rest };
+}
+
+/** Shows the commands matching the "/name" the caret is in. */
 function slashUpdate(cell) {
-  const m = /^\/([^\s]*)$/.exec(cell.input.value);
-  if (!m || !app.commands.length || cell.collapsed) { slashClose(cell); return; }
-  const q = m[1].toLowerCase();
+  const token = slashToken(cell.input);
+  // After other text a lone "/" is not taken as a command until a letter follows it.
+  if (!token || !app.commands.length || cell.collapsed || (token.start > 0 && !token.query)) { slashClose(cell); return; }
+  const q = token.query.toLowerCase();
   const rank = c => {
     const n = c.name.toLowerCase();
     if (n === q) return 0;
@@ -2682,10 +2860,12 @@ function slashUpdate(cell) {
     if (c.aliases.some(a => a.toLowerCase().startsWith(q))) return 2;
     return n.includes(q) ? 3 : 9;
   };
-  const items = app.commands.map(c => [rank(c), c]).filter(([r]) => r < 9)
+  // After other text, "/x" is as likely a path as a command, so only names starting with it are offered.
+  const worst = token.start === 0 ? 9 : 3;
+  const items = app.commands.map(c => [rank(c), c]).filter(([r]) => r < worst)
     .sort((a, b) => a[0] - b[0] || a[1].name.localeCompare(b[1].name)).map(x => x[1]).slice(0, 40);
   if (!items.length) { slashClose(cell); return; }
-  Object.assign(slash, { cell, items, index: 0 });
+  Object.assign(slash, { cell, items, index: 0, start: token.start, end: token.end, picked: false });
   renderSlash();
 }
 
@@ -2711,7 +2891,12 @@ function renderSlash() {
 }
 
 function slashComplete(cell, command) {
-  cell.input.value = `/${command.name} `;
+  const value = cell.input.value;
+  const after = value.slice(slash.end).replace(/^ /, '');
+  const insert = `/${command.name} `;
+  cell.input.value = value.slice(0, slash.start) + insert + after;
+  const caret = slash.start + insert.length;
+  cell.input.setSelectionRange(caret, caret);
   slashClose(cell);
   autoGrow(cell.input);
   cell.input.focus();
@@ -2725,6 +2910,7 @@ function slashKeydown(cell, e) {
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
     e.preventDefault();
     slash.index = (slash.index + (e.key === 'ArrowDown' ? 1 : slash.items.length - 1)) % slash.items.length;
+    slash.picked = true;
     renderSlash();
     return true;
   }
@@ -2734,7 +2920,9 @@ function slashKeydown(cell, e) {
     slashClose(cell);
     return true;
   }
-  if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && cell.input.value.trim() !== `/${current.name}`)) {
+  const enterCompletes = e.key === 'Enter' && !e.shiftKey && (slash.start === 0 || slash.picked)
+    && cell.input.value.slice(slash.start, slash.end) !== `/${current.name}`;
+  if (e.key === 'Tab' || enterCompletes) {
     e.preventDefault();
     slashComplete(cell, current);
     return true;
@@ -2874,6 +3062,28 @@ function sanitizeWorkspaces(w) {
     if (typeof path === 'string' && path) out[key] = path;
   }
   return out;
+}
+
+function sanitizeProjectColors(c) {
+  const out = {};
+  for (const [key, color] of Object.entries(c && typeof c === 'object' ? c : {})) {
+    if (typeof color === 'string' && /^#[0-9a-f]{6}$/i.test(color)) out[key] = color;
+  }
+  return out;
+}
+
+/** Gives a folder another colour from the palette, in every cell and list that shows it. */
+function shuffleProjectColor(path) {
+  const current = projectColor(path);
+  const others = PROJECT_COLORS.filter(c => c.toLowerCase() !== current.toLowerCase());
+  projectColorPicks[normPath(path).toLowerCase()] = others[Math.floor(Math.random() * others.length)];
+  for (const c of app.cells) {
+    if (projectKey(c.cwd) !== projectKey(path)) continue;
+    c.color = projectColor(c.cwd);
+    c.el.style.setProperty('--proj', c.color);
+  }
+  renderSidebar();
+  saveState();
 }
 
 function closeCell(cell) {
@@ -3282,6 +3492,16 @@ function closeResumer() {
   resumer.classList.add('hidden');
 }
 
+/** "14:05" today, "Oct 3 14:05" this year, else with the year. */
+function shortDateTime(ms) {
+  const d = new Date(ms);
+  const now = new Date();
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  if (d.toDateString() === now.toDateString()) return time;
+  const date = d.toLocaleDateString([], d.getFullYear() === now.getFullYear() ? { month: 'short', day: 'numeric' } : { year: 'numeric', month: 'short', day: 'numeric' });
+  return `${date} ${time}`;
+}
+
 function timeAgo(ms) {
   const s = Math.max(0, (Date.now() - ms) / 1000);
   if (s < 60) return 'just now';
@@ -3360,9 +3580,9 @@ function renderResumeList() {
   const rows = [];
   for (const info of resumeState.sessions) {
     if (resumeState.source && info.entrypoint !== resumeState.source) continue;
-    if (project && projectKey(info.cwd) !== project) continue;
+    if (project && projectKey(info.cwd) !== project && !(info.lastCwd && projectKey(info.lastCwd) === project)) continue;
     const title = info.title || info.lastPrompt || '(no prompt)';
-    const hay = [title, info.lastPrompt, info.cwd].join('\n').toLowerCase();
+    const hay = [title, info.lastPrompt, info.cwd, info.lastCwd].join('\n').toLowerCase();
     if (!terms.every(t => hay.includes(t))) continue;
 
     const open = app.cells.find(c => c.sessionId === info.sessionId);
@@ -3376,11 +3596,18 @@ function renderResumeList() {
     ];
     const fork = h('button', { class: 'icon-btn fork', title: 'Fork: continue in a copy and leave the original untouched' }, icon('repo-forked'));
     fork.addEventListener('click', e => { e.stopPropagation(); resumeSession(info, true); });
+    const startedMs = Date.parse(info.started || '');
+    const started = Number.isFinite(startedMs) ? h('span', { class: 'resume-started', text: `started ${shortDateTime(startedMs)}`, title: `Started ${new Date(startedMs).toLocaleString()}` }) : null;
+    // The folder it started in: the session is resumed there. A click shows only that folder's sessions.
+    const path = h('span', { class: 'resume-path filter-link', text: info.cwd, title: 'Show only sessions from this folder' });
+    path.addEventListener('click', e => { e.stopPropagation(); setResumeProject(info.cwd); });
     const row = h('button', { class: 'resume-item', disabled: !info.cwdExists, title: `${info.cwd}\n${info.sessionId}` },
       h('span', { class: 'resume-main' },
-        h('span', { class: 'resume-line' }, h('span', { class: 'resume-title', text: title }), h('span', { class: 'resume-time', text: timeAgo(info.modifiedMs) })),
+        h('span', { class: 'resume-line' }, h('span', { class: 'resume-title', text: title }), started,
+          h('span', { class: 'resume-time', text: `· ${timeAgo(info.modifiedMs)}`, title: `Last used ${new Date(info.modifiedMs).toLocaleString()}` })),
         info.title && info.lastPrompt ? h('span', { class: 'resume-prompt', text: info.lastPrompt }) : null,
-        h('span', { class: 'resume-line' }, h('span', { class: 'resume-path', text: info.cwd }), badges)),
+        h('span', { class: 'resume-line' }, path, badges),
+        info.lastCwd ? h('span', { class: 'resume-moved', text: `last used in ${info.lastCwd}`, title: info.lastCwd }) : null),
       open || !info.cwdExists ? null : fork);
     row.style.setProperty('--proj', projectColor(info.cwd));
     row.addEventListener('click', () => resumeSession(info, false));
@@ -3427,14 +3654,22 @@ $('#resume-filters').addEventListener('click', e => {
   for (const b of $('#resume-filters').querySelectorAll('button')) b.classList.toggle('on', b === btn);
   renderResumeList();
 });
-resumeProject.addEventListener('change', () => {
-  if (resumeState.deep) { resumeState.project = resumeProject.value; resumeProject.classList.toggle('on', !!resumeState.project); runDeepSearch(); return; }
-  resumeState.project = resumeProject.value;
-  resumeProject.classList.toggle('on', !!resumeState.project);
-  if (!resumeState.project) resumeState.sessions = resumeState.all;
+/** Shows only the sessions from one folder ('' for every folder). */
+function setResumeProject(path) {
+  // The list keeps one spelling per folder, so a path written another way picks that option.
+  const listed = [...resumeProject.options].find(o => o.value && projectKey(o.value) === projectKey(path));
+  if (listed) path = listed.value;
+  resumeState.project = path;
+  if (path && resumeProject.value !== path) renderProjectOptions(); // adds the folder if the list lacks it
+  resumeProject.value = path;
+  resumeProject.classList.toggle('on', !!path);
+  if (resumeState.deep) { runDeepSearch(); return; }
+  if (!path) resumeState.sessions = resumeState.all;
   renderResumeList(); // the sessions already loaded for that folder show at once
   loadResumeSessions();
-});
+}
+
+resumeProject.addEventListener('change', () => setResumeProject(resumeProject.value));
 resumer.addEventListener('keydown', e => {
   const items = [...resumeList.querySelectorAll('.resume-item:not([disabled]), .hit:not([disabled])')];
   if (e.key === 'Escape') { e.stopPropagation(); closeResumer(); return; }
@@ -3859,7 +4094,7 @@ setInterval(() => {
 
 document.addEventListener('keydown', e => {
   const cell = app.focused;
-  const typing = e.target.matches('input, textarea, select');
+  const typing = e.target.matches?.('input, textarea, select'); // the target is document when nothing has focus
   // Dev builds read the UI from disk, so a reload shows edits. It also stops every claude.
   if (build.liveUi && (e.key === 'F5' || (e.ctrlKey && (e.key === 'r' || e.key === 'R')))) {
     e.preventDefault();
@@ -3952,7 +4187,7 @@ function flushState() {
       aiTitle: c.aiTitle || undefined,
       customTitle: c.customTitle || undefined,
       renamePending: c.renamePending || undefined,
-      clean: c.clean || undefined,
+      detail: c.detail === 2 ? undefined : c.detail, // 2 (no tool calls) is the default
       progress: c.progressView || undefined,
       fork: c.fork || undefined,
       collapsed: c.collapsed || undefined,
@@ -3965,6 +4200,7 @@ function flushState() {
     commands: app.commands,
     defaults: app.defaults,
     workspaces: app.workspaces,
+    projectColors: projectColorPicks,
     claudeUpdateAt: app.claudeUpdateAt || undefined,
     remoteDefault: app.remoteDefault == null ? undefined : app.remoteDefault,
     settings: app.settings,
@@ -4000,6 +4236,7 @@ async function restore() {
   // (updateClaude runs at the end: its first save must not write a board that has no cells yet)
   app.defaults = sanitizeDefaults(state && (state.defaults || (state.cells || []).at(-1)));
   app.workspaces = sanitizeWorkspaces(state && state.workspaces);
+  projectColorPicks = sanitizeProjectColors(state && state.projectColors);
   app.sidebarOpen = !!(state && state.sidebarOpen);
   sidebar.classList.toggle('hidden', !app.sidebarOpen);
   $('#toggle-sidebar').classList.toggle('on', app.sidebarOpen);

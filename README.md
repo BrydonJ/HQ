@@ -107,8 +107,12 @@ every installed copy must be reinstalled by hand.
   or the desktop app:
   - It lists the 80 most recent sessions from Claude's own transcripts, newest first.
   - Search by title, prompt or folder, or filter by where the session was last used.
-  - The folder list narrows it to one folder. It then lists that folder's 80 most recent
-    sessions, older ones included, not only those among the 80 newest overall.
+  - Each session shows the folder it started in (Claude files the transcript there, so HQ
+    resumes it from there) and when it started. If Claude later worked in another folder, the
+    row says where it was last used.
+  - The folder list narrows it to one folder; clicking a session's folder does the same. It
+    then lists that folder's 80 most recent sessions, older ones included, not only those among
+    the 80 newest overall. A session matches both the folder it started in and its last one.
   - **In text** searches inside the conversations, not only titles and prompts. Matches stream
     in with a snippet, newest session first (up to 5 per session, 100 in all).
   - Click a session to open it in a cell with its history. Claude resumes it (`--resume`) when
@@ -139,7 +143,7 @@ every installed copy must be reinstalled by hand.
     size is learned from the first reply.
   - The cell's meta line, and the hover, also show the cost Claude Code reported in this HQ
     run (a total of what `result` messages say; it starts again from 0 when HQ restarts).
-- **Remote Control:** the broadcast button in the cell header lets you continue the session
+- **Remote Control:** the broadcast button in the composer bar, next to the MCP button, lets you continue the session
   from claude.ai/code or the Claude mobile app. Prompts and permission answers from there show
   up in the cell.
   - It needs claude.ai subscription sign-in. The button is hidden when Claude reports that
@@ -155,12 +159,14 @@ every installed copy must be reinstalled by hand.
   - It is saved per cell. A restored cell turns it on again when Claude starts for it, which
     happens when you send a message (or choose **Start Claude now** in the menu). HQ asks to
     reattach to the same claude.ai session, and that works across a restart.
-- Each project folder gets its own color. The cell header and its entry in the sessions list
-  use it, so sessions in the same folder are easy to spot.
+- Each project folder gets its own pastel color. The cell header and its entry in the sessions
+  list use it, so sessions in the same folder are easy to spot. Click the project name in the
+  cell header for another color; the pick is kept per folder.
 - Status cues on each cell:
   - A band of light sweeps across the project name in the cell header: Claude is working.
-    Above the prompt box, a star cycles through the CLI spinner's glyphs next to a verb
-    ("Percolating…") picked for each turn.
+    Above the prompt box, a star cycles through the CLI spinner's glyphs next to a phrase
+    ("Letting it cook…") picked for each turn. The chat leaves room for it, so it never covers
+    the last message.
   - Pulsing amber glow: Claude is waiting on you (a permission, a question or a plan).
   - Green glow: the session finished while you were looking elsewhere.
   - Spinner badge with a count, and a hollow status dot: background agents or shells that
@@ -172,17 +178,24 @@ every installed copy must be reinstalled by hand.
     does, even while that first turn is still running.
   - Click the name (or press F2) to rename it. The new name is saved in Claude's own
     transcript, so VS Code and `claude --resume` show it too.
-- **Prompts and replies only:** the eye button in the cell header hides tool calls, thinking,
-  narration and status notes. It is set per cell and kept across restarts. Errors, and the
-  last words of a turn you stopped, stay visible.
-- **Progress view:** the checklist button next to the eye fades the chat and shows how far
-  Claude has got. It is set per cell and kept across restarts. The view shows:
+- **Detail levels:** the eye button in the cell header cycles through three levels:
+  1. Everything: replies, thinking and tool calls.
+  2. Replies, thinking and narration, with tool calls hidden. New cells start here.
+  3. Replies only: your prompts and Claude's replies. Thinking and the grey narration between
+     steps are hidden too; the last words of a stopped turn stay.
+
+  The level is set per cell and kept across restarts.
+- **Progress view:** the checklist button next to the eye opens a small card in the top-right
+  corner of the chat, which stays readable and scrollable beside it, showing how far Claude
+  has got. Close it with its X or the button. It is set per cell and kept across restarts.
+  The card shows:
   - Whether Claude is working, how long the turn has run, how many tool calls it has made, and
     the tool running now.
   - Claude's task list with a percentage bar, when the model keeps one. In HQ sessions Claude
     Code only gives task tools to older models (4.6 and earlier, and Haiku 4.5). Sonnet 5.5 and
     Opus 5.5 work without a list, and HQ does not force one on.
-  - Background agents and shells, with each agent's latest tool, tool count and summary.
+  - Background agents and shells, with each agent's latest tool, tool count and summary. The
+    stop button next to one stops just that agent or shell (`stop_task`); the turn goes on.
   - **Ask Claude:** asks, beside the running turn (like `/btw`), what Claude is doing and what
     is left. Claude answers without stopping, and its rough percentage fills the bar. Each
     click is one extra request that reads the session's context from the cache.
@@ -199,12 +212,24 @@ every installed copy must be reinstalled by hand.
 - **Edits** show a real line diff with a few lines of context (and the line numbers Claude Code
   reports once the edit is done). Tool input and output are built when you open the tool, and
   very long ones are cut with a **Show all** button.
-- **Copy and export:** a **Copy** button under each reply (on hover) copies it as Markdown. The
-  export button in the cell header saves the whole session as a Markdown file.
+- **Colors:** replies color headings, bold, italics, list markers and inline code, and code
+  blocks tagged with a language are syntax highlighted (highlight.js, about 35 common
+  languages). Untagged blocks stay plain.
+- **Copy:** a **Copy** button under each reply (on hover) copies it as Markdown, and each code
+  block has its own copy button.
+- **Handoff:** the note button in the cell header asks Claude, beside the conversation (no extra
+  turn), for a Markdown handoff (goal, state, decisions, files, gotchas, next steps) that a
+  fresh session can continue from, then asks where to save it (`HANDOFF.md` in the session's
+  folder by default). It replaces the old export button.
 - **Drafts:** text you have typed but not sent is kept in the board, and is back after a restart.
-- **Slash commands:** type `/` at the start of the composer to list the commands Claude reports
-  (built-in ones, skills and custom commands). Arrow keys pick, Tab or Enter completes, Esc
-  closes. A command that is already complete is sent by Enter.
+- **Slash commands:** type `/` at the start of the composer, or after a space anywhere in the
+  text, to list the commands Claude reports (built-in ones, skills and custom commands). Arrow
+  keys pick, Tab or Enter completes, Esc closes. A command that is already complete is sent by
+  Enter. After text, Enter completes only once an arrow key picked a command; otherwise it
+  sends the prompt, so a prompt ending in a path is not changed.
+- **/clear** (or `/reset`, `/new`, optionally followed by a name) starts the cell over as a new
+  session in the same folder. HQ handles it itself; the previous session stays on disk and
+  Resume can open it. Stop Claude first if it is working.
 - **Notifications:** while HQ is not the active window, a Windows notification names the session
   and shows the first line of its reply when a turn finishes, or says that Claude needs you.
   Coming back to HQ soon after one opens that cell. Turn them off in Settings.
@@ -212,8 +237,8 @@ every installed copy must be reinstalled by hand.
   Remote Control for new sessions, the default model, automatic HQ updates, and the path of the
   `claude` program.
 - **Questions:** when Claude asks you something, the chat keeps a one-line record of the
-  question and your answer. Click it to see every option and which ones you picked. The eye
-  button never hides it.
+  question and your answer. Click it to see every option and which ones you picked. No detail
+  level hides it.
 - **Collapse** (the minimize button in the cell header, or Ctrl+Shift+M) hides a cell's chat and
   moves its header to a strip under the grid. The other cells take its space.
   - The header keeps every status cue (dot, sweep, glow, background badge, task bar) and says
@@ -228,7 +253,8 @@ every installed copy must be reinstalled by hand.
     session takes its place.
   - Hover a session to highlight its cell.
 - **Images:** paste them (Ctrl+V), drop them on a cell, or use the image button. Images larger
-  than 2000 px or 3.75 MB are scaled down before they are sent.
+  than 2000 px or 3.75 MB are scaled down before they are sent. Click an image in the chat or
+  the composer to see it full size; click or Esc closes it.
 - **Model and effort:** the model button in the composer opens a menu.
   - Pick a model, then an effort level (low to max). Only the levels that model supports are
     shown.
@@ -261,8 +287,8 @@ every installed copy must be reinstalled by hand.
   - F2: rename the focused session.
 - The board is saved to `%APPDATA%\dev.brydon.hq\board.json` (`dev.brydon.hq.<profile>` for
   another profile):
-  - It stores each cell's folder, session, mode, model, effort, name, view (all, or prompts
-    and replies only) and whether it is collapsed, plus the VS Code workspace picked for each
+  - It stores each cell's folder, session, mode, model, effort, name, view (tool calls shown
+    or hidden) and whether it is collapsed, plus the VS Code workspace picked for each
     folder.
   - On restart, each cell shows its history from Claude's own transcript, newest part first
     (up to 1500 messages or about 4 MB). **Load earlier** at the top fetches more. Images in
@@ -310,7 +336,7 @@ ui/app.js        cells, protocol handling, prompts, menus, sessions list, grid l
                  context indicator, Remote Control, settings
 ui/render.js     markdown (raw HTML escaped, http(s) links only; incremental while streaming),
                  tool rows, line diffs, images, project colors
-ui/style.css     VS Code Dark Modern look, and a light theme
+ui/style.css     slate and pastel look, and a light theme
 release.ps1      builds, signs and publishes a release
 dev.cmd          rebuilds and restarts the dev copy
 ```

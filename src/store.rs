@@ -344,19 +344,27 @@ fn blank_runs(line: &str, key: &[u8]) -> Option<String> {
 #[serde(rename_all = "camelCase")]
 pub struct SessionInfo {
     session_id: String,
+    /// The folder the session started in. Its transcript is filed under this folder, so the
+    /// session is resumed from here.
     cwd: String,
+    /// The folder the session was last used in, when Claude moved away from where it started.
+    last_cwd: Option<String>,
     /// Set on every call, not cached: folders appear and disappear.
     cwd_exists: bool,
     title: Option<String>,
     last_prompt: Option<String>,
     /// Where the session was last used: `claude-vscode`, `cli`, `sdk-cli` (HQ), ...
     entrypoint: Option<String>,
+    /// When the session started: the first line's timestamp, as written (ISO 8601).
+    started: Option<String>,
     modified_ms: u64,
 }
 
 /// How much of each end of a transcript is read. Titles and the last prompt are appended as a
 /// session goes, so the newest copies sit near the end; the start is only read as a fallback.
 const SCAN_BYTES: u64 = 256 * 1024;
+/// How much of the start of a transcript is always read, for where and when the session began.
+const HEAD_BYTES: u64 = 64 * 1024;
 
 /// What HQ has learned from transcripts, kept in managed state: each file's session details
 /// (reading them means scanning both ends of the file, and there are hundreds of files), and
@@ -448,10 +456,17 @@ pub fn list_sessions(index: &Index, limit: usize, cwd: Option<&str>) -> Result<V
     Ok(files
         .iter()
         .filter_map(|file| index.info(file))
-        .filter(|info| wanted.as_ref().is_none_or(|w| folder_key(&info.cwd) == *w))
+        .filter(|info| wanted.as_ref().is_none_or(|w| info.in_folder(w)))
         .take(limit)
         .map(|info| SessionInfo { cwd_exists: Path::new(&info.cwd).is_dir(), ..info })
         .collect())
+}
+
+impl SessionInfo {
+    /// The session started in the folder, or was last used there. `key` is a `folder_key`.
+    fn in_folder(&self, key: &str) -> bool {
+        folder_key(&self.cwd) == key || self.last_cwd.as_deref().is_some_and(|c| folder_key(c) == key)
+    }
 }
 
 /// Compares folders the way the UI does: either slash, no trailing slash, any case.
@@ -466,6 +481,8 @@ fn is_session_id(s: &str) -> bool {
 #[derive(Default)]
 struct Scan {
     cwd: Option<String>,
+    first_cwd: Option<String>,
+    started: Option<String>,
     entrypoint: Option<String>,
     custom_title: Option<String>,
     ai_title: Option<String>,
@@ -477,6 +494,16 @@ fn read_session_info(path: &Path, modified: SystemTime) -> Option<SessionInfo> {
     let mut file = fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
     let mut scan = Scan::default();
+
+    // The first lines say where and when the session began. A first line longer than the head
+    // cannot be parsed, and the latest folder stands in for the first.
+    let head = read_range(&mut file, 0, HEAD_BYTES.min(len))?;
+    for line in head.split('\n') {
+        scan_origin(line, &mut scan);
+        if scan.first_cwd.is_some() && scan.started.is_some() {
+            break;
+        }
+    }
 
     let start = len.saturating_sub(SCAN_BYTES);
     let tail = read_range(&mut file, start, len)?;
@@ -502,17 +529,38 @@ fn read_session_info(path: &Path, modified: SystemTime) -> Option<SessionInfo> {
         }
     }
 
-    let cwd = scan.cwd?; // a session without a folder cannot be resumed
+    let last_cwd = scan.cwd?; // a session without a folder cannot be resumed
+    let cwd = scan.first_cwd.unwrap_or_else(|| last_cwd.clone());
+    let last_cwd = (folder_key(&last_cwd) != folder_key(&cwd)).then_some(last_cwd);
     let modified_ms = modified.duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
     Some(SessionInfo {
         session_id: path.file_stem()?.to_str()?.to_owned(),
         cwd_exists: false, // not cached; filled in by whoever hands the session out
         cwd,
+        last_cwd,
         title: scan.custom_title.or(scan.ai_title),
         last_prompt: scan.last_prompt.or(scan.first_prompt),
         entrypoint: scan.entrypoint,
+        started: scan.started,
         modified_ms,
     })
+}
+
+/// Picks the first folder and the first timestamp out of a line from the start of a transcript.
+fn scan_origin(line: &str, scan: &mut Scan) {
+    let wanted = (scan.first_cwd.is_none() && line.contains("\"cwd\""))
+        || (scan.started.is_none() && line.contains("\"timestamp\""));
+    if !wanted {
+        return;
+    }
+    let Ok(v) = serde_json::from_str::<Value>(line) else { return };
+    let text = |key: &str| v.get(key).and_then(Value::as_str).map(str::trim).filter(|t| !t.is_empty()).map(str::to_owned);
+    if scan.first_cwd.is_none() {
+        scan.first_cwd = text("cwd");
+    }
+    if scan.started.is_none() {
+        scan.started = text("timestamp");
+    }
 }
 
 fn read_range(file: &mut fs::File, start: u64, end: u64) -> Option<String> {
@@ -611,7 +659,7 @@ pub fn search_sessions(
         // looked up, except to apply the folder filter.
         let mut session: Option<Option<SessionInfo>> = wanted.is_some().then(|| index.info(file));
         if let Some(w) = &wanted {
-            let in_folder = session.as_ref().and_then(Option::as_ref).is_some_and(|info| folder_key(&info.cwd) == *w);
+            let in_folder = session.as_ref().and_then(Option::as_ref).is_some_and(|info| info.in_folder(w));
             if !in_folder {
                 continue;
             }
@@ -1158,5 +1206,22 @@ mod tests {
 
         index.retain(&[]);
         assert!(index.sessions.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_session_keeps_the_folder_and_time_it_started_in() {
+        let lines = [
+            r#"{"type":"user","cwd":"C:\\proj","timestamp":"2026-03-04T05:06:07.000Z","message":{"content":"first prompt"}}"#.to_string(),
+            r#"{"type":"user","cwd":"C:\\proj\\sub","timestamp":"2026-03-05T00:00:00.000Z","message":{"content":"later"}}"#.to_string(),
+        ];
+        let file = TempTranscript::new("origin", &lines, true);
+        let meta = fs::metadata(&file.0).unwrap();
+        let entry = TranscriptFile { path: file.0.clone(), len: meta.len(), modified: meta.modified().unwrap() };
+        let info = Index::default().info(&entry).unwrap();
+        assert_eq!(info.cwd, r"C:\proj");
+        assert_eq!(info.last_cwd.as_deref(), Some(r"C:\proj\sub"));
+        assert_eq!(info.started.as_deref(), Some("2026-03-04T05:06:07.000Z"));
+        assert!(info.in_folder(&folder_key(r"C:\Proj\")) && info.in_folder(&folder_key(r"c:/proj/sub")));
+        assert!(!info.in_folder(&folder_key(r"C:\other")));
     }
 }
