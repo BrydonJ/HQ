@@ -35,6 +35,7 @@ let build = { profile: null, version: '', liveUi: false, updatable: false };
 // Shown until a session has started once and reported the real list.
 const FALLBACK_MODELS = [
   { value: 'default', displayName: 'Default', description: 'Your configured default model' },
+  { value: 'fable', displayName: 'Fable' },
   { value: 'opus', displayName: 'Opus' },
   { value: 'sonnet', displayName: 'Sonnet' },
   { value: 'haiku', displayName: 'Haiku' },
@@ -870,7 +871,8 @@ class Cell {
 
   /** Effort levels the chosen model accepts; empty when it has no effort setting. */
   effortLevels() {
-    const m = modelList().find(x => x.value === (this.modelChoice || 'default'));
+    // Searches the unfiltered list: a saved choice outside ALLOWED_MODELS still has its real effort levels.
+    const m = (app.models.length ? app.models : FALLBACK_MODELS).find(x => x.value === (this.modelChoice || 'default'));
     if (!m || !app.models.length) return ALL_EFFORTS; // unknown yet: let Claude decide
     if (!m.supportsEffort) return [];
     return Array.isArray(m.supportedEffortLevels) && m.supportedEffortLevels.length ? m.supportedEffortLevels : ALL_EFFORTS;
@@ -2546,8 +2548,13 @@ document.addEventListener('keydown', e => {
   }
 }, true);
 
+// The only models HQ offers; the aliases resolve to the current 5.x releases. Anything else the
+// session reports (dated or older model ids) is hidden.
+const ALLOWED_MODELS = ['default', 'fable', 'opus', 'sonnet', 'haiku'];
+
 function modelList() {
-  return app.models.length ? app.models : FALLBACK_MODELS;
+  const list = app.models.filter(m => ALLOWED_MODELS.includes(m.value));
+  return list.length ? list : FALLBACK_MODELS;
 }
 
 /** Keeps only the fields HQ shows, so nothing unexpected is written to board.json. */
