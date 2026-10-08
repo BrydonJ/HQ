@@ -28,7 +28,7 @@ const TITLE_SCAN_BYTES: u64 = 32 * 1024 * 1024;
 /// A base64 run shorter than this is left alone: nothing big enough to be worth blanking.
 const MIN_BASE64_RUN: usize = 256;
 
-fn state_path(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn state_path(app: &AppHandle) -> Result<PathBuf, String> {
     // HQ_STATE_DIR lets a second copy (for example a test build) keep its own board.
     let dir = match std::env::var_os("HQ_STATE_DIR") {
         Some(dir) => PathBuf::from(dir),
@@ -128,7 +128,7 @@ fn claude_config_dir() -> Option<PathBuf> {
 }
 
 /// One slice of a session's transcript, for replaying it in a cell.
-#[derive(Serialize)]
+#[derive(Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptChunk {
     /// The transcript's own lines, oldest first, for the frontend to parse.
@@ -197,7 +197,7 @@ fn line_kind(raw: &[u8]) -> Option<LineKind> {
     }
 }
 
-fn read_transcript(path: &Path, before: Option<u64>) -> io::Result<TranscriptChunk> {
+pub(crate) fn read_transcript(path: &Path, before: Option<u64>) -> io::Result<TranscriptChunk> {
     let file = fs::File::open(path)?;
     let len = file.metadata()?.len();
     let end = before.map_or(len, |b| b.min(len));

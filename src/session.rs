@@ -74,7 +74,7 @@ fn claude_program() -> String {
         .unwrap_or_else(|| "claude".into())
 }
 
-fn hide_console(cmd: &mut Command) {
+pub(crate) fn hide_console(cmd: &mut Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -222,19 +222,35 @@ impl Sessions {
             format!("Could not start `{}` ({e}). Is Claude Code installed and on PATH?", claude_program())
         })?;
 
+        let stdin = child.stdin.take();
+        let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+            let _ = child.kill();
+            return Err("claude pipes unavailable".into());
+        };
+        Ok(self.register(app, child, stdin.map(spawn_stdin_writer), stdout, stderr, events))
+    }
+
+    /// Tracks a started child as a session: lines queued with `send` go to `input`, and `stdout`'s
+    /// lines reach the frontend as described on `spawn`. A backend that translates another
+    /// agent's protocol hands in its translator's ends here instead of the child's own pipes.
+    pub(crate) fn register(
+        &self,
+        app: &AppHandle,
+        child: Child,
+        input: Option<mpsc::Sender<String>>,
+        stdout: impl Read + Send + 'static,
+        stderr: impl Read + Send + 'static,
+        events: Channel<InvokeResponseBody>,
+    ) -> u64 {
         // Put the child in a kill-on-close job so closing a cell (or the app) also ends
         // any shells and tools Claude started underneath it.
         #[cfg(windows)]
         let job = job::Job::new().filter(|j| j.assign(&child));
 
-        let stdin = child.stdin.take();
-        let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
-        let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
-
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let child = Arc::new(Mutex::new(child));
         let session = Arc::new(Session {
-            input: Mutex::new(stdin.map(spawn_stdin_writer)),
+            input: Mutex::new(input),
             child: child.clone(),
             #[cfg(windows)]
             _job: job,
@@ -244,7 +260,7 @@ impl Sessions {
         let tail = Arc::new(Mutex::new(VecDeque::<String>::new()));
         spawn_stderr_reader(stderr, tail.clone());
         spawn_stdout_reader(app.clone(), id, stdout, child, tail, events);
-        Ok(id)
+        id
     }
 
     /// Queues a line for the session's writer thread and returns at once. Lines reach claude in the

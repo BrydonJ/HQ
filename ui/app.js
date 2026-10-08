@@ -90,8 +90,9 @@ const nextRequestId = () => `hq-${Date.now().toString(36)}-${++reqSeq}`;
 class Cell {
   constructor({ cwd, sessionId = null, permissionMode = 'default', model = null, effort = null, title = '', aiTitle = false,
     customTitle = null, renamePending = false, detail, clean, progress = false, fork = false, collapsed = false,
-    missing = false, remote = null, bridgeSessionId = null, draft = '' }) {
+    missing = false, remote = null, bridgeSessionId = null, draft = '', backend = 'claude' }) {
     this.cwd = cwd;
+    this.backend = backend === 'hermes' ? 'hermes' : 'claude'; // the agent: Claude Code, or Hermes (hermes.js)
     this.sessionId = sessionId;
     this.fork = !!(fork && sessionId); // resume into a new session ID, leaving the original alone
     this.permissionMode = permissionMode || 'default';
@@ -198,6 +199,7 @@ class Cell {
     el.style.setProperty('--proj', this.color);
     for (const name of el.querySelectorAll('.proj-name, .cell-project .sweep-name')) name.textContent = baseName(this.cwd) || this.cwd;
     el.querySelector('.cell-path').textContent = this.cwd;
+    if (this.backend === 'hermes') hermesDecorate(this);
     this.modeSel.value = this.permissionMode;
     this.setTitle(this.title);
     this.applyDetail();
@@ -252,7 +254,7 @@ class Cell {
     el.querySelector('.act-drop').addEventListener('click', () => closeCell(this));
     el.querySelector('.act-send').addEventListener('click', () => this.submit());
     this.stopBtn.addEventListener('click', () => this.interrupt());
-    this.modeSel.addEventListener('change', () => this.setMode(this.modeSel.value).then(() => rememberChoice({ permissionMode: this.permissionMode })));
+    this.modeSel.addEventListener('change', () => this.setMode(this.modeSel.value).then(() => this.remember({ permissionMode: this.permissionMode })));
     this.modelBtn.addEventListener('click', () => openMenu(this.modelBtn, this, menuEl => this.buildModelMenu(menuEl)));
     this.mcpBtn.addEventListener('click', () => {
       openMenu(this.mcpBtn, this, menuEl => this.buildMcpMenu(menuEl));
@@ -856,8 +858,18 @@ class Cell {
 
   // ---------- model and effort ----------
 
+  /** Keeps a pick made in this cell as the default for the next new session of the same agent. */
+  remember(choice) {
+    if (this.backend === 'hermes') hermesRemember(choice);
+    else rememberChoice(choice);
+  }
+
+  models() {
+    return this.backend === 'hermes' ? hermesModels() : modelList();
+  }
+
   modelLabel() {
-    const list = modelList();
+    const list = this.models();
     if (this.modelChoice) {
       const m = list.find(x => x.value === this.modelChoice);
       return (m && m.displayName) || this.modelChoice;
@@ -871,6 +883,7 @@ class Cell {
 
   /** Effort levels the chosen model accepts; empty when it has no effort setting. */
   effortLevels() {
+    if (this.backend === 'hermes') return []; // Hermes has no effort setting
     // Searches the unfiltered list: a saved choice outside ALLOWED_MODELS still has its real effort levels.
     const m = (app.models.length ? app.models : FALLBACK_MODELS).find(x => x.value === (this.modelChoice || 'default'));
     if (!m || !app.models.length) return ALL_EFFORTS; // unknown yet: let Claude decide
@@ -931,15 +944,16 @@ class Cell {
 
   buildModelMenu(menuEl) {
     const current = this.modelChoice || 'default';
-    const list = [...modelList()];
+    const list = [...this.models()];
     if (!list.some(m => m.value === current)) list.push({ value: current, displayName: current });
     menuEl.append(h('div', { class: 'menu-title', text: 'Model' }));
     for (const m of list) {
       const checked = m.value === current;
-      menuEl.append(h('button', { class: `menu-item${checked ? ' checked' : ''}`, onclick: () => this.setModel(m.value).then(() => rememberChoice({ model: this.modelChoice })) },
+      menuEl.append(h('button', { class: `menu-item${checked ? ' checked' : ''}`, onclick: () => this.setModel(m.value).then(() => this.remember({ model: this.modelChoice })) },
         icon(checked ? 'check' : 'blank'),
         h('span', { class: 'menu-main' }, h('span', { class: 'name', text: m.displayName || m.value }), m.description ? h('span', { class: 'desc', text: m.description }) : null)));
     }
+    if (this.backend === 'hermes') return; // Hermes has no effort setting
     menuEl.append(h('div', { class: 'menu-title', text: 'Effort' }));
     const levels = this.effortLevels();
     if (!levels.length) {
@@ -948,7 +962,7 @@ class Cell {
     }
     const active = this.effort || this.appliedEffort;
     menuEl.append(h('div', { class: 'segmented' }, levels.map(level =>
-      h('button', { class: level === active ? 'on' : '', onclick: () => this.setEffort(level).then(() => rememberChoice({ effort: this.effort })) }, level))));
+      h('button', { class: level === active ? 'on' : '', onclick: () => this.setEffort(level).then(() => this.remember({ effort: this.effort })) }, level))));
     if (!this.effort) menuEl.append(h('div', { class: 'menu-note', text: active ? `Using your default (${active}).` : 'Using your default effort.' }));
   }
 
@@ -1084,7 +1098,7 @@ class Cell {
     if (this.proc != null) return true;
     if (this.spawning) return this.spawning;
     this.spawning = (async () => {
-      updateClaude(); // runs in the background; a spawn does not wait for it
+      if (this.backend === 'claude') updateClaude(); // runs in the background; a spawn does not wait for it
       this.spawnedFresh = !this.sessionId; // Remote Control waits for a new session's first prompt
       try {
         for (let attempt = 0; ; attempt++) {
@@ -1093,7 +1107,7 @@ class Cell {
             break;
           } catch (err) {
             // The spawn can fail while `claude update` replaces the binary: wait for it, then try once more.
-            if (attempt === 0 && claudeUpdate.promise) {
+            if (attempt === 0 && this.backend === 'claude' && claudeUpdate.promise) {
               this.metaEl.textContent = 'Updating Claude Code…';
               await withTimeout(claudeUpdate.promise, CLAUDE_UPDATE_WAIT_MS);
               if (this.metaEl.textContent === 'Updating Claude Code…') this.metaEl.textContent = '';
@@ -1131,6 +1145,7 @@ class Cell {
       model: this.modelChoice,
       effort: this.effortLevels().length ? this.effort : null,
       fork: this.fork,
+      backend: this.backend,
       onEvent: channel,
     });
   }
@@ -1138,6 +1153,11 @@ class Cell {
   async initialize() {
     const reply = await this.control({ subtype: 'initialize' });
     const r = reply && reply.subtype === 'success' && reply.response;
+    if (this.backend === 'hermes') { // keeps its own lists, and has no Remote Control
+      if (r) hermesInitialized(r);
+      await this.refreshApplied();
+      return;
+    }
     if (r) {
       if (Array.isArray(r.models) && r.models.length) {
         app.models = sanitizeModels(r.models);
@@ -1419,7 +1439,7 @@ class Cell {
       case 'control_cancel_request': return this.dropPrompt(m.request_id);
       case 'control_response': return this.onControlResponse(m);
       case 'hq_exit': return this.onExit(m);
-      case 'rate_limit_event': return scheduleUsageRefresh(this);
+      case 'rate_limit_event': return this.backend === 'claude' && scheduleUsageRefresh(this);
       case 'custom-title':
       case 'ai-title': return this.onTitleLine(m);
       default: return; // keep_alive, future types
@@ -1783,7 +1803,7 @@ class Cell {
       notifyTurnDone(this, m);
     }
     this.refreshState();
-    scheduleUsageRefresh(this);
+    if (this.backend === 'claude') scheduleUsageRefresh(this); // Claude's plan usage; Hermes turns do not touch it
     this.syncTitle();
   }
 
@@ -2008,7 +2028,7 @@ class Cell {
   async drawHistory() {
     let chunk = { lines: [], start: 0 };
     try {
-      chunk = await invoke('load_transcript', { sessionId: this.sessionId, before: null });
+      chunk = await invoke(this.backend === 'hermes' ? 'load_hermes_transcript' : 'load_transcript', { sessionId: this.sessionId, cwd: this.cwd, before: null });
     } catch (err) {
       this.notice(`Could not load history: ${err}`, true);
     }
@@ -2029,7 +2049,7 @@ class Cell {
     if (this.historyStart > 0) this.msgs.prepend(this.earlierNote());
     if (this.fork) this.notice('Forked: your first message starts a copy of this session. The original is left as it was.');
     else if (this.missing) this.notice('The folder of this session is missing, so the session cannot continue. Use "Locate folder…" below, or close it.');
-    else this.notice(lines.length ? 'Session restored. Claude resumes when you send a message.' : 'Session restored (no history found).');
+    else this.notice(lines.length ? `Session restored. ${this.backend === 'hermes' ? 'Hermes' : 'Claude'} resumes when you send a message.` : 'Session restored (no history found).');
     if (last && endsMidTurn(last)) this.notice('The last turn was interrupted when HQ closed.');
     if (this.resumeWarning) this.notice(this.resumeWarning, true);
     this.pinToBottom();
@@ -2074,7 +2094,7 @@ class Cell {
   async loadEarlier() {
     let chunk;
     try {
-      chunk = await invoke('load_transcript', { sessionId: this.sessionId, before: this.historyStart });
+      chunk = await invoke(this.backend === 'hermes' ? 'load_hermes_transcript' : 'load_transcript', { sessionId: this.sessionId, before: this.historyStart });
     } catch (err) {
       this.notice(`Could not load earlier history: ${err}`, true);
       return;
@@ -2319,7 +2339,7 @@ class Cell {
   }
 
   async enableRemote() {
-    if (this.proc == null || app.remoteAvailable === false || this.remoteState === 'policy' || this.remoteState === 'connecting' || this.remoteState === 'on') return;
+    if (this.proc == null || this.backend === 'hermes' || app.remoteAvailable === false || this.remoteState === 'policy' || this.remoteState === 'connecting' || this.remoteState === 'on') return;
     this.remote = true;
     const seq = ++this.remoteSeq;
     this.setRemoteState('connecting');
@@ -2382,7 +2402,7 @@ class Cell {
 
   renderRemote() {
     const btn = this.remoteBtn;
-    const hidden = app.remoteAvailable === false || this.remoteState === 'policy';
+    const hidden = this.backend === 'hermes' || app.remoteAvailable === false || this.remoteState === 'policy';
     btn.classList.toggle('hidden', hidden);
     if (hidden) return;
     const armed = this.remote && this.proc == null;
@@ -2858,7 +2878,8 @@ function slashToken(input) {
 function slashUpdate(cell) {
   const token = slashToken(cell.input);
   // After other text a lone "/" is not taken as a command until a letter follows it.
-  if (!token || !app.commands.length || cell.collapsed || (token.start > 0 && !token.query)) { slashClose(cell); return; }
+  const commands = cell.backend === 'hermes' ? hermes.commands : app.commands;
+  if (!token || !commands.length || cell.collapsed || (token.start > 0 && !token.query)) { slashClose(cell); return; }
   const q = token.query.toLowerCase();
   const rank = c => {
     const n = c.name.toLowerCase();
@@ -2869,7 +2890,7 @@ function slashUpdate(cell) {
   };
   // After other text, "/x" is as likely a path as a command, so only names starting with it are offered.
   const worst = token.start === 0 ? 9 : 3;
-  const items = app.commands.map(c => [rank(c), c]).filter(([r]) => r < worst)
+  const items = commands.map(c => [rank(c), c]).filter(([r]) => r < worst)
     .sort((a, b) => a[0] - b[0] || a[1].name.localeCompare(b[1].name)).map(x => x[1]).slice(0, 40);
   if (!items.length) { slashClose(cell); return; }
   Object.assign(slash, { cell, items, index: 0, start: token.start, end: token.end, picked: false });
@@ -3023,7 +3044,7 @@ function placeCell(cell) {
 
 /** Opens a new session with the permission mode, model and effort the user picked last. */
 function addNewCell(opts, flags) {
-  const { permissionMode = 'default', model = null, effort = null } = app.defaults;
+  const { permissionMode = 'default', model = null, effort = null } = opts.backend === 'hermes' ? hermes.defaults : app.defaults;
   return addCell({ permissionMode, model, effort, ...opts }, flags);
 }
 
@@ -3380,10 +3401,11 @@ async function openPicker() {
       saveState();
       openPicker();
     });
-    list.append(h('button', { class: 'picker-item', 'data-path': path, onclick: () => { closePicker(); addNewCell({ cwd: path }); } },
+    list.append(h('button', { class: 'picker-item', 'data-path': path, onclick: () => { closePicker(); addNewCell({ cwd: path, backend: pickerBackend() }); } },
       icon('folder'), h('span', { class: 'name', text: baseName(path) || path }), h('span', { class: 'path', text: path }), forget));
   });
   pickerIndex = -1;
+  hermesPickerSwitch(picker);
   picker.classList.remove('hidden');
   if (!list.children.length) browseFolder();
   else picker.querySelector('.picker-item').focus();
@@ -3396,7 +3418,7 @@ function closePicker() {
 async function browseFolder() {
   closePicker();
   const path = await invoke('pick_folder').catch(() => null);
-  if (path) addNewCell({ cwd: path });
+  if (path) addNewCell({ cwd: path, backend: pickerBackend() });
 }
 
 function rememberFolder(path) {
@@ -3444,6 +3466,7 @@ async function openResumer() {
   resumer.classList.remove('hidden');
   resumeSearch.value = '';
   resumeState.project = '';
+  hermesResumeFilter($('#resume-filters'));
   renderProjectOptions();
   resumeSearch.focus();
   await loadResumeSessions();
@@ -3457,6 +3480,8 @@ async function loadResumeSessions() {
   renderResumeList();
   let sessions = null;
   let error = null;
+  const others = hermesSessions(cwd); // read alongside, added once Claude's are shown
+  resumeState.othersLoading = !!others;
   try {
     sessions = await invoke('list_sessions', { limit: 80, cwd });
   } catch (err) {
@@ -3472,6 +3497,18 @@ async function loadResumeSessions() {
   }
   resumeState.error = error;
   resumeState.loading = false;
+  renderResumeList();
+  if (!others) return;
+  const extra = await others;
+  if (seq !== resumeState.seq) return;
+  resumeState.othersLoading = false;
+  if (!extra.length) { renderResumeList(); return; }
+  resumeState.error = null;
+  resumeState.sessions = [...(sessions || []), ...extra].sort((a, b) => b.modifiedMs - a.modifiedMs);
+  if (!cwd) {
+    resumeState.all = resumeState.sessions;
+    renderProjectOptions();
+  }
   renderResumeList();
 }
 
@@ -3624,6 +3661,7 @@ function renderResumeList() {
     const text = resumeState.loading ? 'Reading sessions…' : resumeState.sessions.length ? 'No sessions match.' : 'No sessions found.';
     rows.push(h('div', { class: 'session-empty', text }));
   }
+  if (resumeState.othersLoading && !resumeState.loading) rows.unshift(hermesSessionsLoading());
   resumeList.replaceChildren(...rows);
 }
 
@@ -3632,7 +3670,7 @@ function resumeSession(info, fork) {
   const open = app.cells.find(c => c.sessionId === info.sessionId);
   if (open && !fork) { revealCell(open); return; }
   rememberFolder(info.cwd);
-  const cell = addNewCell({ cwd: info.cwd, sessionId: info.sessionId, title: info.title || info.lastPrompt || '', fork }, { restore: true });
+  const cell = addNewCell({ cwd: info.cwd, sessionId: info.sessionId, title: info.title || info.lastPrompt || '', fork, backend: info.backend }, { restore: true });
   // Read by loadHistory once the transcript is drawn, so it lands at the bottom where it is seen.
   if (!fork && Date.now() - info.modifiedMs < RECENTLY_ACTIVE_MS) {
     cell.resumeWarning = `This session changed ${timeAgo(info.modifiedMs)}. If it is still open in VS Code or a terminal, close it there before you send a message here.`;
@@ -3766,7 +3804,7 @@ function refreshUsage(preferred) {
   renderUsage();
   usage.loading = (async () => {
     let reply = null;
-    const cell = [preferred, ...app.cells].find(c => c && c.proc != null && !c.closing);
+    const cell = [preferred, ...app.cells].find(c => c && c.backend === 'claude' && c.proc != null && !c.closing);
     if (cell) {
       const r = await withTimeout(cell.control({ subtype: 'get_usage' }), 15000);
       if (r && r.subtype === 'success') reply = r.response;
@@ -4201,11 +4239,13 @@ function flushState() {
       remote: c.remote === true ? true : undefined,
       bridgeSessionId: c.bridgeSessionId || undefined,
       draft: c.input.value.trim() ? c.input.value : undefined,
+      backend: c.backend === 'claude' ? undefined : c.backend,
     })),
     recent: app.recent,
     models: app.models,
     commands: app.commands,
     defaults: app.defaults,
+    hermes: hermesState(),
     workspaces: app.workspaces,
     projectColors: projectColorPicks,
     claudeUpdateAt: app.claudeUpdateAt || undefined,
@@ -4242,6 +4282,7 @@ async function restore() {
   applySettings();
   // (updateClaude runs at the end: its first save must not write a board that has no cells yet)
   app.defaults = sanitizeDefaults(state && (state.defaults || (state.cells || []).at(-1)));
+  hermesRestore(state && state.hermes);
   app.workspaces = sanitizeWorkspaces(state && state.workspaces);
   projectColorPicks = sanitizeProjectColors(state && state.projectColors);
   app.sidebarOpen = !!(state && state.sidebarOpen);

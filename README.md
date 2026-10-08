@@ -310,10 +310,38 @@ every installed copy must be reinstalled by hand.
     file…** browses for any other.
   - If the workspace file is gone, the button opens the folder and says so.
 
+### Hermes Agent cells
+
+A cell can run [Hermes Agent](https://hermes-agent.nousresearch.com) instead of Claude Code.
+Pick **Hermes** in the switch at the top of the new-session picker; the switch stays where you
+left it. A Hermes cell has a **Hermes** tag in its header.
+
+- HQ starts `hermes acp` (Hermes' Agent Client Protocol server) for the cell, and
+  `src/hermes.rs` translates between it and the chat. Nothing starts until the cell's first
+  message, and closing the cell ends Hermes, so with no Hermes cell open there is no cost.
+- It is the same Hermes agent as the CLI: its memory, skills, background self-improvement
+  review, context compression and session store all work as configured in Hermes' own
+  `config.yaml`. HQ changes none of Hermes' settings.
+- Approvals show as the usual permission cards. **Yes, and don't ask again** allows that kind
+  of action for the rest of the session. When Hermes' own `approvals.timeout` runs out, Hermes
+  denies the request and the card goes away.
+- The model menu lists the models Hermes offers. Permission modes are Ask before edits, Edit
+  automatically and Don't ask (still asks for sensitive paths); Hermes has no plan mode.
+- The compact button sends `/compress`. Typing `/` lists Hermes' own commands.
+- Handoff and the progress button ask in a throwaway fork of the session, which stays in
+  Hermes' session list.
+- Restored cells draw their history from HQ's own copy of the conversation, kept in a
+  `hermes` folder next to `board.json`, so they start nothing until you send a message.
+- Once a Hermes cell has run, the Resume dialog also lists Hermes' sessions (it starts a
+  short-lived Hermes to ask). Searching inside conversations covers Claude sessions only.
+- Not available in Hermes cells: Remote Control, the MCP menu (set up Hermes' MCP servers in
+  its config) and effort levels. Plan usage in the sidebar is Claude's.
+
 Environment overrides:
 
 - `HQ_CLAUDE`: path to the `claude` binary. The **Claude command** setting overrides it.
 - `HQ_MODEL`: default model for HQ sessions that have no model picked.
+- `HQ_HERMES`: path to the `hermes` binary (default: `hermes` on PATH).
 - `HQ_NO_UPDATE`: never check for updates.
 - `HQ_UPDATE_ANY_COPY`: check for updates even in a copy that was not installed (for testing).
 - `HQ_PROFILE`: run as a named profile (see [One copy per profile](#one-copy-per-profile)).
@@ -329,11 +357,15 @@ src/session.rs   spawns one `claude -p --input-format stream-json ...` per cell;
                  whole process tree when a cell (or HQ) closes; usage probe
 src/store.rs     board.json persistence, transcript loading (newest part, backwards), cached
                  session list, search inside transcripts, VS Code and workspace lookup
+src/hermes.rs    Hermes cells: runs `hermes acp` and translates ACP to and from the stream-json
+                 lines the UI speaks; HQ's copy of each Hermes conversation. Built with the
+                 `hermes` Cargo feature (on by default; `--no-default-features` leaves it out)
 src/update.rs    self-update: checks and downloads signed releases; installs when told to
 src/main.rs      Tauri commands, profiles, single-instance lock
 src/dev.rs       debug builds only: UI read from disk, DevTools port
 ui/app.js        cells, protocol handling, prompts, menus, sessions list, grid layout, persistence,
                  context indicator, Remote Control, settings
+ui/hermes.js     what Hermes cells do differently: their model list, commands, defaults, modes
 ui/render.js     markdown (raw HTML escaped, http(s) links only; incremental while streaming),
                  tool rows, line diffs, images, project colors
 ui/style.css     slate and pastel look, and a light theme

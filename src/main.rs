@@ -2,6 +2,8 @@
 
 #[cfg(debug_assertions)]
 mod dev;
+#[cfg(feature = "hermes")]
+mod hermes;
 mod session;
 mod store;
 mod update;
@@ -15,8 +17,10 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 /// Every message on `on_event` is a JSON array of the session's stdout lines (as objects), and
-/// the last element of the last array is the `hq_exit` object.
+/// the last element of the last array is the `hq_exit` object. `backend` picks the agent:
+/// `claude` (the default) or, when built in, `hermes`.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn spawn_session(
     app: AppHandle,
     cwd: String,
@@ -25,13 +29,19 @@ async fn spawn_session(
     model: Option<String>,
     effort: Option<String>,
     fork: Option<bool>,
+    backend: Option<String>,
     on_event: Channel<InvokeResponseBody>,
 ) -> Result<u64, String> {
     let fork = fork.unwrap_or(false);
     let opts = SpawnOptions { cwd, resume, permission_mode, model, effort, fork };
-    tauri::async_runtime::spawn_blocking(move || app.state::<Sessions>().spawn(&app, opts, on_event))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || match backend.as_deref() {
+        None | Some("claude") => app.state::<Sessions>().spawn(&app, opts, on_event),
+        #[cfg(feature = "hermes")]
+        Some("hermes") => hermes::spawn(&app, opts, on_event),
+        Some(other) => Err(format!("This build of HQ has no {other} support")),
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Deliberately not `async`: sync commands run in the order the frontend sent them, and the
@@ -142,6 +152,23 @@ async fn load_transcript(session_id: String, before: Option<u64>) -> Result<stor
         .map_err(|e| e.to_string())?
 }
 
+#[cfg(feature = "hermes")]
+#[tauri::command]
+async fn load_hermes_transcript(app: AppHandle, session_id: String, cwd: Option<String>, before: Option<u64>) -> Result<store::TranscriptChunk, String> {
+    tauri::async_runtime::spawn_blocking(move || hermes::load_transcript(&app, &session_id, cwd.as_deref(), before))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[cfg(feature = "hermes")]
+#[tauri::command]
+async fn list_hermes_sessions(limit: Option<usize>, cwd: Option<String>) -> Result<Vec<serde_json::Value>, String> {
+    let limit = limit.unwrap_or(80).min(500);
+    tauri::async_runtime::spawn_blocking(move || hermes::list_sessions(cwd.as_deref(), limit))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 async fn list_sessions(app: AppHandle, limit: Option<usize>, cwd: Option<String>) -> Result<Vec<store::SessionInfo>, String> {
     let limit = limit.unwrap_or(80).min(500);
@@ -244,6 +271,8 @@ struct BuildInfo {
     live_ui: bool,
     /// Whether this copy installs updates (the installed app, or a test build that opts in).
     updatable: bool,
+    /// The agents this build can start in a cell.
+    backends: Vec<&'static str>,
 }
 
 struct Profile(Option<String>);
@@ -255,6 +284,11 @@ fn build_info(app: AppHandle, profile: State<'_, Profile>) -> BuildInfo {
         version: app.package_info().version.to_string(),
         live_ui: cfg!(debug_assertions),
         updatable: update::updates_enabled(),
+        backends: vec![
+            "claude",
+            #[cfg(feature = "hermes")]
+            "hermes",
+        ],
     }
 }
 
@@ -316,6 +350,10 @@ fn main() {
             load_state,
             save_state,
             load_transcript,
+            #[cfg(feature = "hermes")]
+            load_hermes_transcript,
+            #[cfg(feature = "hermes")]
+            list_hermes_sessions,
             list_sessions,
             search_sessions,
             probe_usage,

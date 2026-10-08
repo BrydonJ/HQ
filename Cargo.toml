@@ -4,6 +4,11 @@ version = "0.8.1"
 description = "Lightweight grid of Claude Code chat sessions across any folders"
 edition = "2021"
 
+[features]
+default = ["hermes"]
+# Hermes Agent cells (src/hermes.rs). Costs nothing at runtime until a Hermes cell starts.
+hermes = []
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

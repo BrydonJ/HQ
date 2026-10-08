@@ -846,3 +846,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .qblock.qfocus { box-shadow: inset 2px 0 0 var(--accent); padding-left: 6px; }
 .tool-row.err pre { color: var(--error); }
 .filters button#resume-deep { margin-left: 4px; }
+
+/* Hermes Agent cells (hermes.js) */
+.agent-tag { flex: none; padding: 0 5px; border: 1px solid var(--border-strong); border-radius: 3px; color: var(--fg-muted); font-size: 10px; line-height: 15px; text-transform: uppercase; letter-spacing: 0.04em; }
+.picker-agent { margin: 0 6px 6px; }
+.hermes-loading { display: flex; align-items: center; gap: 6px; }
+.hermes-loading::before { content: ''; width: 10px; height: 10px; border: 1.5px solid var(--border-strong); border-top-color: var(--link); border-radius: 50%; animation: ctx-spin 0.9s linear infinite; }
