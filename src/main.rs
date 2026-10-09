@@ -12,7 +12,7 @@ use std::path::Path;
 
 use session::{Sessions, SpawnOptions};
 use tauri::ipc::{Channel, InvokeResponseBody};
-use tauri::{AppHandle, Manager, State, UserAttentionType, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, State, UserAttentionType, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
@@ -238,6 +238,36 @@ fn open_in_vscode(path: String) -> Result<(), String> {
     std::process::Command::new(code).arg(&path).spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
+/// Opens the default terminal (Windows Terminal, else a console window), in `path` when given.
+#[tauri::command]
+fn open_terminal(path: Option<String>) -> Result<(), String> {
+    let dir = path.filter(|p| !p.is_empty());
+    if let Some(dir) = &dir {
+        if !Path::new(dir).is_dir() {
+            return Err("folder does not exist".into());
+        }
+    }
+    let mut wt = std::process::Command::new("wt.exe");
+    if let Some(dir) = &dir {
+        // wt treats `;` as a command separator, even inside a path.
+        wt.args(["-d", &dir.replace(';', "\\;")]);
+    }
+    if wt.spawn().is_ok() {
+        return Ok(());
+    }
+    let mut cmd = std::process::Command::new("cmd.exe");
+    if let Some(dir) = &dir {
+        cmd.current_dir(dir);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+        cmd.creation_flags(CREATE_NEW_CONSOLE);
+    }
+    cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn check_update(app: AppHandle) -> Result<Option<update::UpdateInfo>, String> {
     update::check(&app).await
@@ -260,6 +290,42 @@ fn request_attention(window: WebviewWindow) {
 #[tauri::command]
 fn kill_all_sessions(sessions: State<'_, Sessions>) {
     sessions.kill_all();
+}
+
+/// A session that `hq.exe --new-session <folder> ...` asked for, waiting for the UI to open it.
+#[derive(serde::Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct LaunchRequest {
+    cwd: String,
+    model: Option<String>,
+    effort: Option<String>,
+    permission_mode: Option<String>,
+    prompt: Option<String>,
+}
+
+#[derive(Default)]
+struct Launches(std::sync::Mutex<Vec<LaunchRequest>>);
+
+/// Reads `--new-session <folder> [--model m] [--effort e] [--permission-mode p] [--prompt text]`
+/// from a command line. A plain start asks for nothing.
+fn parse_launch(args: &[String]) -> Option<LaunchRequest> {
+    let value = |flag: &str| {
+        let i = args.iter().position(|a| a == flag)?;
+        args.get(i + 1).filter(|v| !v.is_empty() && !v.starts_with("--")).cloned()
+    };
+    Some(LaunchRequest {
+        cwd: value("--new-session")?,
+        model: value("--model"),
+        effort: value("--effort"),
+        permission_mode: value("--permission-mode"),
+        prompt: value("--prompt"),
+    })
+}
+
+/// Hands the UI the sessions asked for on the command line since it last looked.
+#[tauri::command]
+fn take_launches(launches: State<'_, Launches>) -> Vec<LaunchRequest> {
+    launches.0.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
 }
 
 #[derive(serde::Serialize)]
@@ -322,7 +388,15 @@ fn main() {
 
     tauri::Builder::default()
         // Must come first: a second launch of the same profile hands over to the running copy.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if let Some(request) = parse_launch(&args) {
+                if let Some(launches) = app.try_state::<Launches>() {
+                    if let Ok(mut q) = launches.0.lock() {
+                        q.push(request);
+                    }
+                    let _ = app.emit("launch", ());
+                }
+            }
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.unminimize();
                 let _ = window.show();
@@ -337,6 +411,8 @@ fn main() {
         .manage(store::Index::default())
         .manage(update::PendingUpdate::default())
         .manage(Profile(profile))
+        // A first start can ask for a session too; the UI takes it once the board is back.
+        .manage(Launches(std::sync::Mutex::new(parse_launch(&std::env::args().collect::<Vec<_>>()).into_iter().collect())))
         .invoke_handler(tauri::generate_handler![
             spawn_session,
             send_line,
@@ -361,11 +437,13 @@ fn main() {
             open_url,
             reveal_folder,
             open_in_vscode,
+            open_terminal,
             request_attention,
             check_update,
             install_update,
             kill_all_sessions,
             build_info,
+            take_launches,
         ])
         .build(context)
         .expect("failed to start HQ")
@@ -380,4 +458,38 @@ fn main() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn plain_start_asks_for_nothing() {
+        assert_eq!(parse_launch(&args(&["hq.exe"])), None);
+        assert_eq!(parse_launch(&args(&["hq.exe", "--new-session"])), None);
+        assert_eq!(parse_launch(&args(&["hq.exe", "--new-session", ""])), None);
+        assert_eq!(parse_launch(&args(&["hq.exe", "--new-session", "--model", "sonnet"])), None);
+    }
+
+    #[test]
+    fn new_session_reads_its_options() {
+        let got = parse_launch(&args(&[
+            "hq.exe", "--new-session", "D:/Repos/x", "--model", "sonnet", "--prompt", "Read a; b. Start now.",
+        ]));
+        assert_eq!(
+            got,
+            Some(LaunchRequest {
+                cwd: "D:/Repos/x".into(),
+                model: Some("sonnet".into()),
+                effort: None,
+                permission_mode: None,
+                prompt: Some("Read a; b. Start now.".into()),
+            })
+        );
+    }
 }

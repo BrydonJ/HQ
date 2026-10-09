@@ -238,6 +238,7 @@ class Cell {
     this.progressBtn.addEventListener('click', () => this.setProgressView(!this.progressView));
     el.querySelector('.act-max').addEventListener('click', () => toggleMaximize(this));
     el.querySelector('.act-close').addEventListener('click', e => this.requestClose(e.currentTarget));
+    el.querySelector('.act-terminal').addEventListener('click', () => invoke('open_terminal', { path: this.cwd }).catch(err => this.notice(String(err), true)));
     el.querySelector('.act-reveal').addEventListener('click', () => invoke('reveal_folder', { path: this.cwd }).catch(err => this.notice(String(err), true)));
     this.codeBtn.addEventListener('click', () => this.openInCode());
     this.codeBtn.addEventListener('contextmenu', e => { e.preventDefault(); this.openCodeMenu(); });
@@ -4000,6 +4001,7 @@ function closeSettings() {
 }
 
 $('#open-settings').addEventListener('click', () => (settingsPanel.classList.contains('hidden') ? openSettings() : closeSettings()));
+$('#terminal-btn').addEventListener('click', () => invoke('open_terminal', {}).catch(err => console.error('terminal failed', err)));
 $('#settings-btn').addEventListener('click', () => (settingsPanel.classList.contains('hidden') ? openSettings() : closeSettings()));
 settingsPanel.addEventListener('keydown', e => {
   if (e.key === 'Escape') { e.stopPropagation(); closeSettings(); }
@@ -4311,6 +4313,36 @@ async function restore() {
   if (app.focused) focusCell(app.focused, true);
   setTimeout(() => refreshUsage(), 1500);
   setTimeout(autoCheckForUpdate, UPDATE_FIRST_CHECK_MS);
+  openLaunches();
 }
+
+/**
+ * Opens the sessions that `hq.exe --new-session <folder> [--model m] [--effort e]
+ * [--permission-mode p] [--prompt text]` asked for, and sends each one's prompt.
+ */
+async function openLaunches() {
+  if (restoring) return; // restore() opens them once the board is back
+  const requests = await invoke('take_launches').catch(() => []);
+  for (const r of requests) await openLaunch(r).catch(err => console.error('launch failed', r.cwd, err));
+}
+
+const LAUNCH_MODES = ['default', 'acceptEdits', 'plan', 'auto'];
+
+async function openLaunch(r) {
+  const missing = !(await invoke('folder_exists', { path: r.cwd }).catch(() => false));
+  const opts = { cwd: r.cwd, missing };
+  if (r.model) opts.model = r.model;
+  if (r.effort) opts.effort = r.effort;
+  // Never bypassPermissions from a command line: whoever runs hq.exe must not skip the prompts.
+  if (LAUNCH_MODES.includes(r.permissionMode)) opts.permissionMode = r.permissionMode;
+  const cell = addNewCell(opts);
+  if (r.prompt) {
+    cell.input.value = r.prompt;
+    autoGrow(cell.input);
+    if (!missing) cell.submit(); // a missing folder keeps the prompt as a draft
+  }
+}
+
+window.__TAURI__.event.listen('launch', openLaunches).catch(err => console.error('launch listener failed', err));
 
 restore();

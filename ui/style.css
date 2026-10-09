@@ -81,6 +81,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
   background: transparent; color: var(--fg-muted); cursor: pointer;
 }
 .icon-btn:hover { background: rgba(90, 93, 94, 0.31); color: var(--fg); }
+.icon-btn.big { width: 30px; height: 30px; }
+.icon-btn.big .codicon { font-size: 20px; }
 
 /* ---------- board / grid ---------- */
 #workspace { display: flex; flex: 1; min-height: 0; }

@@ -100,6 +100,11 @@ every installed copy must be reinstalled by hand.
   - Esc (or the stop button) while Claude is still starting takes the prompt back into the
     composer, and nothing is sent. If Claude cannot start, the prompt comes back too, and its
     bubble is marked **Not sent**.
+  - From a script or another session: `hq.exe --new-session <folder> [--model m] [--effort e]
+    [--permission-mode p] [--prompt text]` opens a cell in that folder and sends the prompt
+    (`--permission-mode` takes default, acceptEdits, plan or auto; never bypassPermissions). If
+    HQ is running, the running copy of that profile opens it; otherwise HQ starts first. A
+    missing folder keeps the prompt as a draft. `/full-send` uses this to hand a ticket to Sonnet.
   - `claude update` runs in the background, at most once every 6 hours (the time of the last run
     is kept in the board), and a first message does not wait for it. If a start fails while the
     update replaces the program, HQ waits for the update and tries once more.
@@ -301,7 +306,9 @@ every installed copy must be reinstalled by hand.
     works again as before.
   - Claude starts again (`--resume`) only when you send a message, so restored cells use no
     memory until you use them.
-- Header buttons open the cell's folder in VS Code or in Explorer.
+- Header buttons open the cell's folder in VS Code, in a terminal or in Explorer. The terminal is
+  Windows Terminal (a console window if it is missing); the larger terminal button in the top bar
+  opens one in its default folder.
   - Right-click the VS Code button to pick a `.code-workspace` file for the folder. The button
     then opens that workspace instead, and a small dot marks it. The choice applies to every
     session in the folder.
