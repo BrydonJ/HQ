@@ -24,7 +24,7 @@ const app = {
   claudeUpdateAt: 0,   // when `claude update` last ran (ms), so a restart does not repeat it
   remoteDefault: null, // new sessions start with Remote Control on; null until seeded from the account
   remoteAvailable: null, // from the last initialize reply: null until a session has reported it
-  settings: { theme: 'auto', notify: true, autoUpdate: true, claudePath: '' }, // the Settings screen
+  settings: null,      // the Settings screen; see sanitizeSettings for the keys
   sidebarOpen: false,
   query: '',
 };
@@ -42,13 +42,82 @@ const FALLBACK_MODELS = [
 ];
 const ALL_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
-// Shown above the prompt box while Claude works, one per turn, in the spirit of the CLI's spinner.
+// Shown above the prompt box while Claude works, in the spirit of the CLI's spinner. A new one is drawn
+// every BUSY_ROTATE_MS during a turn, from a shuffled deck shared by all cells, so none repeats until
+// the whole list has been shown.
 const BUSY_VERBS = ['Cooking', 'Locking in', 'Vibe coding', 'Aura farming', 'Manifesting', 'Speedrunning', 'Main charactering',
   'Big braining', 'Rizzing up the compiler', 'Sending it', 'Yapping internally', 'Touching grass (briefly)', 'Lowkey grinding',
   'Highkey grinding', 'Gatekeeping bugs', 'Glazing the codebase', 'Rawdogging the stack', 'Delulu debugging',
   'Doomscrolling the docs', 'Entering goblin mode', 'Clauding', 'Letting it cook', 'Mewing', 'No-capping', 'Slaying',
   'Understanding the assignment', 'Living rent free in RAM', 'Being so real', 'Eating (no crumbs)',
-  'Giving it main quest energy', 'Pulling an all-nighter', 'Spilling the tea', 'Running it back', 'Hitting the griddy'];
+  'Giving it main quest energy', 'Pulling an all-nighter', 'Spilling the tea', 'Running it back', 'Hitting the griddy',
+  'Pondering', 'Ruminating', 'Noodling', 'Percolating', 'Marinating', 'Simmering', 'Brewing', 'Fermenting', 'Steeping',
+  'Kneading the dough', 'Proofing', 'Whisking', 'Flambéing', 'Seasoning to taste', 'Reducing the sauce', 'Plating up',
+  'Consulting the rubber duck', 'Asking the rubber duck nicely', 'Bribing the linter', 'Negotiating with the borrow checker',
+  'Appeasing the type system', 'Reticulating splines', 'Herding cats', 'Wrangling semicolons', 'Untangling spaghetti',
+  'Polishing pixels', 'Counting brackets', 'Balancing parentheses', 'Chasing a null', 'Hunting heisenbugs',
+  'Interrogating the stack trace', 'Reading the fine print', 'Grepping the universe', 'Spelunking the call graph',
+  'Defragmenting thoughts', 'Compiling vibes', 'Refactoring reality', 'Bikeshedding (efficiently)', 'Yak shaving',
+  'Shaving the yak closer', 'Summoning the daemon', 'Feeding the hamsters', 'Spinning up the hamster wheel',
+  'Warming up the GPUs', 'Cranking the flux capacitor', 'Calibrating the vibes', 'Aligning the chakras of the repo',
+  'Channeling the senior dev', 'Doing the thing', 'Thinking really hard', 'Thinking even harder', 'Galaxy braining',
+  'Connecting the dots', 'Following the white rabbit', 'Taking the red pill', 'Entering the matrix', 'Hacking the mainframe',
+  'Enhancing… enhance', 'Going full send', 'Shipping it (almost)', 'Crunching numbers', 'Munching tokens',
+  'Snacking on context', 'Digesting the diff', 'Sipping coffee', 'Refilling the coffee', 'Speed-reading the codebase',
+  'Taking notes', 'Sketching a plan', 'Drafting the blueprint', 'Laying the bricks', 'Pouring the foundation',
+  'Tightening the bolts', 'Oiling the gears', 'Tuning the engine', 'Checking under the hood', 'Kicking the tires',
+  'Doing a vibe check', 'Passing the vibe check', 'Rolling for initiative', 'Casting fireball at the bug', 'Leveling up',
+  'Grinding XP', 'Farming loot', 'Speedrunning any%', 'Finding the secret level', 'Saving at the bonfire',
+  'Respawning', 'Unlocking achievements', 'Collecting the infinity stones', 'Assembling', 'Transforming',
+  'Charging the kamehameha', 'Going super saiyan', 'Using the force', 'Consulting the oracle', 'Reading the tea leaves',
+  'Gazing into the crystal ball', 'Divining', 'Conjuring', 'Enchanting', 'Transmuting', 'Alchemizing', 'Spellcasting',
+  'Brewing a potion', 'Moonwalking', 'Breakdancing', 'Doing the worm', 'Vogueing', 'Jazz-handing', 'Tap dancing',
+  'Beatboxing', 'Freestyling', 'Dropping bars', 'Mixing the beat', 'Tuning the guitar', 'Composing', 'Orchestrating',
+  'Conducting', 'Improvising', 'Riffing', 'Jamming', 'Vibing', 'Grooving', 'Boogieing', 'Skedaddling', 'Moseying',
+  'Sashaying', 'Galumphing', 'Frolicking', 'Gallivanting', 'Meandering', 'Wandering', 'Exploring', 'Charting the map',
+  'Navigating', 'Setting sail', 'Raising the anchor', 'Catching the wind', 'Riding the wave', 'Surfing the stack',
+  'Diving deep', 'Coming up for air', 'Climbing the tree', 'Walking the AST', 'Traversing the graph', 'Sorting it out',
+  'Binary searching', 'Hashing it out', 'Caching in', 'Flushing buffers', 'Garbage collecting', 'Allocating brain cells',
+  'Defrosting the cache', 'Reheating leftovers', 'Microwaving the build', 'Toasting', 'Buttering the toast',
+  'Spreading the jam', 'Slicing the bread', 'Rolling the sushi', 'Folding dumplings', 'Tossing the pizza', 'Grilling',
+  'Barbecuing', 'Smoking the brisket', 'Braai-ing', 'Lighting the braai', 'Making a plan, boet', 'Sharp-sharping',
+  'Just now-ing', 'Now now-ing', 'Eish-ing', 'Lekker coding', 'Jislaaik', 'Hustling', 'Bustling', 'Tinkering',
+  'Fiddling', 'Twiddling', 'Tweaking', 'Nudging', 'Finessing', 'Massaging', 'Sculpting', 'Whittling', 'Chiselling',
+  'Sanding the edges', 'Varnishing', 'Knitting', 'Crocheting', 'Weaving', 'Stitching it together', 'Patching',
+  'Darning socks', 'Ironing out wrinkles', 'Origami-ing', 'Building the Lego set', 'Finding the missing piece',
+  'Solving the puzzle', 'Cracking the code', 'Picking the lock', 'Decrypting', 'Deciphering', 'Translating',
+  'Interpreting', 'Parsing', 'Lexing', 'Tokenizing', 'Embedding', 'Attending to attention', 'Predicting the next token',
+  'Sampling', 'Beam searching', 'Hallucinating responsibly', 'Fact-checking itself', 'Double-checking',
+  'Triple-checking', 'Measuring twice', 'Cutting once', "Crossing the t's", "Dotting the i's", 'Minding the gap',
+  'Mind melding', 'Telepathing', 'Overclocking', 'Underpromising', 'Overdelivering', 'Cooking with gas',
+  'Cooking up a storm', 'Stirring the pot', 'Adding a pinch of salt', "Chef's kissing", 'Being built different',
+  'Hitting different', 'Living its best life', 'Rent-free thinking', 'Sweating the details', 'Going the extra mile',
+  'Rubbing two neurons together', 'Firing synapses', 'Booting up the brain', 'Loading… please hold', 'Buffering wisdom',
+  'Downloading more RAM', 'Turning it off and on again', 'Blowing on the cartridge', 'Wiggling the cable',
+  'Reading the manual (finally)', 'Asking Stack Overflow (in spirit)', 'Rereading the error', 'Staring at the screen',
+  'Squinting at the logs', 'Tracing the breadcrumbs', 'Following the money', 'Sniffing out bugs', 'Squashing bugs',
+  'Swatting flies', 'Debugging with print', 'Adding console.log', 'Removing console.log', 'Committing to the bit',
+  'Rebasing feelings', 'Cherry-picking ideas', 'Merging thoughts', 'Resolving conflicts', 'Stashing worries',
+  'Pushing through', 'Pulling it together', 'Forking the timeline', 'Branching out', 'Tagging the release (mentally)'];
+const BUSY_ROTATE_MS = 9000;
+const busyDeck = [];
+
+/** The next verb from the shuffled deck; a fresh shuffle once it runs out, never starting on `avoid`. */
+function nextBusyVerb(avoid) {
+  if (!busyDeck.length) {
+    busyDeck.push(...BUSY_VERBS);
+    for (let i = busyDeck.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [busyDeck[i], busyDeck[j]] = [busyDeck[j], busyDeck[i]];
+    }
+    if (`${busyDeck[busyDeck.length - 1]}…` === avoid) busyDeck.unshift(busyDeck.pop());
+  }
+  return `${busyDeck.pop()}…`;
+}
+
+setInterval(() => {
+  for (const cell of app.cells) if (cell.status === 'running' && !cell.compacting && !cell.wrapUp && !cell.collapsed) cell.nextBusyWord();
+}, BUSY_ROTATE_MS);
 
 // The eye button's levels: [icon, what shows, what the next click shows].
 const DETAIL_LEVELS = {
@@ -147,6 +216,7 @@ class Cell {
     this.stoppingTasks = new Set(); // task ids a stop_task was sent for and not yet answered
     this.ctx = { tokens: null, window: null, info: null, infoAt: 0, loading: null, model: null }; // context window use
     this.compacting = false;   // a compaction is running (the CLI's status 'compacting')
+    this.wrapUp = null;        // the plan's limit was hit mid-turn and Claude is finishing on the wrap-up allowance: { credits }
     this.cost = { usd: 0, tokens: 0, procUsd: 0, procTokens: 0 }; // this HQ run's spend; proc* = last total of the current process
     this.drafts = new Set();   // prompts submitted while claude was still starting, which Esc can take back
     this.openTools = new Set(); // tool_use ids of tool calls that have not reported a result yet
@@ -180,7 +250,6 @@ class Cell {
     this.modelBtn = el.querySelector('.act-model');
     this.mcpBtn = el.querySelector('.act-mcp');
     this.attachEl = el.querySelector('.attachments');
-    this.fileInput = el.querySelector('.file-input');
     this.metaEl = el.querySelector('.meta');
     this.stopBtn = el.querySelector('.act-stop');
     this.titleEl = el.querySelector('.cell-title');
@@ -228,11 +297,11 @@ class Cell {
     });
     this.titleEl.addEventListener('click', () => { if (!this.collapsed) this.startRename(); });
     const proj = el.querySelector('.cell-project');
-    proj.title = 'Click for another colour';
+    proj.title = 'Change the project colour';
     proj.addEventListener('click', e => {
       if (this.collapsed) return; // the click opens the cell instead
       e.stopPropagation();
-      shuffleProjectColor(this.cwd);
+      openMenu(proj, this, menuEl => buildColorMenu(menuEl, this.cwd));
     });
     this.detailBtn.addEventListener('click', () => this.setDetail(this.detail % 3 + 1));
     this.progressBtn.addEventListener('click', () => this.setProgressView(!this.progressView));
@@ -260,11 +329,6 @@ class Cell {
     this.mcpBtn.addEventListener('click', () => {
       openMenu(this.mcpBtn, this, menuEl => this.buildMcpMenu(menuEl));
       if (menuState.anchor === this.mcpBtn) this.loadMcp();
-    });
-    el.querySelector('.act-attach').addEventListener('click', () => this.fileInput.click());
-    this.fileInput.addEventListener('change', () => {
-      this.addImages([...this.fileInput.files]);
-      this.fileInput.value = '';
     });
     this.input.addEventListener('paste', e => {
       const data = e.clipboardData;
@@ -313,10 +377,13 @@ class Cell {
     });
     this.msgs.addEventListener('click', onLinkClick);
     this.msgs.addEventListener('click', onCodeCopyClick);
+    this.msgs.addEventListener('click', e => onCodeActionClick(e, this));
     this.msgs.addEventListener('click', onImageClick);
     this.attachEl.addEventListener('click', onImageClick);
     this.prompts.addEventListener('click', onLinkClick);
     this.prompts.addEventListener('click', onCodeCopyClick);
+    this.prompts.addEventListener('click', e => onCodeActionClick(e, this));
+    for (const area of [this.msgs, this.prompts]) area.addEventListener('mouseup', e => autoCopySelection(e, area));
   }
 
   append(node, parent) {
@@ -587,12 +654,49 @@ class Cell {
 
   // ---------- progress ----------
 
+  /** Picks the line over the prompt box: compaction or the wrap-up allowance when either is on, else the next verb. */
+  nextBusyWord() {
+    this.busyWord = this.compacting ? 'Compacting the conversation…'
+      : this.wrapUp ? (this.wrapUp.credits ? 'Usage limit reached · continuing on usage credits…' : 'Usage limit reached · wrapping up…')
+      : nextBusyVerb(this.busyWord);
+    for (const el of this.el.querySelectorAll('.busy-word')) el.textContent = this.busyWord;
+  }
+
+  /**
+   * The wrap-up allowance: when the plan's 5-hour limit is hit mid-reply, Claude Code (2.1.277+) gets a small
+   * allowance to finish the reply instead of stopping dead. It is automatic; the CLI asks for it and tells
+   * Claude to wrap up. HQ only shows it, and must not cut the turn short, since a stop ends the allowance.
+   * `rateLimitGraceActive` is internal to the CLI and outlives a refused request, so it counts only with a
+   * status other than 'rejected' and before `resetsAt` (seconds).
+   */
+  onRateLimit(info) {
+    if (!info || typeof info !== 'object') return;
+    // An event about another window (weekly, overage) says nothing about the 5-hour wrap-up; it must not end it.
+    if (info.rateLimitGraceActive !== true && info.rateLimitType && info.rateLimitType !== 'five_hour') return;
+    const resetsAt = Number(info.resetsAt) * (Number(info.resetsAt) < 1e12 ? 1000 : 1);
+    const grace = info.rateLimitGraceActive === true && info.status !== 'rejected'
+      && !(Number.isFinite(resetsAt) && resetsAt > 0 && resetsAt < Date.now());
+    this.setWrapUp(grace ? { credits: info.overageStatus === 'allowed' || info.overageStatus === 'allowed_warning' } : null);
+  }
+
+  setWrapUp(state) {
+    const was = this.wrapUp;
+    this.wrapUp = state;
+    if (!was && state && this.status === 'running') {
+      this.notice(state.credits ? 'Usage limit reached: Claude is finishing this reply, then continuing on usage credits.'
+        : 'Usage limit reached: Claude is using its wrap-up allowance to finish this reply. Stopping it now ends the allowance.');
+    }
+    if (!!was !== !!state || (was && state && was.credits !== state.credits)) {
+      this.el.classList.toggle('wrapping-up', !!state);
+      if (this.status === 'running') this.nextBusyWord();
+    }
+  }
+
   /** A new turn restarts the clock and sets aside a task list that was already finished. */
   startTurn() {
-    const words = BUSY_VERBS.filter(w => `${w}…` !== this.busyWord);
-    this.busyWord = `${words[Math.floor(Math.random() * words.length)]}…`;
-    for (const el of this.el.querySelectorAll('.busy-word')) el.textContent = this.busyWord;
+    this.nextBusyWord();
     this.turnStart = Date.now();
+    this.limitHit = false;
     this.turnTools = 0;
     this.currentTool = null;
     const list = this.taskItems();
@@ -1440,7 +1544,10 @@ class Cell {
       case 'control_cancel_request': return this.dropPrompt(m.request_id);
       case 'control_response': return this.onControlResponse(m);
       case 'hq_exit': return this.onExit(m);
-      case 'rate_limit_event': return this.backend === 'claude' && scheduleUsageRefresh(this);
+      case 'rate_limit_event':
+        if (this.backend !== 'claude') return;
+        this.onRateLimit(m.rate_limit_info);
+        return scheduleUsageRefresh(this);
       case 'custom-title':
       case 'ai-title': return this.onTitleLine(m);
       default: return; // keep_alive, future types
@@ -1556,6 +1663,8 @@ class Cell {
     // A local command (/context, /usage...) is answered by the CLI itself, as text in a synthetic message. Its
     // /compact answer repeats the status notice that was already shown.
     if (m.local_command_run && m.local_command_run.command === 'compact') return;
+    const limit = usageLimitText(m);
+    if (limit) return this.showUsageLimit(limit, replay);
     const parent = this.containerFor(m.parent_tool_use_id);
     for (const block of msg.content || []) {
       if (block.type === 'text') {
@@ -1584,6 +1693,35 @@ class Cell {
         this.addTool(block, parent);
       }
     }
+  }
+
+  /**
+   * Out of plan usage: one card instead of Claude's synthetic reply plus the turn's error. A card with
+   * nothing but prompts and notices after it is moved down and counted again rather than repeated.
+   */
+  showUsageLimit(text, replay) {
+    this.limitHit = true;
+    const [title, ...rest] = text.split(/\s+[·•]\s+/);
+    const reset = rest.join(' · ').replace(/^resets\b/i, 'Resets');
+    const cards = this.msgs.querySelectorAll(':scope > .limit-card');
+    let card = cards[cards.length - 1];
+    for (let n = card && card.nextElementSibling; n; n = n.nextElementSibling) {
+      if (!n.matches('.notice, .user')) { card = null; break; }
+    }
+    if (card) {
+      card._count = (card._count || 1) + 1;
+      card.querySelector('.limit-count').textContent = `×${card._count}`;
+      this.append(card);
+    } else {
+      card = this.append(h('div', { class: 'item limit-card' },
+        h('span', { class: 'limit-icon' }, icon('watch')),
+        h('div', { class: 'limit-main' }, h('div', { class: 'limit-title' }), h('div', { class: 'limit-reset' })),
+        h('span', { class: 'limit-count' }),
+        h('button', { class: 'btn limit-usage', text: 'Plan usage', onclick: () => { usagePill.focus(); refreshUsage(this); } })));
+    }
+    card.querySelector('.limit-title').textContent = title || 'Usage limit reached';
+    card.querySelector('.limit-reset').textContent = reset;
+    if (!replay && this.backend === 'claude') scheduleUsageRefresh(this);
   }
 
   /** Text followed by a tool call is Claude narrating its work, not its answer. */
@@ -1792,10 +1930,11 @@ class Cell {
     for (const id of [...this.pending.keys()]) this.dropPrompt(id); // a finished turn has nothing left to approve
     if (m.is_error && m.subtype !== 'error_during_execution') {
       const detail = m.result || (m.errors && m.errors.join('\n')) || m.subtype;
-      this.notice(`Error: ${detail}`, true);
+      if (!this.limitHit && !LIMIT_TEXT.test(String(detail))) this.notice(`Error: ${detail}`, true);
     }
     this.noteResult(m);
     if (this.compacting) this.setCompacting(false);
+    this.setWrapUp(null);
     if (!local && typeof m.duration_ms === 'number') this.lastDuration = `${(m.duration_ms / 1000).toFixed(1)}s`;
     this.renderMeta();
     this.setStatus('idle');
@@ -1834,6 +1973,7 @@ class Cell {
     for (const t of this.tools.values()) t.item.classList.remove('bg');
     this.bgTasks = []; // they ran inside this claude, so they ended with it
     this.compacting = false;
+    this.setWrapUp(null);
     this.remoteState = this.remoteState === 'policy' ? 'policy' : 'off'; // the claude.ai session ended with the process
     this.remoteUrl = null;
     this.renderRemote();
@@ -2215,7 +2355,7 @@ class Cell {
     this.ctxBtn.style.setProperty('--ctx-pct', String(percent.toFixed(1)));
     this.ctxBtn.style.setProperty('--ctx-color', limit ? heatCss(percent) : 'var(--fg-faint)');
     this.ctxBtn.querySelector('.ctx-text').textContent = !known ? '' : max ? `${Math.round((c.tokens / max) * 100)}%` : formatTokens(c.tokens);
-    this.ctxBtn.classList.toggle('busy', this.compacting);
+    this.ctxBtn.classList.toggle('compacting', this.compacting);
     const blocked = this.status === 'running' && !this.compacting;
     this.ctxBtn.classList.toggle('blocked', blocked);
     this.ctxBtn.setAttribute('aria-disabled', String(blocked || this.compacting));
@@ -2259,9 +2399,9 @@ class Cell {
   async runCompact(instructions) {
     if (this.historyLoading) await this.historyLoading;
     if (this.status === 'running' || this.compacting) return;
-    this.setStatus('running'); // its result brings the cell back to idle
-    if (!(await this.ensureProcess())) return;
-    this.notice(instructions ? `Compacting the conversation (${instructions})…` : 'Compacting the conversation…');
+    this.setCompacting(true); // the line over the prompt box says so; its result brings the cell back to idle
+    if (!(await this.ensureProcess())) { this.setCompacting(false); return; }
+    if (instructions) this.notice(`Compacting with instructions: ${instructions}`);
     this.stickToBottom = true;
     this.write({ type: 'user', message: { role: 'user', content: instructions ? `/compact ${instructions}` : '/compact' }, parent_tool_use_id: null });
   }
@@ -2313,6 +2453,7 @@ class Cell {
     if (this.compacting === on) return;
     this.compacting = on;
     if (on && this.status !== 'running') this.setStatus('running');
+    this.nextBusyWord();
     this.renderContext();
   }
 
@@ -2513,6 +2654,18 @@ function suggestionLabel(suggestions) {
   return "Yes, and don't ask again";
 }
 
+// Claude Code's synthetic reply when the plan's usage is out: "You've hit your session limit · resets 9:50pm (...)".
+const LIMIT_TEXT = /\bhit your (?:\w+ )?limit\b|\busage limit reached\b/i;
+
+/** The text of a usage-limit message, or null. Newer CLIs tag it with error 'rate_limit'; older ones only by its words. */
+function usageLimitText(m) {
+  const msg = m.message || {};
+  const text = (Array.isArray(msg.content) ? msg.content : []).filter(b => b && b.type === 'text' && b.text).map(b => b.text).join('\n').trim();
+  if (!text) return null;
+  if (m.error === 'rate_limit') return text;
+  return (msg.model === '<synthetic>' || m.isApiErrorMessage) && LIMIT_TEXT.test(text) ? text : null;
+}
+
 function autoGrow(ta) {
   ta.style.height = 'auto';
   if (!ta.scrollHeight) return; // not laid out yet (a detached or collapsed cell): keep the natural height
@@ -2540,6 +2693,73 @@ function onCodeCopyClick(e) {
     btn.classList.remove('done');
     btn.querySelector('.codicon').className = 'codicon codicon-copy';
   }, 1500);
+}
+
+/** A code block's Preview (Markdown shown rendered, click again for the source) and Run buttons. */
+function onCodeActionClick(e, cell) {
+  const btn = e.target.closest('.code-preview, .code-run');
+  if (!btn) return;
+  const block = btn.closest('.code-block');
+  const code = block && block.querySelector('pre code');
+  if (!code) return;
+  if (btn.classList.contains('code-preview')) {
+    const on = !block.classList.contains('previewing');
+    let view = block.querySelector(':scope > .code-preview-body');
+    if (on && !view) {
+      view = h('div', { class: 'md code-preview-body' });
+      renderMarkdown(view, code.textContent);
+      block.append(view);
+    }
+    block.classList.toggle('previewing', on);
+    btn.classList.toggle('on', on);
+    btn.title = on ? 'Show the Markdown source' : 'Preview the Markdown';
+    return;
+  }
+  // A block still streaming in may be cut short mid-command, so it cannot run until it is finished.
+  if (block.closest('.streaming')) {
+    cell.notice('That command is still being written; run it once the reply has finished.', true);
+    return;
+  }
+  const command = shellCommand(code.textContent, block.dataset.lang);
+  if (!command) return;
+  // Invisible or direction-changing characters can make a command run differently from how it reads.
+  if (/[\u00AD\u061C\u200B-\u200F\u2028-\u202E\u2060-\u2069\uFEFF\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/.test(command)) {
+    cell.notice('Not run: the command contains invisible or text-direction characters. Copy it and check it instead.', true);
+    return;
+  }
+  invoke('run_in_terminal', { path: cell.cwd, command, shell: /^(cmd|bat|batch)$/.test(block.dataset.lang) ? 'cmd' : 'powershell' })
+    .catch(err => cell.notice(`Could not open a terminal: ${err}`, true));
+}
+
+/**
+ * The command a shell block runs. `console` blocks mix prompts with output, so only their prompt
+ * lines are kept; elsewhere a leading `$ ` or `PS> ` prompt is dropped. A bare `> ` counts as a
+ * prompt only in console blocks, since elsewhere it can be a redirect or a continuation.
+ */
+function shellCommand(text, lang) {
+  const console = lang === 'console' || lang === 'terminal';
+  const PROMPT = console ? /^\s*(?:\$|>|PS(?: [^>]*)?>)\s+/ : /^\s*(?:\$|PS(?: [^>]*)?>)\s+/;
+  let lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
+  if (console && lines.some(l => PROMPT.test(l))) lines = lines.filter(l => PROMPT.test(l));
+  return lines.map(l => l.replace(PROMPT, '')).join('\n').trim();
+}
+
+// ---------- auto-copy: selected chat text goes to the clipboard, as in a terminal ----------
+
+let autoCopyTip = null;
+function autoCopySelection(e, area) {
+  if (!app.settings.autoCopy || e.button !== 0) return;
+  if (e.target.closest('textarea, input, select, button')) return;
+  const sel = window.getSelection();
+  const text = sel ? sel.toString() : '';
+  if (!text.trim() || !area.contains(sel.anchorNode) || !area.contains(sel.focusNode)) return;
+  copyText(text);
+  if (!autoCopyTip) autoCopyTip = document.body.appendChild(h('div', { class: 'copy-tip', text: 'Copied' }));
+  autoCopyTip.style.left = `${e.clientX + 12}px`;
+  autoCopyTip.style.top = `${e.clientY - 26}px`;
+  autoCopyTip.classList.remove('show');
+  void autoCopyTip.offsetWidth; // restarts the fade
+  autoCopyTip.classList.add('show');
 }
 
 // ---------- image viewer: a sent or attached image, full size ----------
@@ -3006,6 +3226,24 @@ document.addEventListener('mousedown', e => {
 // Board: add / remove / focus / layout
 // ======================================================================================
 
+/** The project name's menu: the palette, any colour, a random one, or back to the default. */
+function buildColorMenu(menuEl, path) {
+  const current = projectColor(path).toLowerCase();
+  const swatches = h('div', { class: 'swatches' }, PROJECT_COLORS.map(color => h('button', {
+    class: `swatch${color.toLowerCase() === current ? ' on' : ''}`, style: `--swatch:${color}`, title: color,
+    onclick: () => { setProjectColor(path, color); refreshMenu(); },
+  })));
+  // Live while the picker is dragged; the menu is redrawn only when the picker closes, so it stays open.
+  const custom = h('input', { type: 'color', value: current, title: 'Any colour' });
+  custom.addEventListener('input', () => setProjectColor(path, custom.value));
+  custom.addEventListener('change', () => refreshMenu());
+  const item = (name, ico, run) => h('button', { class: 'menu-item', onclick: () => { run(); refreshMenu(); } }, icon(ico), h('span', { class: 'menu-main' }, h('span', { class: 'name', text: name })));
+  menuEl.append(...[h('div', { class: 'menu-title', text: `Colour · ${baseName(path) || path}` }), swatches,
+    h('label', { class: 'menu-item color-custom' }, icon('symbol-color'), h('span', { class: 'menu-main' }, h('span', { class: 'name', text: 'Custom…' })), custom),
+    item('Shuffle', 'refresh', () => shuffleProjectColor(path)),
+    Object.hasOwn(projectColorPicks, normPath(path).toLowerCase()) ? item('Reset to default', 'discard', () => setProjectColor(path, null)) : null].filter(Boolean));
+}
+
 /** Cells in the same folder belong to one project; they share a color and sit together. */
 const projectKey = path => normPath(path).toLowerCase();
 
@@ -3105,7 +3343,14 @@ function sanitizeProjectColors(c) {
 function shuffleProjectColor(path) {
   const current = projectColor(path);
   const others = PROJECT_COLORS.filter(c => c.toLowerCase() !== current.toLowerCase());
-  projectColorPicks[normPath(path).toLowerCase()] = others[Math.floor(Math.random() * others.length)];
+  setProjectColor(path, others[Math.floor(Math.random() * others.length)]);
+}
+
+/** A `#rrggbb` colour for the folder, or null for its default; repaints its cells and list rows. */
+function setProjectColor(path, color) {
+  const key = normPath(path).toLowerCase();
+  if (color && /^#[0-9a-f]{6}$/i.test(color)) projectColorPicks[key] = color.toLowerCase();
+  else delete projectColorPicks[key];
   for (const c of app.cells) {
     if (projectKey(c.cwd) !== projectKey(path)) continue;
     c.color = projectColor(c.cwd);
@@ -3880,6 +4125,19 @@ function renderUsage() {
     usagePill.style.background = '';
     usagePill.style.color = '';
   }
+  // The weekly limit as a thin bar along the bottom, on the pill's colour scale.
+  const week = usage.data && usage.data.rows.find(r => r.key === 'seven_day');
+  const weekBar = usagePill.querySelector('.usage-week');
+  const showWeek = !!(five && week && app.settings.weeklyBar);
+  weekBar.classList.toggle('hidden', !showWeek);
+  if (showWeek) {
+    const percent = week.resetsAt && week.resetsAt < Date.now() ? 0 : week.percent;
+    weekBar.firstElementChild.style.width = `${Math.min(100, percent)}%`;
+    weekBar.firstElementChild.style.backgroundColor = heatCss(percent);
+    usagePill.title = `Plan usage · weekly ${percent}%`;
+  } else {
+    usagePill.title = 'Plan usage';
+  }
   if (!usagePop.classList.contains('hidden')) renderUsagePop();
 }
 
@@ -3938,29 +4196,108 @@ setInterval(() => {
 
 const settingsPanel = $('#settings');
 
+// Built-in themes. Auto follows Windows between Dark and Light; the others set every colour.
+const THEMES = [['auto', 'Auto'], ['dark', 'Dark'], ['light', 'Light'], ['midnight', 'Midnight'], ['nord', 'Nord'],
+  ['dracula', 'Dracula'], ['solarized', 'Solarized dark'], ['forest', 'Forest'], ['paper', 'Paper (light)'], ['rose', 'Rosé (light)']];
+// The colours that can be changed on top of a theme: [CSS variable, label].
+const CUSTOM_COLORS = [['--accent', 'Accent'], ['--link', 'Links'], ['--claude', 'Claude (busy line)'], ['--md-strong', 'Bold'],
+  ['--md-em', 'Italic'], ['--md-code', 'Inline code'], ['--md-h1', 'Heading 1'], ['--md-h2', 'Headings 2+'], ['--md-marker', 'List markers'],
+  ['--hl-keyword', 'Code: keywords'], ['--hl-string', 'Code: strings'], ['--hl-function', 'Code: functions'], ['--hl-comment', 'Code: comments']];
+// The cell header's buttons that can be hidden: [class, label].
+const HEAD_BUTTONS = [['act-handoff', 'Handoff'], ['act-detail', 'Detail level'], ['act-progress', 'Progress'], ['act-code', 'VS Code'],
+  ['act-terminal', 'Terminal'], ['act-reveal', 'Explorer'], ['act-collapse', 'Collapse'], ['act-max', 'Maximize'], ['act-close', 'Close']];
+const HEX = /^#[0-9a-f]{6}$/i;
+const lightQuery = window.matchMedia('(prefers-color-scheme: light)');
+
 /** Keeps known keys with the right types, so a hand-edited board.json cannot break the app. */
 function sanitizeSettings(x) {
   const v = x && typeof x === 'object' ? x : {};
+  const colors = {};
+  for (const [theme, set] of Object.entries(v.colors && typeof v.colors === 'object' ? v.colors : {})) {
+    if (!THEMES.some(([t]) => t === theme) || !set || typeof set !== 'object') continue;
+    const kept = Object.fromEntries(CUSTOM_COLORS.map(([name]) => [name, set[name]]).filter(([, c]) => typeof c === 'string' && HEX.test(c)));
+    if (Object.keys(kept).length) colors[theme] = kept;
+  }
   return {
-    theme: ['auto', 'dark', 'light'].includes(v.theme) ? v.theme : 'auto',
+    theme: THEMES.some(([t]) => t === v.theme) ? v.theme : 'auto',
     notify: v.notify !== false,
     autoUpdate: v.autoUpdate !== false,
     claudePath: typeof v.claudePath === 'string' ? v.claudePath.trim().slice(0, 500) : '',
+    autoCopy: v.autoCopy !== false,
+    weeklyBar: v.weeklyBar !== false,
+    // How the header buttons show: always, fading in as the pointer nears, or only while the header is hovered.
+    buttonReveal: ['always', 'near', 'hover'].includes(v.buttonReveal) ? v.buttonReveal : v.fadeButtons === true ? 'near' : 'always',
+    hiddenButtons: Array.isArray(v.hiddenButtons) ? HEAD_BUTTONS.map(([b]) => b).filter(b => v.hiddenButtons.includes(b)) : [],
+    colors,
   };
+}
+app.settings = sanitizeSettings(null);
+
+/** The theme in force: Auto resolves to Dark or Light. Custom colours are kept per resolved theme. */
+function activeTheme() {
+  const { theme } = app.settings;
+  return theme === 'auto' ? (lightQuery.matches ? 'light' : 'dark') : theme;
 }
 
 function applySettings() {
-  const { theme, claudePath } = app.settings;
-  if (theme === 'auto') delete document.documentElement.dataset.theme;
-  else document.documentElement.dataset.theme = theme;
-  invoke('set_claude_path', { path: claudePath || null }).catch(() => {}); // the backend uses it for every claude it starts
+  applyAppearance();
+  invoke('set_claude_path', { path: app.settings.claudePath || null }).catch(() => {}); // the backend uses it for every claude it starts
 }
+
+/** Theme, custom colours, hidden header buttons and the fade. Cheap, so a colour picker can call it while it is dragged. */
+function applyAppearance() {
+  const root = document.documentElement;
+  const { theme, colors, hiddenButtons, buttonReveal } = app.settings;
+  if (theme === 'auto') delete root.dataset.theme;
+  else root.dataset.theme = theme;
+  const custom = colors[activeTheme()] || {};
+  for (const [name] of CUSTOM_COLORS) {
+    if (custom[name]) root.style.setProperty(name, custom[name]);
+    else root.style.removeProperty(name);
+  }
+  // A custom accent has no hover shade of its own; the same colour beats the theme's unrelated one.
+  if (custom['--accent']) root.style.setProperty('--accent-hover', custom['--accent']);
+  else root.style.removeProperty('--accent-hover');
+  let style = document.getElementById('appearance-style');
+  if (!style) style = document.head.appendChild(h('style', { id: 'appearance-style' }));
+  style.textContent = hiddenButtons.map(b => `.cell-head > .${b} { display: none; }`).join('\n');
+  document.body.classList.toggle('fade-buttons', buttonReveal === 'near');
+  document.body.classList.toggle('hover-buttons', buttonReveal === 'hover');
+  if (buttonReveal !== 'near') clearButtonFade();
+  renderUsage();
+}
+lightQuery.addEventListener('change', () => { if (app.settings.theme === 'auto') { applyAppearance(); if (!settingsPanel.classList.contains('hidden')) renderSettings(); } });
 
 function changeSetting(key, value) {
   app.settings = { ...app.settings, [key]: value };
-  applySettings();
+  if (key === 'claudePath') applySettings();
+  else applyAppearance();
   saveState();
 }
+
+/** One custom colour for the theme in force; null puts the theme's own back. */
+function changeColor(name, value) {
+  const theme = activeTheme();
+  const set = { ...(app.settings.colors[theme] || {}) };
+  if (value) set[name] = value;
+  else delete set[name];
+  const colors = { ...app.settings.colors, [theme]: set };
+  if (!Object.keys(set).length) delete colors[theme];
+  changeSetting('colors', colors);
+}
+
+/** The value a colour has now (custom or the theme's), as #rrggbb for a colour input. */
+function currentColor(name) {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  if (HEX.test(v)) return v.toLowerCase();
+  const short = /^#([0-9a-f])([0-9a-f])([0-9a-f])$/i.exec(v);
+  return short ? `#${short[1]}${short[1]}${short[2]}${short[2]}${short[3]}${short[3]}`.toLowerCase() : '#000000';
+}
+
+const PREVIEW_MARKDOWN = '## Heading\nSome **bold** text, some *italic*, `inline code` and a [link](https://claude.com).\n\n'
+  + '- a list item\n- another\n\n```js\n// a comment\nfunction greet(name) {\n  return `Hello, ${name}`;\n}\n```';
+
+let settingsTab = 'general';
 
 function renderSettings() {
   const row = (name, desc, control) => h('div', { class: 'setting' }, h('div', { class: 'setting-main' }, h('span', { class: 'name', text: name }), desc ? h('span', { class: 'desc', text: desc }) : null), control);
@@ -3975,11 +4312,20 @@ function renderSettings() {
     el.addEventListener('change', () => onChange(el.value));
     return el;
   };
+  const tabs = [['general', 'General'], ['appearance', 'Appearance']];
+  settingsPanel.querySelector('#settings-tabs').replaceChildren(...tabs.map(([key, label]) => h('button', {
+    class: `settings-tab${settingsTab === key ? ' on' : ''}`, role: 'tab', 'aria-selected': String(settingsTab === key), text: label,
+    onclick: () => { settingsTab = key; renderSettings(); },
+  })));
+  const body = settingsPanel.querySelector('#settings-body');
+  if (settingsTab === 'appearance') {
+    body.replaceChildren(...renderAppearanceSettings(row, toggle, select));
+    return;
+  }
   const path = h('input', { type: 'text', value: app.settings.claudePath, placeholder: 'claude', spellcheck: 'false' });
   path.addEventListener('change', () => changeSetting('claudePath', path.value.trim()));
   const models = modelList().map(m => [m.value, m.displayName || m.value]);
-  settingsPanel.querySelector('#settings-body').replaceChildren(
-    row('Theme', 'Auto follows Windows.', select(app.settings.theme, [['auto', 'Auto'], ['dark', 'Dark'], ['light', 'Light']], v => changeSetting('theme', v))),
+  body.replaceChildren(
     row('Notifications', 'A notification when a turn finishes, or Claude needs you, while HQ is in the background.', toggle(app.settings.notify, v => changeSetting('notify', v))),
     row('Remote Control for new sessions', 'Continue sessions from claude.ai/code or the Claude app.', toggle(!!app.remoteDefault, v => { app.remoteDefault = v; saveState(); renderRemoteButtons(); })),
     row('Default model for new sessions', 'The same as picking a model in a session. HQ_MODEL still applies when none is picked.',
@@ -3987,6 +4333,92 @@ function renderSettings() {
     row('Check for HQ updates automatically', 'The Check for updates button in the sessions list always works.', toggle(app.settings.autoUpdate, v => changeSetting('autoUpdate', v))),
     row('Claude command', 'Path to the claude program, for sessions started from now on. Empty uses HQ_CLAUDE, else claude on PATH.', path));
 }
+
+function renderAppearanceSettings(row, toggle, select) {
+  const theme = activeTheme();
+  const custom = app.settings.colors[theme] || {};
+  const preview = h('div', { class: 'md theme-preview' });
+  renderMarkdown(preview, PREVIEW_MARKDOWN);
+  // Colour inputs change the page as they are dragged and are never redrawn by it, so the picker stays open.
+  const colorRow = ([name, label]) => {
+    const input = h('input', { type: 'color', value: currentColor(name), title: label });
+    input.addEventListener('input', () => changeColor(name, input.value.toLowerCase()));
+    const reset = h('button', { class: 'icon-btn', title: 'Back to the theme\'s colour', disabled: !custom[name] }, icon('discard'));
+    reset.addEventListener('click', () => { changeColor(name, null); renderSettings(); });
+    input.addEventListener('change', () => { reset.disabled = false; });
+    return h('label', { class: `color-row${custom[name] ? ' custom' : ''}` }, input, h('span', { class: 'name', text: label }), reset);
+  };
+  const resetAll = h('button', { class: 'link-btn', text: 'Reset all', disabled: !Object.keys(custom).length });
+  resetAll.addEventListener('click', () => { changeSetting('colors', Object.fromEntries(Object.entries(app.settings.colors).filter(([t]) => t !== theme))); renderSettings(); });
+  const buttons = h('div', { class: 'button-checks' }, HEAD_BUTTONS.map(([cls, label]) => {
+    const box = h('input', { type: 'checkbox' });
+    box.checked = !app.settings.hiddenButtons.includes(cls);
+    box.addEventListener('change', () => changeSetting('hiddenButtons',
+      box.checked ? app.settings.hiddenButtons.filter(b => b !== cls) : [...app.settings.hiddenButtons, cls]));
+    return h('label', null, box, label);
+  }));
+  const themeName = (THEMES.find(([t]) => t === theme) || [])[1] || theme;
+  return [
+    h('div', { class: 'settings-section', text: 'Theme' }),
+    row('Theme', 'Auto follows Windows.', select(app.settings.theme, THEMES, v => { changeSetting('theme', v); renderSettings(); })),
+    h('div', { class: 'setting-colors' },
+      h('div', { class: 'setting-colors-head' }, h('span', { text: `Colours for ${themeName}` }), resetAll),
+      h('div', { class: 'color-grid' }, CUSTOM_COLORS.map(colorRow)),
+      preview),
+    h('div', { class: 'settings-section', text: 'Top bar' }),
+    row('Weekly usage bar', 'A thin bar along the bottom of the usage button showing the weekly limit.', toggle(app.settings.weeklyBar, v => changeSetting('weeklyBar', v))),
+    h('div', { class: 'settings-section', text: 'Sessions' }),
+    row('Copy on select', 'Selecting text in a chat copies it, as in a terminal.', toggle(app.settings.autoCopy, v => changeSetting('autoCopy', v))),
+    row('Header buttons show', 'Fade in: faint until the pointer comes near. On hover: hidden until the pointer is over the header.',
+      select(app.settings.buttonReveal, [['always', 'Always'], ['near', 'Fade in near the pointer'], ['hover', 'Only on hover']], v => changeSetting('buttonReveal', v))),
+    h('div', { class: 'setting column' }, h('div', { class: 'setting-main' }, h('span', { class: 'name', text: 'Header buttons' }),
+      h('span', { class: 'desc', text: 'Unticked buttons are hidden; their shortcuts still work.' })), buttons),
+  ];
+}
+
+// ---------- header buttons that fade in as the pointer comes near ----------
+
+const FADE_NEAR_PX = 40;   // full strength within this distance of a button
+const FADE_FAR_PX = 160;   // faintest beyond this
+const FADE_MIN = 0.12;
+const faded = new Set();   // headers whose buttons have a --near value set
+let fadeFrame = 0;
+let fadePoint = null;
+
+function clearButtonFade() {
+  for (const head of faded) for (const b of head.querySelectorAll(':scope > .icon-btn')) b.style.removeProperty('--near');
+  faded.clear();
+}
+
+document.addEventListener('pointermove', e => {
+  if (app.settings.buttonReveal !== 'near') return;
+  fadePoint = [e.clientX, e.clientY];
+  if (fadeFrame) return;
+  fadeFrame = requestAnimationFrame(() => {
+    fadeFrame = 0;
+    const [x, y] = fadePoint;
+    const near = new Set();
+    for (const head of document.querySelectorAll('.cell-head')) {
+      const r = head.getBoundingClientRect();
+      if (y < r.top - FADE_FAR_PX || y > r.bottom + FADE_FAR_PX || x < r.left - FADE_FAR_PX || x > r.right + FADE_FAR_PX) continue;
+      near.add(head);
+      for (const b of head.querySelectorAll(':scope > .icon-btn')) {
+        const br = b.getBoundingClientRect();
+        if (!br.width) continue;
+        const d = Math.hypot(Math.max(br.left - x, 0, x - br.right), Math.max(br.top - y, 0, y - br.bottom));
+        const t = Math.min(1, Math.max(0, (d - FADE_NEAR_PX) / (FADE_FAR_PX - FADE_NEAR_PX)));
+        b.style.setProperty('--near', (1 - t * (1 - FADE_MIN)).toFixed(2));
+      }
+    }
+    for (const head of faded) {
+      if (near.has(head)) continue;
+      for (const b of head.querySelectorAll(':scope > .icon-btn')) b.style.removeProperty('--near');
+    }
+    faded.clear();
+    for (const head of near) faded.add(head);
+  });
+});
+document.documentElement.addEventListener('mouseleave', clearButtonFade);
 
 function openSettings() {
   closePicker();

@@ -49,10 +49,15 @@ markdown.use({
   },
 });
 
+// Fence languages that get a Preview button (Markdown) or a Run button (a command for a terminal).
+const MARKDOWN_LANGS = new Set(['md', 'markdown', 'mdx']);
+const SHELL_LANGS = new Set(['bash', 'sh', 'shell', 'zsh', 'console', 'terminal', 'powershell', 'ps1', 'pwsh', 'ps', 'cmd', 'bat', 'batch']);
+
 /**
  * A fenced code block with its language and a copy button (handled in app.js). Code tagged with
  * a language highlight.js knows is coloured; untagged code is not guessed at, since a block that
- * is still streaming would change colours as it grows.
+ * is still streaming would change colours as it grows. Markdown gets a Preview button, and
+ * shell languages a Run button that opens a terminal running the code (also in app.js).
  */
 function codeBlock(code, lang) {
   const known = lang && window.hljs && hljs.getLanguage(lang) ? lang : '';
@@ -63,8 +68,14 @@ function codeBlock(code, lang) {
     } catch { /* shown plain */ }
   }
   const cls = known ? ` class="hljs language-${escapeHtml(known.replace(/[^\w+#-]/g, ''))}"` : '';
-  return `<div class="code-block"><div class="code-head"><span class="code-lang">${escapeHtml(lang || 'text')}</span>`
-    + '<button class="code-copy" title="Copy code" tabindex="-1"><span class="codicon codicon-copy"></span></button></div>'
+  const key = (lang || '').toLowerCase();
+  const preview = MARKDOWN_LANGS.has(key)
+    ? '<button class="code-act code-preview" title="Preview the Markdown" tabindex="-1"><span class="codicon codicon-open-preview"></span></button>' : '';
+  const shell = /^(cmd|bat|batch)$/.test(key) ? 'cmd' : 'PowerShell';
+  const run = SHELL_LANGS.has(key) && code.trim()
+    ? `<button class="code-act code-run" title="Run in ${shell}, in a new terminal in this session's folder" tabindex="-1"><span class="codicon codicon-play"></span></button>` : '';
+  return `<div class="code-block" data-lang="${escapeHtml(key)}"><div class="code-head"><span class="code-lang">${escapeHtml(lang || 'text')}</span>`
+    + `${preview}${run}<button class="code-copy" title="Copy code" tabindex="-1"><span class="codicon codicon-copy"></span></button></div>`
     + `<pre><code${cls}>${body}</code></pre></div>`;
 }
 
@@ -122,6 +133,8 @@ function renderMarkdownLive(el, text, state) {
   for (const node of state.tail || []) node.remove();
   const last = tokens[tokens.length - 1];
   state.tail = last ? render(last) : [];
+  // Marked as still being written (a code block's Run button waits for the final render).
+  for (const node of state.tail) if (node.nodeType === 1) node.classList.add('streaming');
   el.append(...state.tail);
 }
 

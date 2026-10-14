@@ -268,6 +268,86 @@ fn open_terminal(path: Option<String>) -> Result<(), String> {
     cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
+/// Opens a terminal in `path` that runs `command` (a shell block from a reply, run on the user's
+/// click) and stays open. The command goes in a script file rather than on the command line, so
+/// neither wt's `;` splitting nor shell quoting can change it. `shell` is `cmd` for batch, else
+/// PowerShell (pwsh when installed, since it understands `&&` like the shells the blocks are
+/// usually written for).
+#[tauri::command]
+fn run_in_terminal(path: String, command: String, shell: Option<String>) -> Result<(), String> {
+    if !Path::new(&path).is_dir() {
+        return Err("folder does not exist".into());
+    }
+    if command.trim().is_empty() {
+        return Err("nothing to run".into());
+    }
+    let cmd = shell.as_deref() == Some("cmd");
+    let script = write_run_script(&command, cmd).map_err(|e| format!("could not write the script ({e})"))?;
+    let script = script.to_string_lossy().into_owned();
+    let program = if cmd { "cmd.exe".to_string() } else { powershell_program() };
+    let args: Vec<String> = if cmd {
+        vec!["/k".into(), script]
+    } else {
+        ["-NoLogo", "-NoExit", "-ExecutionPolicy", "Bypass", "-File"].iter().map(|s| s.to_string()).chain([script]).collect()
+    };
+    let mut wt = std::process::Command::new("wt.exe");
+    // wt treats `;` as a command separator, even inside an argument.
+    wt.args(["-d", &path.replace(';', "\\;"), &program]);
+    wt.args(args.iter().map(|a| a.replace(';', "\\;")));
+    if wt.spawn().is_ok() {
+        return Ok(());
+    }
+    let mut direct = std::process::Command::new(&program);
+    direct.current_dir(&path).args(&args);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+        direct.creation_flags(CREATE_NEW_CONSOLE);
+    }
+    direct.spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// `pwsh.exe` when it is on PATH, else Windows PowerShell.
+fn powershell_program() -> String {
+    let found = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).any(|dir| dir.join("pwsh.exe").is_file()))
+        .unwrap_or(false);
+    if found { "pwsh.exe" } else { "powershell.exe" }.into()
+}
+
+/// Writes the command to `%TEMP%\hq-run\`, as a `.cmd` or a `.ps1` that first echoes it. Scripts
+/// older than a day are removed. A `.cmd` runs with batch rules (cmd re-reads it as it goes, and a
+/// literal `%` must be `%%`); that is accepted for what are short, one-off commands.
+fn write_run_script(command: &str, cmd: bool) -> std::io::Result<std::path::PathBuf> {
+    let dir = std::env::temp_dir().join("hq-run");
+    std::fs::create_dir_all(&dir)?;
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let old = entry.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
+            if old.is_some_and(|age| age.as_secs() > 24 * 60 * 60) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let file = dir.join(format!("run-{stamp}.{}", if cmd { "cmd" } else { "ps1" }));
+    let body = if cmd {
+        // cmd reads scripts in the console's code page; switching to UTF-8 first keeps non-ASCII intact.
+        format!("@chcp 65001 >nul\r\n{}\r\n", command.replace("\r\n", "\n").replace('\n', "\r\n"))
+    } else {
+        // A BOM, or Windows PowerShell reads the file as ANSI. In a single-quoted string only quotes are
+        // special, and PowerShell takes the curly single quotes as quotes too, so each is doubled.
+        let echo: String = command.chars().flat_map(|c| match c {
+            '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => vec![c, c],
+            _ => vec![c],
+        }).collect();
+        format!("\u{feff}Write-Host '> {echo}' -ForegroundColor DarkGray\r\n{command}\r\n")
+    };
+    std::fs::write(&file, body)?;
+    Ok(file)
+}
+
 #[tauri::command]
 async fn check_update(app: AppHandle) -> Result<Option<update::UpdateInfo>, String> {
     update::check(&app).await
@@ -438,6 +518,7 @@ fn main() {
             reveal_folder,
             open_in_vscode,
             open_terminal,
+            run_in_terminal,
             request_attention,
             check_update,
             install_update,

@@ -22,6 +22,7 @@
     </button>
     <button id="usage" class="usage empty" title="Plan usage">
       <span class="codicon codicon-dashboard"></span><span class="usage-text">&hellip;</span>
+      <span class="usage-week" aria-hidden="true"><span></span></span>
     </button>
     <button id="terminal-btn" class="icon-btn big" title="Open a terminal"><span class="codicon codicon-terminal"></span></button>
     <button id="settings-btn" class="icon-btn" title="Settings (Ctrl+,)"><span class="codicon codicon-settings-gear"></span></button>
@@ -95,6 +96,7 @@
 
   <div id="settings" class="picker settings hidden" role="dialog" aria-label="Settings">
     <div class="picker-title">Settings</div>
+    <div id="settings-tabs" class="settings-tabs" role="tablist"></div>
     <div id="settings-body" class="settings-body"></div>
   </div>
 
@@ -139,7 +141,7 @@
           <span class="busy-verb"><span class="busy-word"></span><span class="sweep"><span class="sweep-name busy-word"></span></span></span>
         </div>
         <div class="attachments"></div>
-        <textarea rows="1" placeholder="Ask Claude…  (Enter to send, Shift+Enter for new line)"></textarea>
+        <textarea rows="1" placeholder="Ask Claude…  (Enter to send, Shift+Enter for new line, paste or drop images)"></textarea>
         <div class="composer-bar">
           <select class="mode" title="Permission mode">
             <option value="default">Ask before edits</option>
@@ -152,8 +154,6 @@
           <button class="icon-btn act-mcp" title="MCP servers"><span class="codicon codicon-plug"></span></button>
           <button class="icon-btn act-remote hidden"><span class="codicon codicon-broadcast"></span></button>
           <button class="ctx-btn act-context hidden" aria-label="Context window"><span class="ctx-ring"></span><span class="ctx-text"></span></button>
-          <button class="icon-btn act-attach" title="Attach images (you can also paste or drop them)"><span class="codicon codicon-file-media"></span></button>
-          <input type="file" class="file-input hidden" accept="image/png,image/jpeg,image/gif,image/webp" multiple />
           <span class="spacer"></span>
           <span class="meta"></span>
           <button class="icon-btn act-stop hidden" title="Stop (Esc)"><span class="codicon codicon-debug-stop"></span></button>
