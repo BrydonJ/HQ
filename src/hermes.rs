@@ -28,9 +28,25 @@ use crate::store::{self, TranscriptChunk};
 /// ACP version spoken; Hermes 0.21 answers 1.
 const PROTOCOL_VERSION: u64 = 1;
 
-/// The `hermes` executable: `HQ_HERMES` when set, otherwise whatever is on PATH.
-fn hermes_program() -> String {
-    std::env::var("HQ_HERMES").ok().filter(|p| !p.is_empty()).unwrap_or_else(|| "hermes".into())
+/// The `hermes` executable: `HQ_HERMES` when set, otherwise whatever is on PATH. Windows installs
+/// of Hermes 0.22 ship only `hermes.cmd`, which `Command` never finds by bare name (it only
+/// tries `.exe`), so PATH is searched here.
+fn hermes_program() -> PathBuf {
+    if let Some(p) = std::env::var_os("HQ_HERMES").filter(|p| !p.is_empty()) {
+        return p.into();
+    }
+    #[cfg(windows)]
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            for ext in ["exe", "cmd", "bat"] {
+                let p = dir.join("hermes").with_extension(ext);
+                if p.is_file() {
+                    return p;
+                }
+            }
+        }
+    }
+    "hermes".into()
 }
 
 /// Where HQ keeps its display copy of Hermes conversations, next to board.json.
@@ -57,7 +73,7 @@ pub fn spawn(app: &AppHandle, opts: SpawnOptions, events: Channel<InvokeResponse
         .stderr(Stdio::piped());
     hide_console(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| {
-        format!("Could not start `{} acp` ({e}). Is Hermes Agent installed and on PATH?", hermes_program())
+        format!("Could not start `{} acp` ({e}). Is Hermes Agent installed and on PATH?", hermes_program().display())
     })?;
     let pipes = (child.stdin.take(), child.stdout.take(), child.stderr.take());
     let (Some(stdin), Some(stdout), Some(stderr)) = pipes else {
@@ -281,7 +297,7 @@ impl OneShot {
             cmd.current_dir(cwd);
         }
         hide_console(&mut cmd);
-        let mut child = cmd.spawn().map_err(|e| format!("Could not start `{} acp` ({e})", hermes_program()))?;
+        let mut child = cmd.spawn().map_err(|e| format!("Could not start `{} acp` ({e})", hermes_program().display()))?;
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
             let _ = child.kill();
             return Err("hermes pipes unavailable".into());
