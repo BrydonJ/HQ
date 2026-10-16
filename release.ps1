@@ -10,6 +10,12 @@
      Installed copies of HQ read latest.json from the newest release there and update
      themselves (see src/update.rs).
 
+  Mac: the Mac build runs on GitHub (the "Build HQ for macOS" workflow, run with this same
+  version), then `gh run download <run-id> -n hq-macos -D mac-artifacts`. Pass that folder as
+  -MacArtifacts and the release also gets the .dmg and the updater tarball, and latest.json gets
+  darwin-aarch64 and darwin-x86_64 entries (one universal tarball serves both). Without
+  -MacArtifacts the release is Windows-only, as before.
+
   The private key never enters the repo. If it is lost, installed copies can no longer update
   and every user must install the next version by hand.
 
@@ -23,7 +29,9 @@ param(
   [string] $Notes,
   # Where installers are published. Must match the endpoint in tauri.conf.json.
   [string] $Repo = 'BrydonJ/HQ-releases',
-  [string] $Key = "$env:USERPROFILE\.tauri\hq-updater.key"
+  [string] $Key = "$env:USERPROFILE\.tauri\hq-updater.key",
+  # A folder holding the Mac build's HQ_<version>_universal.dmg, HQ.app.tar.gz and HQ.app.tar.gz.sig.
+  [string] $MacArtifacts
 )
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
@@ -51,6 +59,21 @@ if (-not (Select-String -Path tauri.conf.json -SimpleMatch $endpoint -Quiet)) {
   throw "tauri.conf.json does not use $endpoint, so installed copies would never see this release."
 }
 Invoke-Checked 'gh auth status' { gh auth status *> $null }
+
+# The Mac files are checked up front, so a wrong folder fails before anything is built or tagged.
+$macFiles = $null
+if ($MacArtifacts) {
+  function Find-Mac([string] $name) {
+    $found = Get-ChildItem -Path $MacArtifacts -Recurse -File -Filter $name -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $found) { throw "$name not found under $MacArtifacts (is it the artifact of a Mac build for $Version?)." }
+    $found
+  }
+  $macFiles = [pscustomobject]@{
+    Dmg = Find-Mac "HQ_${Version}_universal.dmg"
+    Tar = Find-Mac 'HQ.app.tar.gz'
+    Sig = Find-Mac 'HQ.app.tar.gz.sig'
+  }
+}
 
 if (-not $Notes) {
   $previous = git tag --sort=-creatordate --list 'v*' | Select-Object -First 1
@@ -83,6 +106,17 @@ $latest = [ordered]@{
     }
   }
 }
+$assets = @($installer.FullName, "$($installer.FullName).sig")
+if ($macFiles) {
+  # Both Mac architectures update from the one universal tarball.
+  $macEntry = [ordered]@{
+    signature = ([IO.File]::ReadAllText($macFiles.Sig.FullName)).Trim()
+    url       = "https://github.com/$Repo/releases/download/$tag/$($macFiles.Tar.Name)"
+  }
+  $latest.platforms['darwin-aarch64'] = $macEntry
+  $latest.platforms['darwin-x86_64'] = $macEntry
+  $assets += @($macFiles.Dmg.FullName, $macFiles.Tar.FullName, $macFiles.Sig.FullName)
+}
 $latestPath = "$bundle\latest.json"
 [IO.File]::WriteAllText($latestPath, ($latest | ConvertTo-Json -Depth 5), [Text.UTF8Encoding]::new($false))
 
@@ -90,6 +124,6 @@ if (git status --porcelain) { Invoke-Checked 'git commit' { git commit -q -am "R
 Invoke-Checked 'git tag' { git tag -a $tag -m "HQ $tag" }
 Invoke-Checked 'git push' { git push -q origin HEAD $tag }
 Invoke-Checked 'gh release create' {
-  gh release create $tag --repo $Repo --title "HQ $tag" --notes $Notes $installer.FullName "$($installer.FullName).sig" $latestPath
+  gh release create $tag --repo $Repo --title "HQ $tag" --notes $Notes @assets $latestPath
 }
 Write-Host "Published HQ $tag to https://github.com/$Repo/releases/tag/$tag"

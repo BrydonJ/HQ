@@ -182,6 +182,14 @@ class Cell {
     // false showed everything. Cells with no flag start at the new default, 2.
     this.detail = [1, 2, 3].includes(detail) ? detail : clean === true ? 3 : clean === false ? 1 : 2;
     this.progressView = !!progress; // the progress panel over the chat (the checklist button)
+    this.wmArmed = false;          // waiting mode: while Claude works, a calm progress view stands in for the chat
+    this.wmWorked = false;         // work has been seen since arming (an idle cell arms and waits for it)
+    this.wmView = false;           // the waiting view is on screen now (the chat is display:none)
+    this.wmTimer = 0;              // one timeout: finishes waiting mode once the cell has stayed idle
+    this.wmStick = true;           // stickToBottom, kept while the chat is hidden
+    this.taskLine = '';            // "3/7 · Creating b.txt": the task list at a glance, in the header
+    this.sideTaskLine = '';        // the same without the live tool name, for the sidebar (which a change rebuilds)
+    this.askTasks = false;         // the composer's task-list toggle: asks for a list on the next prompt only
     this.collapsed = !!collapsed;  // only the header shows, in the dock under the grid
     this.savedScroll = null;       // [scrollTop, stickToBottom] from when the chat was collapsed
     this.expandedAt = 0;
@@ -207,6 +215,7 @@ class Cell {
     this.bgTasks = [];         // background agents and shells still running: { id, type, description }
     this.unread = false;
     this.pending = new Map();  // control request_id -> prompt element
+    this.promptsMin = false;   // the prompts area is folded to its bar (a class only, so typed answers survive)
     this.controls = new Map(); // our control request_id -> resolver awaiting Claude's reply
     this.tools = new Map();    // tool_use_id -> { item, body }
     this.tasks = new Map();    // Claude's task list: task id -> { subject, activeForm, status }
@@ -228,7 +237,7 @@ class Cell {
     this.turnStart = null;     // when the current turn started (ms)
     this.turnTools = 0;        // top-level tool calls in the current turn
     this.currentTool = null;   // { id, name, summary } of the latest top-level tool still running
-    this.statusAnswer = null;  // { text, at, percent, asking } from the Ask Claude button
+    this.statusAnswer = null;  // { text, at, percent, asking } from the Sitrep button
     this.progressTimer = null;
     this.replaying = false;    // loadHistory is replaying the transcript
     this.live = null;        // { msgId, blocks: Map<index, {item, md, text}> } for streamed text
@@ -245,6 +254,7 @@ class Cell {
     this.el = el;
     this.msgs = el.querySelector('.messages');
     this.prompts = el.querySelector('.prompts');
+    this.promptsBar = el.querySelector('.prompts-bar');
     this.input = el.querySelector('textarea');
     this.modeSel = el.querySelector('.mode');
     this.modelBtn = el.querySelector('.act-model');
@@ -257,6 +267,11 @@ class Cell {
     this.progressBtn = el.querySelector('.act-progress');
     this.progressEl = el.querySelector('.progress-panel');
     this.headBar = el.querySelector('.head-progress');
+    this.taskEl = el.querySelector('.cell-tasks');
+    this.waitBtn = el.querySelector('.act-waiting');
+    this.waitEl = el.querySelector('.waiting-view');
+    this.waitBody = el.querySelector('.wv-body');
+    this.taskBtn = el.querySelector('.act-tasklist');
     this.bgEl = el.querySelector('.bg-tasks');
     this.stateEl = el.querySelector('.cell-state');
     this.codeBtn = el.querySelector('.act-code');
@@ -273,6 +288,8 @@ class Cell {
     this.setTitle(this.title);
     this.applyDetail();
     this.applyProgressView();
+    this.applyWaitingMode();
+    this.setAskTasks(false);
     this.applyCollapsed();
     this.applyMissing();
     this.stateEl.textContent = stateOf(this)[1];
@@ -305,6 +322,8 @@ class Cell {
     });
     this.detailBtn.addEventListener('click', () => this.setDetail(this.detail % 3 + 1));
     this.progressBtn.addEventListener('click', () => this.setProgressView(!this.progressView));
+    this.waitBtn.addEventListener('click', () => this.setWaitingMode(!this.wmArmed));
+    this.taskBtn.addEventListener('click', () => this.setAskTasks(!this.askTasks));
     el.querySelector('.act-max').addEventListener('click', () => toggleMaximize(this));
     el.querySelector('.act-close').addEventListener('click', e => this.requestClose(e.currentTarget));
     el.querySelector('.act-terminal').addEventListener('click', () => invoke('open_terminal', { path: this.cwd }).catch(err => this.notice(String(err), true)));
@@ -371,7 +390,7 @@ class Cell {
     this.input.addEventListener('click', () => slashUpdate(this)); // the caret moved into or out of a "/name"
     this.input.addEventListener('keyup', e => { if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Home' || e.key === 'End') slashUpdate(this); });
     this.msgs.addEventListener('scroll', () => {
-      if (this.collapsed) return; // a hidden scroller reads as scrolled to the bottom
+      if (this.chatHidden) return; // a hidden scroller reads as scrolled to the bottom
       const m = this.msgs;
       this.stickToBottom = m.scrollHeight - m.scrollTop - m.clientHeight < 40;
     });
@@ -380,6 +399,7 @@ class Cell {
     this.msgs.addEventListener('click', e => onCodeActionClick(e, this));
     this.msgs.addEventListener('click', onImageClick);
     this.attachEl.addEventListener('click', onImageClick);
+    this.promptsBar.addEventListener('click', () => this.setPromptsMin(!this.promptsMin));
     this.prompts.addEventListener('click', onLinkClick);
     this.prompts.addEventListener('click', onCodeCopyClick);
     this.prompts.addEventListener('click', e => onCodeActionClick(e, this));
@@ -394,7 +414,7 @@ class Cell {
 
   /** Reading scrollHeight forces a layout, so a burst of new items scrolls once, in the next frame. */
   scheduleScroll() {
-    if (this.scrollFrame || !this.stickToBottom) return;
+    if (this.scrollFrame || !this.stickToBottom || this.chatHidden) return;
     this.scrollFrame = requestAnimationFrame(() => {
       this.scrollFrame = 0;
       this.scroll();
@@ -414,7 +434,7 @@ class Cell {
     m.scrollTop = 1e9;
     if (frames <= 0) return;
     requestAnimationFrame(() => {
-      if (!this.stickToBottom || this.collapsed) return;
+      if (!this.stickToBottom || this.chatHidden) return;
       const gap = m.scrollHeight - m.scrollTop - m.clientHeight;
       // Done once the bottom has held for a few frames in a row.
       if (gap <= 2 && steady >= 3) return;
@@ -561,12 +581,13 @@ class Cell {
   setCollapsed(on) {
     if (this.collapsed === on) return;
     if (on) {
-      this.savedScroll = [this.msgs.scrollTop, this.stickToBottom];
+      this.savedScroll = this.wmView ? [this.wmTop, this.wmStick] : [this.msgs.scrollTop, this.stickToBottom];
       if (app.maximized === this) app.maximized = null;
       if (menuState.cell === this) closeMenu();
     }
     this.collapsed = on;
     this.applyCollapsed();
+    this.syncProgressTimer();
     layout();
     if (!on) {
       this.expandedAt = Date.now();
@@ -588,7 +609,7 @@ class Cell {
   applyCollapsed() {
     this.el.classList.toggle('collapsed', this.collapsed);
     this.collapseBtn.querySelector('.codicon').className = `codicon codicon-${this.collapsed ? 'chrome-restore' : 'chrome-minimize'}`;
-    this.collapseBtn.title = this.collapsed ? 'Expand (Ctrl+Shift+M)' : 'Collapse to the dock (Ctrl+Shift+M)';
+    this.collapseBtn.title = keyLabel(this.collapsed ? 'Expand (Ctrl+Shift+M)' : 'Collapse to the dock (Ctrl+Shift+M)');
   }
 
   // ---------- VS Code ----------
@@ -699,6 +720,11 @@ class Cell {
     this.limitHit = false;
     this.turnTools = 0;
     this.currentTool = null;
+    this.sealTasks();
+  }
+
+  /** A task list that is all done belongs to the last prompt: the next task starts a new one. */
+  sealTasks() {
     const list = this.taskItems();
     if (list.length && list.every(t => t.status === 'completed')) this.tasksStale = true;
   }
@@ -710,10 +736,11 @@ class Cell {
   /**
    * Follows Claude's task list the way Claude Code rebuilds it from a transcript: only top-level
    * calls count, a TaskCreate gets its id from its result, and TodoWrite (the older tool, used
-   * when CLAUDE_CODE_ENABLE_TASKS=false) sends the whole list each time. In HQ sessions Claude
-   * Code only gives these tools to older models (4.6 and earlier, and Haiku 4.5); Sonnet 5.5 and
-   * Opus 5.5 work without a list, so on those the panel relies on Ask Claude for a percentage. HQ
-   * deliberately does not force the tools on (CLAUDE_CODE_ENABLE_TODO_TOOLS).
+   * when CLAUDE_CODE_ENABLE_TASKS=false) sends the whole list each time. HQ starts Claude with
+   * CLAUDE_CODE_ENABLE_TODO_TOOLS=1, so newer models get TaskCreate/TaskUpdate too. Shapes checked
+   * against Claude Code 2.1.301: TaskCreate {subject, description, activeForm} is answered with
+   * "Task #N created successfully: ..."; TaskUpdate is {taskId, status, ...}. Resume replays the
+   * same calls, which rebuilds the list. Without the tools the panel relies on Sitrep.
    */
   trackTaskCall(block) {
     const input = block.input || {};
@@ -779,7 +806,7 @@ class Cell {
     }
   }
 
-  /** Asks Claude, beside the running turn, how far it is; Claude answers without stopping its work. */
+  /** Asks the agent, beside the running turn, for a quick sitrep; it answers without stopping its work. */
   async askStatus() {
     if (this.proc == null || (this.statusAnswer && this.statusAnswer.asking)) return;
     this.statusAnswer = { ...this.statusAnswer, asking: true };
@@ -788,13 +815,18 @@ class Cell {
     const r = reply && reply.subtype === 'success' && reply.response;
     let text = r && typeof r.response === 'string' ? r.response.trim() : '';
     let percent = null;
-    const m = text.match(/^\s*Progress:\s*(\d{1,3})\s*%[^\n]*\n?/i);
+    // Tolerates markdown around the label: "**Progress:** 40%", "Progress - 40%", "# Progress: 40 %".
+    const m = text.match(/^[\s>#*_`-]*Progress\b[\s:*_`–—-]*(\d{1,3})\s*%[^\n]*\n?/i);
     if (m) {
       percent = Math.min(100, Number(m[1]));
       text = text.slice(m[0].length).trim();
+      // "Nothing in progress" while the turn runs contradicts the status, so show the words without a percentage.
+      // Only the label line and the first sentence count: a later "no background work is running" is a detail.
+      if (this.status === 'running' && /\b(?:nothing|no (?:task|work|request)s?)\s+(?:is |are |was |currently |actively )*(?:in progress|running|underway|being worked)/i.test(m[0] + text.split(/[.!?](?:\s|$)|\n/, 1)[0])) percent = null;
     }
+    const name = this.backend === 'hermes' ? 'Hermes' : 'Claude';
     const error = !text && percent == null;
-    if (error) text = reply && reply.subtype === 'error' ? `Could not ask: ${reply.error || 'rejected by Claude'}` : 'Claude gave no answer.';
+    if (error) text = reply && reply.subtype === 'error' ? `Could not ask: ${reply.error || `rejected by ${name}`}` : `${name} gave no answer.`;
     this.statusAnswer = { text, percent, error, at: Date.now(), asking: false };
     this.renderProgress();
   }
@@ -813,14 +845,16 @@ class Cell {
     this.renderProgress();
   }
 
-  /** The elapsed time ticks once a second while the panel is open and Claude is working. */
+  /** The elapsed time ticks once a second while the panel is open and Claude is working, and the cell can be seen. */
   syncProgressTimer() {
-    const need = this.progressView && (this.status === 'running' || this.bgTasks.length > 0);
+    const need = (this.progressView || this.wmView) && (this.status === 'running' || this.bgTasks.length > 0) && !this.collapsed && !document.hidden;
+    const tick = () => {
+      const el = (this.wmView ? this.waitBody : this.progressEl).querySelector('.pv-elapsed');
+      if (el && this.turnStart) el.textContent = formatDuration(Date.now() - this.turnStart);
+    };
     if (need && !this.progressTimer) {
-      this.progressTimer = setInterval(() => {
-        const el = this.progressEl.querySelector('.pv-elapsed');
-        if (el && this.turnStart) el.textContent = formatDuration(Date.now() - this.turnStart);
-      }, 1000);
+      tick(); // catch up at once on coming back into view
+      this.progressTimer = setInterval(tick, 1000);
     } else if (!need && this.progressTimer) {
       clearInterval(this.progressTimer);
       this.progressTimer = null;
@@ -848,8 +882,10 @@ class Cell {
     const headBar = live && (running || taskPct < 100);
     this.headBar.classList.toggle('hidden', !headBar);
     if (headBar) this.headBar.style.setProperty('--pct', `${taskPct}%`);
+    this.drawTaskLine(list, headBar, done);
     this.syncProgressTimer();
-    if (!this.progressView) return;
+    const asWaiting = this.wmView; // the waiting view takes the panel's place (the chat is hidden under both)
+    if (!this.progressView && !asWaiting) return;
 
     const waiting = this.pending.size > 0;
     const [state, stateCls] = waiting ? ['Waiting for you', 'waiting']
@@ -858,15 +894,16 @@ class Cell {
       : this.status === 'exited' ? ['Stopped', 'exited']
       : ['Idle', ''];
     const answer = this.statusAnswer;
+    const agent = this.backend === 'hermes' ? 'Hermes' : 'Claude';
     const estimate = answer && answer.percent != null && this.turnStart && answer.at >= this.turnStart ? answer.percent : null;
     const pct = live ? taskPct : estimate;
     const barLabel = live ? `${taskPct}%  ·  ${done} of ${list.length} tasks done`
-      : estimate != null ? `About ${estimate}%  ·  Claude's estimate`
-      : running ? 'No task list. Ask Claude for a rough percentage.' : '';
+      : estimate != null ? `About ${estimate}%  ·  ${agent}'s estimate`
+      : running ? 'No task list. Ask for a sitrep to get a rough percentage.' : '';
 
     const ask = h('button', { class: 'btn pv-ask', disabled: this.proc == null || (answer && answer.asking),
-      title: this.proc == null ? 'Claude starts when you send a message' : 'Ask Claude what it is doing and what is left, without stopping it' },
-    icon(answer && answer.asking ? 'loading codicon-modifier-spin' : 'comment-discussion'), answer && answer.asking ? 'Asking…' : 'Ask Claude');
+      title: this.proc == null ? `${agent} starts when you send a message` : `Asks ${agent} for a quick progress report on what it is doing and what is left, without interrupting it` },
+    icon(answer && answer.asking ? 'loading codicon-modifier-spin' : 'comment-discussion'), answer && answer.asking ? 'Getting sitrep…' : 'Sitrep');
     ask.addEventListener('click', () => this.askStatus());
 
     const turnActive = (running || waiting) && this.turnStart;
@@ -876,7 +913,9 @@ class Cell {
       turnActive && this.turnTools ? h('span', { text: `${this.turnTools} tool call${this.turnTools === 1 ? '' : 's'}` }) : null,
       h('span', { class: 'spacer' }),
       ask,
-      h('button', { class: 'icon-btn pv-close', title: 'Close', onclick: () => this.setProgressView(false) }, icon('close')));
+      asWaiting
+        ? h('button', { class: 'icon-btn pv-close', title: 'Show the chat (turns waiting mode off)', onclick: () => this.setWaitingMode(false) }, icon('comment'))
+        : h('button', { class: 'icon-btn pv-close', title: 'Close', onclick: () => this.setProgressView(false) }, icon('close')));
 
     let bar = null;
     if (pct != null || running) {
@@ -887,7 +926,7 @@ class Cell {
     }
 
     let now = null;
-    if (waiting) now = h('div', { class: 'pv-now' }, icon('bell'), 'Claude needs your answer or permission below.');
+    if (waiting) now = h('div', { class: 'pv-now' }, icon('bell'), `${agent} needs your answer or permission below.`);
     else if (running) {
       const t = this.currentTool;
       now = h('div', { class: 'pv-now' }, icon('debug-stackframe'),
@@ -923,13 +962,107 @@ class Cell {
       }))) : null;
 
     const answerEl = answer && answer.at ? h('div', { class: 'pv-section' },
-      h('div', { class: 'pv-title' }, 'Claude says', stamp(answer.at)),
+      h('div', { class: 'pv-title' }, `${agent} says`, stamp(answer.at)),
       h('div', { class: `pv-answer${answer.error ? ' error' : ''}`, text: answer.text })) : null;
 
     const empty = !bar && !now && !tasks && !agentsEl
       ? h('div', { class: 'pv-empty', text: 'Nothing is running. Progress shows here while Claude works.' }) : null;
 
-    this.progressEl.replaceChildren(...[head, bar, now, tasks, agentsEl, answerEl, empty].filter(Boolean));
+    (asWaiting ? this.waitBody : this.progressEl).replaceChildren(...[head, bar, now, tasks, agentsEl, answerEl, empty].filter(Boolean));
+  }
+
+  /** "3/7 · Creating b.txt" for the header and the sessions list; touches the DOM only when it changes. */
+  drawTaskLine(list, show, done) {
+    let line = '';
+    let side = '';
+    if (show) {
+      const cur = list.find(t => t.status === 'in_progress');
+      const t = this.currentTool;
+      const task = cur ? cur.activeForm || cur.subject : '';
+      const what = task || (this.status === 'running' && t ? `${t.name} ${t.summary}` : '');
+      line = `${done}/${list.length}${what ? ` · ${firstLine(what, 140)}` : ''}`;
+      side = `${done}/${list.length}${task ? ` · ${firstLine(task, 140)}` : ''}`;
+    }
+    if (line !== this.taskLine) {
+      this.taskLine = line;
+      this.taskEl.textContent = line;
+      this.taskEl.title = line ? `Tasks: ${line}` : '';
+      this.taskEl.classList.toggle('hidden', !line);
+    }
+    if (side !== this.sideTaskLine) {
+      this.sideTaskLine = side;
+      renderSidebar();
+    }
+  }
+
+  // ---------- waiting mode ----------
+
+  setWaitingMode(on) {
+    if (this.wmArmed === on) return;
+    this.wmArmed = on;
+    this.wmWorked = on && (this.status === 'running' || this.bgTasks.length > 0);
+    this.applyWaitingMode();
+    this.syncWaiting();
+  }
+
+  applyWaitingMode() {
+    this.waitBtn.classList.toggle('on', this.wmArmed);
+    this.waitBtn.title = this.wmArmed ? 'Waiting mode is on. Click to turn it off and show the chat.' : 'Waiting mode';
+  }
+
+  /**
+   * Decides what the cell shows; runs on every state change (refreshState), never on a timer
+   * except the single timeout below. The waiting view stands in for the chat while Claude works
+   * (a turn, a background agent or shell). A question for the user shows the chat, which has its
+   * context. Idle is not finished: a background task's notification often starts a new turn, so
+   * waiting mode ends only after the cell stays idle, with nothing in the background or pending,
+   * for WAIT_SETTLE_MS; any state change in between starts that count over.
+   */
+  syncWaiting() {
+    if (this.closing) return;
+    let view = false;
+    let settling = false;
+    if (this.wmArmed && this.pending.size === 0) {
+      if (this.status === 'running' || this.bgTasks.length > 0) {
+        this.wmWorked = true;
+        view = true;
+      } else if (this.wmWorked) {
+        view = true;
+        settling = true;
+      }
+    }
+    if (settling && this.wmTimer) return; // still idle: a refresh with no new work (a focus, say) does not extend the wait
+    clearTimeout(this.wmTimer);
+    this.wmTimer = 0;
+    if (settling) this.wmTimer = setTimeout(() => { this.wmTimer = 0; this.setWaitingMode(false); }, WAIT_SETTLE_MS);
+    this.setWmView(view);
+  }
+
+  setWmView(view) {
+    if (view === this.wmView) return;
+    if (view) { // a display:none scroller forgets where it was; a collapsed cell kept it in savedScroll
+      [this.wmTop, this.wmStick] = this.collapsed && this.savedScroll ? this.savedScroll : [this.msgs.scrollTop, this.stickToBottom];
+    }
+    this.wmView = view;
+    this.el.classList.toggle('wm-on', view);
+    if (!view && !this.collapsed) {
+      if (this.live) this.scheduleLiveRender(); // text that streamed in while hidden was not drawn
+      this.stickToBottom = this.wmStick;
+      if (this.wmStick) this.pinToBottom();
+      else this.msgs.scrollTop = this.wmTop;
+    }
+    this.renderProgress(); // the view and the panel share the data, not the element
+  }
+
+  /** The chat is not on screen: collapsed to the dock, or replaced by the waiting view. */
+  get chatHidden() {
+    return this.collapsed || this.wmView;
+  }
+
+  /** The composer's task-list toggle: the next prompt carries a nudge to keep a list. One-shot. */
+  setAskTasks(on) {
+    this.askTasks = on;
+    this.taskBtn.classList.toggle('on', on);
   }
 
   // ---------- images ----------
@@ -1156,6 +1289,7 @@ class Cell {
       const lines = this.bgTasks.map(t => `${BG_LABELS[t.type] || 'Task'}: ${t.description}`);
       this.bgEl.title = ['Running in the background:', ...lines].join('\n');
     }
+    this.syncWaiting();
     this.renderProgress();
     this.renderContext(); // the button waits while a turn runs
     updateSummary();
@@ -1251,6 +1385,7 @@ class Cell {
       effort: this.effortLevels().length ? this.effort : null,
       fork: this.fork,
       backend: this.backend,
+      autoTasks: app.settings.autoTasks !== false,
       onEvent: channel,
     });
   }
@@ -1287,7 +1422,7 @@ class Cell {
 
   write(obj) {
     if (this.proc == null) return Promise.resolve();
-    return invoke('send_line', { id: this.proc, line: JSON.stringify(obj) }).catch(err => this.notice(String(err), true));
+    return invoke('send_line', { id: this.proc, line: JSON.stringify(obj) }).then(() => true, err => { this.notice(String(err), true); return false; }); // resolves to whether it was sent
   }
 
   /** Sends a control request; resolves with Claude's control_response (or null if the process ends). */
@@ -1308,6 +1443,7 @@ class Cell {
     const text = this.input.value.trim();
     const images = this.attachments;
     if (!text && !images.length) return;
+    if (this.wmView) this.setWaitingMode(false); // sending is the user coming back (an armed idle cell keeps waiting for the work)
     // /clear (and its aliases) is answered here: Claude's own /clear would change the session
     // behind HQ's back. The cell starts a new session; the old one stays on disk for Resume.
     const clear = !images.length && /^\/(?:clear|reset|new)(?:\s+([\s\S]*))?$/.exec(text);
@@ -1351,15 +1487,18 @@ class Cell {
       this.unsend(draft, true);
       return;
     }
-    const content = images.length
-      ? [...images.map(i => ({ type: 'image', source: { type: 'base64', media_type: i.mediaType, data: i.data } })), ...(text ? [{ type: 'text', text }] : [])]
+    // Not on a slash command: Claude Code only runs one sent as the whole prompt.
+    const hint = this.askTasks && this.backend === 'claude' && !/^\/[\w:-]+(\s|$)/.test(text.trimStart()) ? [{ type: 'text', text: TASK_HINT }] : [];
+    const content = images.length || hint.length
+      ? [...images.map(i => ({ type: 'image', source: { type: 'base64', media_type: i.mediaType, data: i.data } })), ...(text ? [{ type: 'text', text }] : []), ...hint]
       : text;
     if (text) this.sentPrompts.push(text);
     this.promptWritten = true;
-    this.write({ type: 'user', message: { role: 'user', content }, parent_tool_use_id: null });
+    const written = this.write({ type: 'user', message: { role: 'user', content }, parent_tool_use_id: null });
     // After the first prompt is written, so that Claude has a message to title the remote session from.
     if (this.remote && this.spawnedFresh) this.autoEnableRemote();
     this.lastSent = draft; // until Claude answers, so that a process that dies at startup gives the prompt back
+    if (hint.length && await written) this.setAskTasks(false); // one prompt only; a failed send keeps the toggle for the retry
   }
 
   /**
@@ -1508,6 +1647,7 @@ class Cell {
     cancelAnimationFrame(this.progressFrame);
     clearTimeout(this.interruptTimer);
     clearInterval(this.progressTimer);
+    clearTimeout(this.wmTimer);
   }
 
   // ---------- protocol ----------
@@ -1613,10 +1753,10 @@ class Cell {
 
   /** At most one render per frame, and none while the cell is collapsed: it draws when shown again. */
   scheduleLiveRender() {
-    if (this.renderTimer || this.collapsed) return;
+    if (this.renderTimer || this.chatHidden) return;
     this.renderTimer = requestAnimationFrame(() => {
       this.renderTimer = 0;
-      if (!this.live || this.collapsed) return;
+      if (!this.live || this.chatHidden) return;
       for (const b of this.live.blocks.values()) {
         if (b.md.classList.contains('streaming')) renderMarkdownLive(b.md, b.text, b.state);
       }
@@ -1688,7 +1828,7 @@ class Cell {
         if (!block.thinking) continue;
         const md = h('div', { class: 'md' });
         renderMarkdown(md, block.thinking);
-        this.append(h('details', { class: 'item thinking' }, h('summary', { text: 'Thinking' }), md), parent);
+        this.append(h('details', { class: 'item thinking', open: this.backend === 'hermes' }, h('summary', { text: 'Thinking' }), md), parent);
       } else if (block.type === 'tool_use' || block.type === 'server_tool_use') {
         this.addTool(block, parent);
       }
@@ -1891,7 +2031,7 @@ class Cell {
       } else if (block.type === 'text' && block.text) {
         const text = block.text;
         if (text.startsWith('[Request interrupted')) this.notice('Interrupted');
-        else if (/^\s*<(command-|local-command-|system-reminder|task-notification|ide_)/.test(text)) continue;
+        else if (/^\s*<(command-|local-command-|system-reminder|task-notification|ide_)/.test(text) || text.startsWith(TASK_HINT_PREFIX)) continue;
         else texts.push(text);
       } else if (block.type === 'image') {
         const url = imageBlockUrl(block.source);
@@ -1902,6 +2042,7 @@ class Cell {
     // Live prompts are drawn when sent; only a restored transcript needs them drawn here.
     if (replay && !parent && (texts.length || images.length || omitted)) {
       this.closeTurn(true);
+      this.sealTasks(); // a replay has no turn start, so each prompt closes the list before it
       const text = texts.join('\n');
       this.append(userBubble(text, images, Date.parse(m.timestamp), omitted));
       if (!this.title) this.title = firstLine(text, 90) || 'Image';
@@ -2009,18 +2150,50 @@ class Cell {
     if (req.tool_name === 'AskUserQuestion') card = this.questionCard(m.request_id, req);
     else if (req.tool_name === 'ExitPlanMode') card = this.planCard(m.request_id, req);
     else card = this.permissionCard(m.request_id, req);
+    card.dataset.kind = req.tool_name === 'AskUserQuestion' ? 'question' : req.tool_name === 'ExitPlanMode' ? 'plan' : 'permission';
     this.pending.set(m.request_id, card);
     this.prompts.append(card);
+    this.syncPromptsBar(); // a card arriving while minimized only updates the count; it does not reopen the area
     this.unread = false;
     this.refreshState();
     invoke('request_attention').catch(() => {});
     notifyWaiting(this, req);
   }
 
+  /** Folds the prompts area to its bar, or opens it again. Only a class changes, so nothing is re-rendered. */
+  setPromptsMin(min) {
+    if (min === this.promptsMin || (min && !this.pending.size)) return;
+    this.promptsMin = min;
+    this.syncPromptsBar();
+    if (min && this.prompts.contains(document.activeElement)) this.input.focus();
+  }
+
+  /** The bar's count and wording, and the area's class. The area resets to open once the last card is answered. */
+  syncPromptsBar() {
+    const n = this.pending.size;
+    if (!n) this.promptsMin = false;
+    const min = this.promptsMin;
+    this.el.classList.toggle('prompts-min', min);
+    this.promptsBar.classList.toggle('hidden', !n);
+    this.promptsBar.setAttribute('aria-expanded', String(!min));
+    if (n) {
+      const kinds = new Set([...this.pending.values()].map(c => c.dataset.kind));
+      const noun = kinds.size > 1 ? 'prompt' : kinds.has('question') ? 'question' : kinds.has('plan') ? 'plan' : 'permission request';
+      const label = n === 1 && noun === 'plan' ? 'Plan waiting for approval' : `${n} ${noun}${n === 1 ? '' : 's'} waiting`;
+      this.promptsBar.querySelector('.pb-text').textContent = `${label} — ${min ? 'show' : 'hide'}`;
+      this.promptsBar.title = min ? 'Show the prompts again' : 'Minimize the prompts to read the chat; typed answers are kept';
+      const chev = this.promptsBar.firstElementChild;
+      chev.classList.toggle('codicon-chevron-up', min);
+      chev.classList.toggle('codicon-chevron-down', !min);
+    }
+    this.scheduleScroll(); // the chat grew or shrank; stay at the bottom if it was there
+  }
+
   dropPrompt(requestId) {
     const card = this.pending.get(requestId);
     if (card) card.remove();
     this.pending.delete(requestId);
+    this.syncPromptsBar();
     this.refreshState();
   }
 
@@ -2727,7 +2900,7 @@ function onCodeActionClick(e, cell) {
     cell.notice('Not run: the command contains invisible or text-direction characters. Copy it and check it instead.', true);
     return;
   }
-  invoke('run_in_terminal', { path: cell.cwd, command, shell: /^(cmd|bat|batch)$/.test(block.dataset.lang) ? 'cmd' : 'powershell' })
+  invoke('run_in_terminal', { path: cell.cwd, command, shell: /^(cmd|bat|batch)$/.test(block.dataset.lang) ? 'cmd' : 'powershell', lang: IS_MAC ? macShell(block.dataset.lang) : null })
     .catch(err => cell.notice(`Could not open a terminal: ${err}`, true));
 }
 
@@ -2840,7 +3013,12 @@ function parseAnswers(text) {
   return Object.keys(answers).length ? answers : null;
 }
 
-const BG_LABELS = { local_agent: 'Agent', local_bash: 'Shell' };
+const BG_LABELS = { local_agent: 'Agent', local_bash: 'Shell', local_monitor: 'Monitor', monitor: 'Monitor' };
+/** Waiting mode ends once a cell has stayed idle this long (a background task's notification can start a new turn). */
+const WAIT_SETTLE_MS = 4000;
+/** Trails a prompt asked to keep a task list; the chat hides it, live and on resume. */
+const TASK_HINT = '(HQ: track this work with TaskCreate/TaskUpdate so the user can follow progress.)';
+const TASK_HINT_PREFIX = '(HQ: track this work';
 
 // Sent as a side question (like /btw), so Claude answers beside the running turn without stopping it.
 const HANDOFF_QUESTION = 'Write a handoff document for this session in Markdown, so that a fresh Claude session with none of '
@@ -3319,7 +3497,8 @@ function workspaceDirs() {
 function parentDir(path) {
   const p = normPath(path);
   const i = p.lastIndexOf('\\');
-  return i > 0 ? p.slice(0, i) : '';
+  // A Unix path keeps its slashes, and the parent of /Users is the root.
+  return i > 0 ? nativeSep(p.slice(0, i), path) : i === 0 && String(path).startsWith('/') && p.length > 1 ? '/' : '';
 }
 
 /** Keeps string-to-string entries only. */
@@ -3386,7 +3565,7 @@ function focusCell(cell, focusInput) {
   if (cell.unread) { cell.unread = false; cell.refreshState(); }
   if (changed) renderSidebar();
   if (focusInput) {
-    const firstInput = cell.prompts.querySelector('input, textarea');
+    const firstInput = cell.promptsMin ? null : cell.prompts.querySelector('input, textarea');
     (firstInput || cell.input).focus();
   }
 }
@@ -3553,6 +3732,7 @@ function renderSidebar() {
             h('span', { class: 'session-name', text: baseName(cell.cwd) || cell.cwd }),
             h('span', { class: 'session-state', text: label })),
           h('span', { class: 'session-title', text: cell.displayTitle() || 'No messages yet' }),
+          cell.sideTaskLine ? h('span', { class: 'session-tasks', text: cell.sideTaskLine }) : null,
           cell.lastReply ? h('span', { class: 'session-reply', text: cell.lastReply }) : null,
           h('span', { class: 'session-path', text: cell.cwd })),
         i < 9 ? h('span', { class: 'session-key', text: `^${i + 1}` }) : null);
@@ -4090,6 +4270,8 @@ function scheduleNextUsage() {
 }
 
 document.addEventListener('visibilitychange', () => {
+  document.documentElement.classList.toggle('doc-hidden', document.hidden); // pauses the waiting view's animation
+  for (const cell of app.cells) cell.syncProgressTimer();
   if (!document.hidden && Date.now() - usage.fetchedAt > USAGE_STALE_MS) refreshUsage();
 });
 
@@ -4204,8 +4386,8 @@ const CUSTOM_COLORS = [['--accent', 'Accent'], ['--link', 'Links'], ['--claude',
   ['--md-em', 'Italic'], ['--md-code', 'Inline code'], ['--md-h1', 'Heading 1'], ['--md-h2', 'Headings 2+'], ['--md-marker', 'List markers'],
   ['--hl-keyword', 'Code: keywords'], ['--hl-string', 'Code: strings'], ['--hl-function', 'Code: functions'], ['--hl-comment', 'Code: comments']];
 // The cell header's buttons that can be hidden: [class, label].
-const HEAD_BUTTONS = [['act-handoff', 'Handoff'], ['act-detail', 'Detail level'], ['act-progress', 'Progress'], ['act-code', 'VS Code'],
-  ['act-terminal', 'Terminal'], ['act-reveal', 'Explorer'], ['act-collapse', 'Collapse'], ['act-max', 'Maximize'], ['act-close', 'Close']];
+const HEAD_BUTTONS = [['act-handoff', 'Handoff'], ['act-detail', 'Detail level'], ['act-progress', 'Progress'], ['act-waiting', 'Waiting mode'], ['act-code', 'VS Code'],
+  ['act-terminal', 'Terminal'], ['act-reveal', FILE_MANAGER], ['act-collapse', 'Collapse'], ['act-max', 'Maximize'], ['act-close', 'Close']];
 const HEX = /^#[0-9a-f]{6}$/i;
 const lightQuery = window.matchMedia('(prefers-color-scheme: light)');
 
@@ -4222,6 +4404,7 @@ function sanitizeSettings(x) {
     theme: THEMES.some(([t]) => t === v.theme) ? v.theme : 'auto',
     notify: v.notify !== false,
     autoUpdate: v.autoUpdate !== false,
+    autoTasks: v.autoTasks !== false, // read when a session starts: Claude is asked to keep a task list
     claudePath: typeof v.claudePath === 'string' ? v.claudePath.trim().slice(0, 500) : '',
     autoCopy: v.autoCopy !== false,
     weeklyBar: v.weeklyBar !== false,
@@ -4330,6 +4513,7 @@ function renderSettings() {
     row('Remote Control for new sessions', 'Continue sessions from claude.ai/code or the Claude app.', toggle(!!app.remoteDefault, v => { app.remoteDefault = v; saveState(); renderRemoteButtons(); })),
     row('Default model for new sessions', 'The same as picking a model in a session. HQ_MODEL still applies when none is picked.',
       select(app.defaults.model || 'default', models, v => rememberChoice({ model: v }))),
+    row('Automatic task lists', 'Ask Claude to keep a task list on multi-step work. Off saves a few tokens per long job.', toggle(app.settings.autoTasks, v => changeSetting('autoTasks', v))),
     row('Check for HQ updates automatically', 'The Check for updates button in the sessions list always works.', toggle(app.settings.autoUpdate, v => changeSetting('autoUpdate', v))),
     row('Claude command', 'Path to the claude program, for sessions started from now on. Empty uses HQ_CLAUDE, else claude on PATH.', path));
 }
@@ -4360,7 +4544,7 @@ function renderAppearanceSettings(row, toggle, select) {
   const themeName = (THEMES.find(([t]) => t === theme) || [])[1] || theme;
   return [
     h('div', { class: 'settings-section', text: 'Theme' }),
-    row('Theme', 'Auto follows Windows.', select(app.settings.theme, THEMES, v => { changeSetting('theme', v); renderSettings(); })),
+    row('Theme', `Auto follows ${IS_MAC ? 'macOS' : 'Windows'}.`, select(app.settings.theme, THEMES, v => { changeSetting('theme', v); renderSettings(); })),
     h('div', { class: 'setting-colors' },
       h('div', { class: 'setting-colors-head' }, h('span', { text: `Colours for ${themeName}` }), resetAll),
       h('div', { class: 'color-grid' }, CUSTOM_COLORS.map(colorRow)),
@@ -4575,7 +4759,9 @@ document.addEventListener('keydown', e => {
   const cell = app.focused;
   const typing = e.target.matches?.('input, textarea, select'); // the target is document when nothing has focus
   // Dev builds read the UI from disk, so a reload shows edits. It also stops every claude.
-  if (build.liveUi && (e.key === 'F5' || (e.ctrlKey && (e.key === 'r' || e.key === 'R')))) {
+  // Cmd on a Mac (Ctrl+B, N, O there are text-field cursor keys), Ctrl elsewhere.
+  const mod = IS_MAC ? e.metaKey : e.ctrlKey;
+  if (build.liveUi && (e.key === 'F5' || (mod && (e.key === 'r' || e.key === 'R')))) {
     e.preventDefault();
     flushState().then(() => location.reload());
     return;
@@ -4585,12 +4771,12 @@ document.addEventListener('keydown', e => {
     closeMenu();
     return;
   }
-  if (e.ctrlKey && e.shiftKey && !e.altKey && (e.key === 'm' || e.key === 'M') && cell) {
+  if (mod && e.shiftKey && !e.altKey && (e.key === 'm' || e.key === 'M') && cell) {
     e.preventDefault();
     collapseCell(cell, !cell.collapsed);
     return;
   }
-  if (e.ctrlKey && !e.shiftKey && !e.altKey) {
+  if (mod && !e.shiftKey && !e.altKey) {
     if (e.key === 'n' || e.key === 'N') { e.preventDefault(); openPicker(); return; }
     if (e.key === 'o' || e.key === 'O') { e.preventDefault(); openResumer(); return; }
     if (e.key === ',') { e.preventDefault(); openSettings(); return; }
@@ -4621,8 +4807,8 @@ document.addEventListener('keydown', e => {
     return;
   }
   // 1/2/3 answer the top prompt when the focus is not in a text field.
-  if (!typing && !e.ctrlKey && !e.altKey && /^[1-9]$/.test(e.key)) {
-    const card = cell.prompts.firstElementChild;
+  if (!typing && !e.ctrlKey && !e.metaKey && !e.altKey && /^[1-9]$/.test(e.key)) {
+    const card = !cell.promptsMin && cell.prompts.firstElementChild; // minimized prompts take no hotkeys
     const run = card && card.hotkeys && card.hotkeys[Number(e.key) - 1];
     if (run) { e.preventDefault(); run(); }
   }

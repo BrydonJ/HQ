@@ -1,0 +1,92 @@
+name: Build HQ for macOS
+
+# Builds the universal (Apple Silicon + Intel) app and its signed updater files. It publishes
+# nothing: download the artifact (`gh run download <run-id> -n hq-macos -D mac-artifacts`) and pass
+# the folder to `release.ps1 <version> -MacArtifacts mac-artifacts`, which uploads the files to
+# the release and adds the Mac entries to latest.json. That keeps release.ps1 the only writer.
+#
+# Repository secrets (Settings > Secrets and variables > Actions):
+#   TAURI_SIGNING_PRIVATE_KEY           the contents of the updater key (the same key release.ps1 uses,
+#                                       by default %USERPROFILE%\.tauri\hq-updater.key)
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  its password (leave empty if it has none)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to build, the one you will pass to release.ps1 (for example 0.12.1)
+        required: true
+        type: string
+      ref:
+        description: Commit SHA to build, the one release.ps1 will release (defaults to the branch the run starts from)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Check the ref
+        env:
+          REF: ${{ inputs.ref }}
+        run: |
+          [[ -z "$REF" || "$REF" =~ ^[0-9a-f]{40}$ ]] || { echo "ref must be a full commit SHA"; exit 1; }
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
+
+      # Only a commit on main is built and signed, never one from a fork's pull request.
+      - name: Check the commit is on main
+        run: git merge-base --is-ancestor HEAD origin/main || { echo "The commit is not on main"; exit 1; }
+
+      - name: Check the version and the signing key
+        env:
+          VERSION: ${{ inputs.version }}
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Version must look like 1.2.3"; exit 1; }
+          [[ -n "$KEY" ]] || { echo "Secret TAURI_SIGNING_PRIVATE_KEY is not set"; exit 1; }
+
+      # release.ps1 bumps the version after this build, so the build sets it itself.
+      - name: Set the version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          perl -pi -e 'if (!$done && s/^version = "[^"]+"/version = "$ENV{VERSION}"/) { $done = 1 }' Cargo.toml
+          perl -pi -e 'if (!$done && s/"version": "[^"]+"/"version": "$ENV{VERSION}"/) { $done = 1 }' tauri.conf.json
+          grep -m1 '^version' Cargo.toml
+          grep -m1 '"version"' tauri.conf.json
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: Build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: bash build-mac.sh
+
+      - name: Gather the files
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          bundle=target/universal-apple-darwin/release/bundle
+          mkdir out
+          cp "$bundle/macos/HQ.app.tar.gz" "$bundle/macos/HQ.app.tar.gz.sig" out/
+          cp "$bundle"/dmg/HQ_"$VERSION"_universal.dmg out/
+          ls -l out
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: hq-macos
+          path: out/*
+          if-no-files-found: error

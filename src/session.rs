@@ -29,6 +29,11 @@ const BATCH_MAX_BYTES: usize = 1024 * 1024;
 /// Remote Control titles a session that has no name yet `<prefix>-<random>`, with the machine
 /// name as the default prefix. HQ sets the folder name instead so such a session is still findable.
 const REMOTE_PREFIX_VAR: &str = "CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX";
+/// Claude Code withholds TaskCreate/TaskUpdate in `-p` mode unless this is set, which left HQ's
+/// progress panel with no checklist to show.
+const TODO_TOOLS_VAR: &str = "CLAUDE_CODE_ENABLE_TODO_TOOLS";
+/// Asks for a task list only where one helps, so a one-off question still gets a plain answer.
+const TASK_PROMPT: &str = "You are running inside HQ, a dashboard where the user watches several sessions at once and judges progress from your task list. For work with three or more steps, or that will take more than a few minutes, create the tasks with TaskCreate before starting and keep them current with TaskUpdate: mark each one in_progress as you start it and completed as soon as it is done. Skip the task list for questions and quick single-step jobs.";
 
 pub struct Session {
     /// Feeds the thread that owns claude's stdin. Dropping the sender closes the pipe.
@@ -36,6 +41,9 @@ pub struct Session {
     child: Arc<Mutex<Child>>,
     #[cfg(windows)]
     _job: Option<job::Job>,
+    /// The child leads a process group of its own (see `hide_console`); this is its ID.
+    #[cfg(unix)]
+    pgid: u32,
 }
 
 #[derive(Default)]
@@ -52,6 +60,8 @@ pub struct SpawnOptions {
     pub effort: Option<String>,
     /// With `resume`: continue in a new session ID, leaving the original untouched.
     pub fork: bool,
+    /// Appends HQ's task-list prompt. Off leaves Claude's system prompt untouched.
+    pub auto_tasks: bool,
 }
 
 /// The `claude` executable chosen in HQ's own settings, which beats `HQ_CLAUDE`.
@@ -74,6 +84,9 @@ fn claude_program() -> String {
         .unwrap_or_else(|| "claude".into())
 }
 
+/// Prepares every child HQ starts. Windows: no console window. Unix: its own process group, so
+/// `kill_group` can end the shells and tools it starts (the job object's job, below). macOS: the
+/// login shell's PATH, which an app launched from Finder lacks (see macos.rs).
 pub(crate) fn hide_console(cmd: &mut Command) {
     #[cfg(windows)]
     {
@@ -81,9 +94,31 @@ pub(crate) fn hide_console(cmd: &mut Command) {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(target_os = "macos")]
+    cmd.env("PATH", crate::macos::path());
+    #[cfg(not(any(unix, windows)))]
     let _ = cmd;
 }
+
+/// Ends every process in the group that `hide_console` gave the child at `pid`. Best called while the
+/// child is still unreaped, when the ID cannot have been handed to another process.
+#[cfg(unix)]
+pub(crate) fn kill_group(pid: u32) {
+    if pid > 1 {
+        // SAFETY: killpg only sends a signal.
+        unsafe {
+            libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn kill_group(_pid: u32) {}
 
 /// Asks a short-lived `claude` for the account's plan usage (the same numbers `/usage` shows)
 /// and returns the reply's JSON. Used when no session is running to ask instead.
@@ -133,6 +168,7 @@ pub fn probe_usage() -> Result<String, String> {
         .and_then(|_| stdin.flush())
         .map_err(|e| format!("write to claude failed: {e}"))
         .and_then(|_| rx.recv_timeout(Duration::from_secs(30)).map_err(|_| "Claude did not report usage in time".to_string()));
+    kill_group(child.id());
     let _ = child.kill();
     let _ = child.wait();
 
@@ -207,6 +243,20 @@ impl Sessions {
         if let Some(effort) = opts.effort.as_deref().filter(|s| !s.is_empty()) {
             cmd.args(["--effort", effort]);
         }
+        // Set whatever the Automatic task lists setting says, since the composer's per-prompt toggle
+        // needs the tools too; Claude only uses them when asked. A value the user set themselves wins,
+        // and with the task tools off the prompt asking for them is left out.
+        let tools_on = match std::env::var_os(TODO_TOOLS_VAR) {
+            // Claude Code's own reading: only these values turn the tools on.
+            Some(v) => matches!(v.to_string_lossy().trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
+            None => {
+                cmd.env(TODO_TOOLS_VAR, "1");
+                true
+            }
+        };
+        if opts.auto_tasks && tools_on {
+            cmd.args(["--append-system-prompt", TASK_PROMPT]);
+        }
         // A prefix the user set themselves wins.
         if std::env::var_os(REMOTE_PREFIX_VAR).is_none_or(|v| v.is_empty()) {
             cmd.env(REMOTE_PREFIX_VAR, remote_name_prefix(&opts.cwd));
@@ -219,11 +269,17 @@ impl Sessions {
         hide_console(&mut cmd);
 
         let mut child = cmd.spawn().map_err(|e| {
-            format!("Could not start `{}` ({e}). Is Claude Code installed and on PATH?", claude_program())
+            let hint = if cfg!(target_os = "macos") {
+                "Is Claude Code installed? Install it with `curl -fsSL https://claude.ai/install.sh | bash`, or pick its location in HQ's settings."
+            } else {
+                "Is Claude Code installed and on PATH?"
+            };
+            format!("Could not start `{}` ({e}). {hint}", claude_program())
         })?;
 
         let stdin = child.stdin.take();
         let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+            kill_group(child.id());
             let _ = child.kill();
             return Err("claude pipes unavailable".into());
         };
@@ -246,6 +302,8 @@ impl Sessions {
         // any shells and tools Claude started underneath it.
         #[cfg(windows)]
         let job = job::Job::new().filter(|j| j.assign(&child));
+        #[cfg(unix)]
+        let pgid = child.id();
 
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let child = Arc::new(Mutex::new(child));
@@ -254,6 +312,8 @@ impl Sessions {
             child: child.clone(),
             #[cfg(windows)]
             _job: job,
+            #[cfg(unix)]
+            pgid,
         });
         self.map.lock().unwrap().insert(id, session);
 
@@ -280,7 +340,14 @@ impl Sessions {
         // Ends the writer thread, which closes claude's stdin.
         session.input.lock().unwrap().take();
         // The reader polls and never holds the child lock for long, so this does not wait.
-        let _ = session.child.lock().unwrap().kill();
+        let mut child = session.child.lock().unwrap();
+        // Ends the shells and tools claude started too. Before the kill, under the lock the reaper
+        // takes: while claude is unreaped its group ID cannot have been reused. (Already reaped, the
+        // group is ended by `wait_for_exit`, and this repeat takes the same pid-wrap race it accepts.)
+        #[cfg(unix)]
+        kill_group(session.pgid);
+        let _ = child.kill();
+        drop(child);
         // Dropping the last Arc closes the job handle, which ends the whole process tree.
     }
 
@@ -401,11 +468,20 @@ fn spawn_stdout_reader(
 
 /// Polls instead of blocking in `wait()`, which would hold the child lock for the life of the
 /// process and make `kill` wait for claude to end by itself.
+///
+/// On Unix it then ends what claude left running in its group, as closing the job does on Windows.
+/// A group ID is not handed out again while any member lives; an empty group's could be in the
+/// moment since the reap, a pid-wrap race too unlikely to guard against.
 fn wait_for_exit(child: &Mutex<Child>) -> Option<i32> {
     loop {
-        match child.lock().unwrap().try_wait() {
-            Ok(Some(status)) => return status.code(),
-            Ok(None) => {}
+        let mut child = child.lock().unwrap();
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                #[cfg(unix)]
+                kill_group(child.id());
+                return status.code();
+            }
+            Ok(None) => drop(child), // not held across the sleep
             Err(_) => return None,
         }
         std::thread::sleep(Duration::from_millis(25));
@@ -585,6 +661,16 @@ mod tests {
         assert_eq!((out[0].as_str(), out[199].as_str()), ("line 0", "line 199"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn names_remote_sessions_after_the_folder_on_unix() {
+        assert_eq!(remote_name_prefix("/Users/me/HQ"), "HQ-HQ");
+        assert_eq!(remote_name_prefix("/Users/me/my app/"), "HQ-my app");
+        assert_eq!(remote_name_prefix("/"), "HQ");
+        assert_eq!(remote_name_prefix(""), "HQ");
+    }
+
+    #[cfg(windows)]
     #[test]
     fn names_remote_sessions_after_the_folder() {
         assert_eq!(remote_name_prefix(r"D:\Repos\HQ"), "HQ-HQ");

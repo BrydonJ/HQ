@@ -93,6 +93,47 @@ Installed copies read `latest.json` from the newest release at the endpoint in
 `tauri.conf.json`. **Back up the private key.** Without it, no new release can be signed, and
 every installed copy must be reinstalled by hand.
 
+## macOS
+
+HQ also runs on macOS 10.15 or later, Apple Silicon and Intel (one universal app). It needs
+Claude Code installed (`curl -fsSL https://claude.ai/install.sh | bash`).
+
+**Install:** open `HQ_<version>_universal.dmg` and drag HQ to **Applications**. Run it from
+there: only a copy in `/Applications` (or `~/Applications`) updates itself, and it updates the
+same way as on Windows, from the same releases.
+
+**First launch:** the app is signed ad hoc, without an Apple Developer ID, so macOS blocks it
+once. Either open **System Settings > Privacy & Security** and click **Open Anyway** next to the
+HQ message, or run this once in Terminal:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/HQ.app
+```
+
+An in-app update needs neither step, because the updater's download carries no quarantine flag.
+
+What differs from Windows:
+
+- Shortcuts use Cmd where Windows uses Ctrl (Cmd+N, Cmd+O, Cmd+B, Cmd+1...9, Cmd+M, Cmd+W,
+  Cmd+Shift+M, Cmd+,). Cmd+W closes the cell, not the window.
+- A shell block's Run button opens Terminal and runs the code with its own shell (bash, sh, or
+  zsh for anything else), then leaves a shell open there. cmd blocks have no Run button.
+  PowerShell blocks run when `pwsh` is installed. The terminal button opens Terminal, and the
+  VS Code button uses the `code` command or the VS Code app.
+- An app started from the Dock gets only a bare `PATH`, so HQ asks your login shell for the real
+  one at start (and adds `~/.local/bin`, `~/.claude/local`, Homebrew and npm/bun folders).
+  `claude` and `hermes` are found from there; Settings still lets you point to either.
+- Closing a cell (or quitting HQ) ends its `claude` and everything it started, through a
+  process group in place of the Windows job object. If HQ itself is killed, they are not ended.
+- The dev copy has no DevTools port. Use Safari's Develop menu to inspect it.
+
+Build on a Mac with `./build-mac.sh` (universal build, output under
+`target/universal-apple-darwin/release/bundle`) and run a dev copy with `./dev-mac.sh`. The
+`Build HQ for macOS` GitHub workflow runs the same build; publish its output with
+`.\release.ps1 <version> -MacArtifacts <folder>` (see the script's header). The workflow needs
+the repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the contents of the updater key) and
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+
 ## Using it
 
 - **New session** (Ctrl+N) lists recent folders. You can also browse to any folder on any drive.
@@ -201,7 +242,7 @@ every installed copy must be reinstalled by hand.
     Opus 5.5 work without a list, and HQ does not force one on.
   - Background agents and shells, with each agent's latest tool, tool count and summary. The
     stop button next to one stops just that agent or shell (`stop_task`); the turn goes on.
-  - **Ask Claude:** asks, beside the running turn (like `/btw`), what Claude is doing and what
+  - **Sitrep:** asks, beside the running turn (like `/btw`), what Claude is doing and what
     is left. Claude answers without stopping, and its rough percentage fills the bar. Each
     click is one extra request that reads the session's context from the cache.
 
@@ -369,7 +410,8 @@ src/hermes.rs    Hermes cells: runs `hermes acp` and translates ACP to and from 
                  `hermes` Cargo feature (on by default; `--no-default-features` leaves it out)
 src/update.rs    self-update: checks and downloads signed releases; installs when told to
 src/main.rs      Tauri commands, profiles, single-instance lock
-src/dev.rs       debug builds only: UI read from disk, DevTools port
+src/dev.rs       debug builds only: UI read from disk, DevTools port (Windows)
+src/macos.rs     macOS only: login-shell PATH, Terminal and VS Code launchers, installed-app check
 ui/app.js        cells, protocol handling, prompts, menus, sessions list, grid layout, persistence,
                  context indicator, Remote Control, settings
 ui/hermes.js     what Hermes cells do differently: their model list, commands, defaults, modes

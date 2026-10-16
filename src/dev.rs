@@ -6,17 +6,24 @@ use std::path::{Component, Path, PathBuf};
 use tauri::utils::assets::{AssetKey, AssetsIter, CspHash};
 use tauri::{Assets, Context, Runtime};
 
+#[cfg(windows)]
 const DEFAULT_DEBUG_PORT: &str = "9223";
 /// What wry passes when a window sets no browser arguments of its own.
+#[cfg(windows)]
 const WRY_DEFAULT_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection";
 
-/// Serves the UI from disk and opens a DevTools port (`HQ_DEBUG_PORT`, default 9223) so the
-/// dev copy can be inspected and driven over CDP.
+/// Gives the window the yellow debug icon, serves the UI from disk and, on Windows, opens a DevTools port (`HQ_DEBUG_PORT`, default 9223)
+/// so the dev copy can be inspected and driven over CDP. (The port is a WebView2 switch; on a Mac
+/// use Safari's Develop menu instead.)
 pub fn prepare<R: Runtime>(context: &mut Context<R>) {
-    let port = std::env::var("HQ_DEBUG_PORT").unwrap_or_else(|_| DEFAULT_DEBUG_PORT.into());
-    if port.chars().all(|c| c.is_ascii_digit()) && !port.is_empty() {
-        for window in &mut context.config_mut().app.windows {
-            window.additional_browser_args = Some(format!("{WRY_DEFAULT_ARGS} --remote-debugging-port={port}"));
+    context.set_default_window_icon(Some(tauri::include_image!("icons/debug-icon.ico")));
+    #[cfg(windows)]
+    {
+        let port = std::env::var("HQ_DEBUG_PORT").unwrap_or_else(|_| DEFAULT_DEBUG_PORT.into());
+        if port.chars().all(|c| c.is_ascii_digit()) && !port.is_empty() {
+            for window in &mut context.config_mut().app.windows {
+                window.additional_browser_args = Some(format!("{WRY_DEFAULT_ARGS} --remote-debugging-port={port}"));
+            }
         }
     }
     let root = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/ui"));

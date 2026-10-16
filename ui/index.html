@@ -111,11 +111,13 @@
         <span class="cell-project"><span class="proj-name"></span><span class="sweep" aria-hidden="true"><span class="sweep-name"></span></span></span>
         <span class="cell-title" title="Rename session (F2)"></span>
         <span class="cell-state"></span>
+        <span class="cell-tasks hidden"></span>
         <span class="cell-path"></span>
         <span class="bg-tasks hidden"><span class="codicon codicon-loading codicon-modifier-spin"></span><span class="bg-count"></span></span>
         <button class="icon-btn act-handoff" title="Handoff: Claude writes a Markdown summary another session can continue from"><span class="codicon codicon-note"></span></button>
         <button class="icon-btn act-detail"><span class="codicon codicon-eye-closed"></span></button>
         <button class="icon-btn act-progress"><span class="codicon codicon-checklist"></span></button>
+        <button class="icon-btn act-waiting" title="Waiting mode"><span class="codicon codicon-watch"></span></button>
         <button class="icon-btn act-code"><span class="codicon codicon-vscode"></span></button>
         <button class="icon-btn act-terminal" title="Open a terminal in this folder"><span class="codicon codicon-terminal"></span></button>
         <button class="icon-btn act-reveal" title="Open folder in Explorer"><span class="codicon codicon-folder"></span></button>
@@ -128,6 +130,11 @@
         <div class="messages"></div>
         <div class="progress-panel"></div>
       </div>
+      <div class="waiting-view">
+        <div class="wv-anim" aria-hidden="true"><span></span><span></span><span></span></div>
+        <div class="wv-body"></div>
+      </div>
+      <button class="prompts-bar hidden" type="button"><span class="codicon codicon-chevron-down"></span><span class="pb-text"></span></button>
       <div class="prompts"></div>
       <div class="missing-bar hidden">
         <span class="codicon codicon-warning"></span>
@@ -152,6 +159,7 @@
           </select>
           <button class="chip act-model" title="Model and effort"><span class="label"></span><span class="codicon codicon-chevron-down"></span></button>
           <button class="icon-btn act-mcp" title="MCP servers"><span class="codicon codicon-plug"></span></button>
+          <button class="icon-btn act-tasklist" title="Ask for a task list on this prompt"><span class="codicon codicon-tasklist"></span></button>
           <button class="icon-btn act-remote hidden"><span class="codicon codicon-broadcast"></span></button>
           <button class="ctx-btn act-context hidden" aria-label="Context window"><span class="ctx-ring"></span><span class="ctx-text"></span></button>
           <span class="spacer"></span>

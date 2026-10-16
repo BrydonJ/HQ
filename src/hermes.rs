@@ -77,12 +77,14 @@ pub fn spawn(app: &AppHandle, opts: SpawnOptions, events: Channel<InvokeResponse
     })?;
     let pipes = (child.stdin.take(), child.stdout.take(), child.stderr.take());
     let (Some(stdin), Some(stdout), Some(stderr)) = pipes else {
+        crate::session::kill_group(child.id());
         let _ = child.kill();
         return Err("hermes pipes unavailable".into());
     };
     match translate(stdin, stdout, mirror, opts) {
         Ok((input, lines)) => Ok(app.state::<Sessions>().register(app, child, Some(input), lines, stderr, events)),
         Err(e) => {
+            crate::session::kill_group(child.id());
             let _ = child.kill();
             Err(e)
         }
@@ -188,6 +190,9 @@ struct Replay {
     user: String,
     text: String,
     seq: u64,
+    todos: Todos,
+    /// Todo calls, which are drawn as TodoWrite and whose own updates are dropped.
+    todo_ids: HashSet<String>,
 }
 
 impl Replay {
@@ -206,12 +211,21 @@ impl Replay {
                 self.flush_user();
                 self.flush_text();
                 let Some(id) = u["toolCallId"].as_str() else { return };
+                if merge_todo_call(&mut self.todos, u) {
+                    self.todo_ids.insert(id.to_owned());
+                    self.assistant(json!([todo_write_block(id, todo_items(&self.todos))]));
+                    self.lines.push(todo_result_line(&None, id));
+                    return;
+                }
                 let (name, input) = tool_use(u);
                 self.assistant(json!([{ "type": "tool_use", "id": id, "name": name, "input": input }]));
             }
             "tool_call_update" => {
                 let status = u["status"].as_str().unwrap_or_default();
                 let Some(id) = u["toolCallId"].as_str().filter(|_| status == "completed" || status == "failed") else { return };
+                if self.todo_ids.contains(id) {
+                    return;
+                }
                 self.flush_user();
                 self.flush_text();
                 let content = json!([{ "type": "tool_result", "tool_use_id": id, "content": tool_text(u), "is_error": status == "failed" }]);
@@ -231,7 +245,7 @@ impl Replay {
     fn flush_text(&mut self) {
         let text = std::mem::take(&mut self.text);
         if !text.trim().is_empty() {
-            self.assistant(json!([{ "type": "text", "text": text }]));
+            self.assistant(json!([{ "type": "text", "text": text.trim() }]));
         }
     }
 
@@ -299,6 +313,7 @@ impl OneShot {
         hide_console(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| format!("Could not start `{} acp` ({e})", hermes_program().display()))?;
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+            crate::session::kill_group(child.id());
             let _ = child.kill();
             return Err("hermes pipes unavailable".into());
         };
@@ -343,6 +358,7 @@ impl Drop for OneShot {
     fn drop(&mut self) {
         // Stdin closes first: if the kill only reaches a launcher shim, Python still sees EOF and ends.
         drop(self.stdin.take());
+        crate::session::kill_group(self.child.id());
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -394,6 +410,8 @@ struct Permission {
 #[derive(Default)]
 struct Reply {
     id: Option<String>,
+    /// The message id the thought arrived under, which is the answer's too when both come from one model call.
+    thought_id: Option<String>,
     text: String,
     thinking: String,
 }
@@ -437,6 +455,15 @@ struct Bridge {
     permissions: HashMap<String, Permission>,
     /// Side questions in flight: forked session id -> (request id, answer so far).
     sides: HashMap<String, (String, String)>,
+    /// Hermes' todo list for this session, which its updates (`merge`) change piecemeal.
+    todos: Todos,
+    /// Whether `todos` holds the whole list. A fork starts without its parent's, so until Hermes
+    /// writes the list out in full its merges would draw a partial checklist, and are not drawn.
+    /// (Seeding it from the parent is not possible: the copied mirror keeps no Hermes item ids.)
+    todos_known: bool,
+    /// The running turn's prompt and the titles of its last tool calls, for side questions.
+    turn_prompt: String,
+    turn_tools: VecDeque<String>,
 }
 
 impl Bridge {
@@ -471,6 +498,10 @@ impl Bridge {
             last_tool: None,
             permissions: HashMap::new(),
             sides: HashMap::new(),
+            todos: Vec::new(),
+            todos_known: true,
+            turn_prompt: String::new(),
+            turn_tools: VecDeque::new(),
         }
     }
 
@@ -653,6 +684,7 @@ impl Bridge {
             // with a brand new session, and load says plainly that it found nothing.
             Some(id) => {
                 self.loading = true;
+                self.todos_known = false; // until the replay brings a full write
                 let params = json!({ "sessionId": id, "cwd": cwd, "mcpServers": [] });
                 self.call("session/load", params, Call::Open { loaded: Some(id), fork_of: None });
             }
@@ -668,6 +700,13 @@ impl Bridge {
         // Load answers an id it does not know with an empty result.
         if loaded.is_some() && result.as_object().is_none_or(|r| r.is_empty()) {
             return self.fatal(&format!("Hermes has no session {id} (it may have been deleted)"));
+        }
+        // A load knows the list if its replay held a full write (only merges are left after a
+        // context compaction, say); otherwise it waits for one, like a fork.
+        if fork_of.is_some() {
+            self.todos_known = false;
+        } else if loaded.is_none() {
+            self.todos_known = true;
         }
         if let Some(parent) = fork_of.filter(|p| valid_session_id(p) && valid_session_id(&id)) {
             let _ = fs::copy(self.mirror_dir.join(format!("{parent}.jsonl")), self.mirror_dir.join(format!("{id}.jsonl")));
@@ -756,18 +795,31 @@ impl Bridge {
             }
             return;
         }
-        if self.loading || self.session.as_deref() != Some(session) {
+        if self.loading {
+            // HQ draws the history from its own copy, but the todo list lives on in Hermes.
+            if kind == "tool_call" && merge_todo_call(&mut self.todos, u) {
+                self.todos_known |= u["rawInput"]["merge"].as_bool() != Some(true);
+            }
+            return;
+        }
+        if self.session.as_deref() != Some(session) {
             return;
         }
         match kind {
             "agent_message_chunk" => {
                 let Some(text) = u["content"]["text"].as_str().filter(|t| !t.is_empty()) else { return };
-                let id = u["messageId"].as_str().map(str::to_owned);
-                if self.reply.id.is_some() && id.is_some() && self.reply.id != id {
+                let id = u["messageId"].as_str();
+                let current = self.reply.id.as_deref().or(self.reply.thought_id.as_deref());
+                if current.is_some() && id.is_some() && current != id {
                     self.flush();
                 }
+                // The answer's leading blank lines are not worth drawing.
+                let text = if self.reply.text.is_empty() { text.trim_start() } else { text };
+                if text.is_empty() {
+                    return;
+                }
                 if self.reply.text.is_empty() {
-                    self.start_reply(id);
+                    self.start_reply(id.map(str::to_owned));
                 }
                 self.reply.text.push_str(text);
                 self.emit(json!({
@@ -777,12 +829,36 @@ impl Bridge {
             }
             "agent_thought_chunk" => {
                 if let Some(text) = u["content"]["text"].as_str() {
+                    // A thought after the answer began, or under another message id, is a new model call's.
+                    let id = u["messageId"].as_str();
+                    let current = self.reply.thought_id.as_deref().or(self.reply.id.as_deref());
+                    if !self.reply.text.is_empty() || (current.is_some() && id.is_some() && current != id) {
+                        self.flush();
+                    }
+                    if self.reply.thought_id.is_none() {
+                        self.reply.thought_id = id.map(str::to_owned);
+                    }
                     self.reply.thinking.push_str(text);
                 }
             }
             "tool_call" => {
                 self.flush();
                 let Some(id) = u["toolCallId"].as_str().map(str::to_owned) else { return };
+                if let Some(title) = u["title"].as_str().filter(|t| !t.is_empty()) {
+                    if self.turn_tools.len() >= 30 {
+                        self.turn_tools.pop_front();
+                    }
+                    self.turn_tools.push_back(title.to_owned());
+                }
+                // Hermes' todo list is drawn as a TodoWrite of the whole list instead of a card of its own.
+                // Its updates are not tracked as tools, so they bring no orphan result.
+                if merge_todo_call(&mut self.todos, u) {
+                    self.todos_known |= u["rawInput"]["merge"].as_bool() != Some(true);
+                    if !self.todos_known {
+                        return;
+                    }
+                    return self.emit_todos(format!("hermes-tool-{id}"), &id, todo_items(&self.todos));
+                }
                 let (name, input) = tool_use(u);
                 self.tools.insert(id.clone());
                 self.last_tool = Some(id.clone());
@@ -815,13 +891,7 @@ impl Bridge {
                     .unwrap_or_default();
                 self.reply_seq += 1;
                 let id = format!("hermes-plan-{}", self.reply_seq);
-                self.assistant(format!("{id}-msg"), json!([{ "type": "tool_use", "id": id, "name": "TodoWrite", "input": { "todos": todos } }]));
-                let result = json!({
-                    "type": "user", "session_id": self.session, "parent_tool_use_id": null,
-                    "message": { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": id, "content": "Todos updated" }] },
-                });
-                self.record(result.clone());
-                self.emit(result);
+                self.emit_todos(format!("{id}-msg"), &id, todos);
             }
             "available_commands_update" => {
                 self.commands = Some(u["availableCommands"].as_array().cloned().unwrap_or_default());
@@ -842,6 +912,16 @@ impl Bridge {
             }
             _ => {}
         }
+    }
+
+    /// Shows a todo list as a finished TodoWrite call, so the checklist and progress panel follow it.
+    /// Drawn before Hermes reports the call's outcome, so an update Hermes rejects (an item without
+    /// content, a model slip) shows as applied until the model's retry redraws the list.
+    fn emit_todos(&mut self, message_id: String, id: &str, todos: Vec<Value>) {
+        self.assistant(message_id, json!([todo_write_block(id, todos)]));
+        let result = todo_result_line(&self.session, id);
+        self.record(result.clone());
+        self.emit(result);
     }
 
     /// Takes down the cards of requests Hermes no longer waits on, and answers them so nothing
@@ -874,11 +954,14 @@ impl Bridge {
     fn flush(&mut self) {
         let reply = std::mem::take(&mut self.reply);
         let mut content = Vec::new();
-        if !reply.thinking.trim().is_empty() {
-            content.push(json!({ "type": "thinking", "thinking": reply.thinking }));
+        // Each flush is one model call, so its thought is a block of its own; Hermes pads both
+        // the thought and the answer with blank lines.
+        let (thinking, text) = (reply.thinking.trim(), reply.text.trim());
+        if !thinking.is_empty() {
+            content.push(json!({ "type": "thinking", "thinking": thinking }));
         }
-        if !reply.text.is_empty() {
-            content.push(json!({ "type": "text", "text": reply.text }));
+        if !text.is_empty() {
+            content.push(json!({ "type": "text", "text": text }));
         }
         if content.is_empty() {
             return;
@@ -935,6 +1018,7 @@ impl Bridge {
             self.send_hermes(json!({ "jsonrpc": "2.0", "id": p.rpc_id, "result": { "outcome": { "outcome": "cancelled" } } }));
         }
         self.tools.clear();
+        self.turn_tools.clear();
         self.last_tool = None;
         // A Hermes that never listed its commands still answers initialize.
         self.commands.get_or_insert_with(Vec::new);
@@ -996,6 +1080,8 @@ impl Bridge {
         }));
         self.record(json!({ "type": "user", "message": { "role": "user", "content": content } }));
         self.in_turn = true;
+        self.turn_prompt = prompt_text(&content);
+        self.turn_tools.clear();
         self.call("session/prompt", prompt, Call::Prompt { started: Instant::now() });
     }
 
@@ -1073,7 +1159,11 @@ impl Bridge {
             "rename_session" => self.reply_ok(request_id, json!({ "title": req["title"] })),
             "side_question" => {
                 // Asked in a throwaway fork, so the question and answer stay out of the conversation.
-                let question = req["question"].as_str().unwrap_or_default().to_owned();
+                let mut question = req["question"].as_str().unwrap_or_default().to_owned();
+                if self.in_turn {
+                    // The fork has only the persisted history, which lacks the running turn.
+                    question = side_prompt(&question, &self.turn_prompt, &self.turn_tools, if self.todos_known { &self.todos } else { &NO_TODOS });
+                }
                 let params = json!({ "sessionId": session, "cwd": self.opts.cwd, "mcpServers": [] });
                 self.call("session/fork", params, Call::SideFork { request_id: request_id.into(), question });
             }
@@ -1184,6 +1274,125 @@ fn tool_text(update: &Value) -> String {
     parts.join("\n")
 }
 
+/// Hermes' todo list as it stands: (item id, item), in Hermes' order.
+type Todos = Vec<(String, Value)>;
+
+/// What a side question is told of a list not yet known in full.
+static NO_TODOS: Todos = Vec::new();
+
+/// Applies a `todo_list` tool call (rawInput `{todos: [...], merge?: bool}`) to the list: a merge
+/// updates items by id and adds new ones, anything else replaces the list. Returns whether the
+/// call was a todo update at all; a bare `todo_list` call only reads the list.
+fn merge_todo_call(list: &mut Todos, call: &Value) -> bool {
+    // Hermes titles a call "<tool>: <what>"; another tool taking a `todos` argument is not this one.
+    let title = call["title"].as_str().unwrap_or_default();
+    if title != "todo_list" && !title.starts_with("todo_list:") {
+        return false;
+    }
+    let raw = &call["rawInput"];
+    let Some(items) = raw["todos"].as_array() else { return false };
+    if raw["merge"].as_bool() != Some(true) {
+        list.clear();
+    }
+    for item in items {
+        let Some(fields) = item.as_object() else { continue };
+        let id = match &item["id"] {
+            Value::String(s) => s.clone(),
+            Value::Number(n) => n.to_string(),
+            _ => item["content"].as_str().unwrap_or_default().to_owned(),
+        };
+        match list.iter_mut().find(|(i, _)| *i == id) {
+            // A merge may carry only what changed.
+            Some((_, old)) => {
+                if let Some(old) = old.as_object_mut() {
+                    old.extend(fields.iter().map(|(k, v)| (k.clone(), v.clone())));
+                }
+            }
+            // A merge naming an item this list never saw (a session HQ did not load) has nothing to show.
+            None if item["content"].as_str().is_some_and(|c| !c.trim().is_empty()) => list.push((id, item.clone())),
+            None => {}
+        }
+    }
+    true
+}
+
+/// The list as TodoWrite items. The UI only counts completed, in_progress and pending, so a
+/// cancelled item counts as done.
+fn todo_items(list: &Todos) -> Vec<Value> {
+    list.iter()
+        .map(|(_, t)| {
+            let status = match t["status"].as_str() {
+                Some("cancelled") => "completed",
+                Some(s) => s,
+                None => "pending",
+            };
+            json!({ "content": t["content"], "activeForm": t["content"], "status": status })
+        })
+        .collect()
+}
+
+/// The synthetic TodoWrite call standing in for a todo update, and its result.
+fn todo_write_block(id: &str, todos: Vec<Value>) -> Value {
+    json!({ "type": "tool_use", "id": id, "name": "TodoWrite", "input": { "todos": todos } })
+}
+
+fn todo_result_line(session: &Option<String>, id: &str) -> Value {
+    json!({
+        "type": "user", "session_id": session, "parent_tool_use_id": null,
+        "message": { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": id, "content": "Todos updated" }] },
+    })
+}
+
+/// At most `max` characters of `s`.
+fn clip(s: &str, max: usize) -> &str {
+    s.char_indices().nth(max).map_or(s, |(i, _)| &s[..i])
+}
+
+/// The text of a frontend prompt (a string, or content blocks).
+fn prompt_text(content: &Value) -> String {
+    match content {
+        Value::String(s) => s.clone(),
+        Value::Array(items) => items.iter().filter(|i| i["type"] == "text").filter_map(|i| i["text"].as_str()).collect::<Vec<_>>().join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// A side question asked while a turn runs. The fork that answers it sees only the persisted
+/// history, which lacks the running turn, so the turn is described in front of the question.
+fn side_prompt(question: &str, prompt: &str, tools: &VecDeque<String>, todos: &Todos) -> String {
+    let mut out = String::new();
+    if !prompt.trim().is_empty() {
+        let clipped = clip(prompt, 2000);
+        let dots = if clipped.len() < prompt.len() { "..." } else { "" };
+        out.push_str(&format!("The user's current request (still running) is: \"{clipped}{dots}\". "));
+    } else {
+        out.push_str("A request is still running. ");
+    }
+    if !tools.is_empty() {
+        out.push_str("Tools run so far this turn: ");
+        for (n, t) in tools.iter().enumerate() {
+            if n > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(t);
+        }
+        out.push_str(". ");
+    }
+    if !todos.is_empty() {
+        out.push_str("Current todo list: ");
+        for (n, (_, t)) in todos.iter().enumerate() {
+            if n > 0 {
+                out.push_str("; ");
+            }
+            out.push_str(&format!("{} [{}]", t["content"].as_str().unwrap_or_default(), t["status"].as_str().unwrap_or("pending")));
+        }
+        out.push_str(". ");
+    }
+    out.push_str("\n\n");
+    out.push_str(question);
+    out
+}
+
 /// The current UTC time as Claude's transcripts write it, e.g. `2026-10-08T08:15:02.123Z`.
 fn now_iso() -> String {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
@@ -1292,6 +1501,80 @@ mod tests {
         assert!(s.starts_with("20") && s.ends_with('Z'), "{s}");
     }
 
+    fn todo_call(merge: bool, todos: Value) -> Value {
+        json!({ "title": "todo_list: updating", "rawInput": { "merge": merge, "todos": todos } })
+    }
+
+    #[test]
+    fn takes_only_todo_list_calls_and_skips_unknown_merge_items() {
+        let mut list = Todos::new();
+        // Another tool with a `todos` argument is not Hermes' list.
+        assert!(!merge_todo_call(&mut list, &json!({ "title": "other_tool: x", "rawInput": { "todos": [{ "id": "1", "content": "A" }] } })));
+        // A merge into a list this bridge never saw adds only items it can draw.
+        assert!(merge_todo_call(&mut list, &todo_call(true, json!([{ "id": "1", "status": "completed" }, { "id": "2", "content": "B", "status": "pending" }]))));
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].0, "2");
+    }
+
+    #[test]
+    fn merges_hermes_todo_lists() {
+        let mut list = Todos::new();
+        let first = json!({ "title": "todo_list: planning 3 task(s)", "rawInput": { "todos": [
+            { "id": "1", "content": "Read f1", "status": "in_progress" },
+            { "id": "2", "content": "Read f2", "status": "pending" },
+            { "id": "3", "content": "Report", "status": "pending" },
+        ] } });
+        assert!(merge_todo_call(&mut list, &first));
+        assert_eq!(list.len(), 3);
+        // A merge upserts by id and keeps what it does not mention.
+        assert!(merge_todo_call(&mut list, &todo_call(true, json!([{ "id": "1", "status": "completed" }, { "id": 2, "content": "Read f2", "status": "cancelled" }, { "id": "4", "content": "Extra", "status": "pending" }]))));
+        let items = todo_items(&list);
+        let shape: Vec<(&str, &str)> = items.iter().map(|t| (t["content"].as_str().unwrap(), t["status"].as_str().unwrap())).collect();
+        assert_eq!(shape, [("Read f1", "completed"), ("Read f2", "completed"), ("Report", "pending"), ("Extra", "pending")]);
+        assert_eq!(items[0]["activeForm"], "Read f1");
+        // Without merge the list is replaced.
+        assert!(merge_todo_call(&mut list, &todo_call(false, json!([{ "id": "9", "content": "Only", "status": "pending" }]))));
+        assert_eq!(list.len(), 1);
+        // A call without todos only reads the list.
+        assert!(!merge_todo_call(&mut list, &json!({ "title": "todo_list: reading", "rawInput": {} })));
+        assert_eq!(list.len(), 1);
+    }
+
+    #[test]
+    fn replays_todo_calls_as_one_todo_write_each() {
+        let mut replay = Replay::default();
+        replay.push(&json!({ "sessionUpdate": "tool_call", "toolCallId": "t1", "title": "todo_list: planning 2 task(s)", "rawInput": { "todos": [
+            { "id": "1", "content": "A", "status": "in_progress" }, { "id": "2", "content": "B", "status": "pending" } ] } }));
+        replay.push(&json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed", "content": [] }));
+        replay.push(&json!({ "sessionUpdate": "tool_call", "toolCallId": "t2", "title": "todo_list: updating 1 task(s)", "rawInput": { "merge": true, "todos": [
+            { "id": "1", "status": "completed" } ] } }));
+        let lines = replay.finish();
+        let kinds: Vec<&str> = lines.iter().map(|l| l["type"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["assistant", "user", "assistant", "user"]);
+        assert_eq!(lines[0]["message"]["content"][0]["name"], "TodoWrite");
+        let last = &lines[2]["message"]["content"][0]["input"]["todos"];
+        assert_eq!(last.as_array().unwrap().len(), 2);
+        assert_eq!(last[0]["status"], "completed");
+        assert_eq!(lines[3]["message"]["content"][0]["tool_use_id"], "t2");
+    }
+
+    #[test]
+    fn describes_the_running_turn_in_a_side_question() {
+        let tools: VecDeque<String> = ["read_file: f1.txt", "terminal: dir"].into_iter().map(String::from).collect();
+        let todos: Todos = vec![("1".into(), json!({ "id": "1", "content": "Read f1", "status": "completed" })), ("2".into(), json!({ "id": "2", "content": "Sum", "status": "pending" }))];
+        let out = side_prompt("Progress?", "Sum the facts", &tools, &todos);
+        assert_eq!(
+            out,
+            "The user's current request (still running) is: \"Sum the facts\". Tools run so far this turn: read_file: f1.txt, terminal: dir. Current todo list: Read f1 [completed]; Sum [pending]. \n\nProgress?"
+        );
+        let bare = side_prompt("Progress?", "go", &VecDeque::new(), &Vec::new());
+        assert_eq!(bare, "The user's current request (still running) is: \"go\". \n\nProgress?");
+        let long = "é".repeat(2500);
+        let out = side_prompt("q", &long, &VecDeque::new(), &Vec::new());
+        assert!(out.contains(&format!("{}...\"", "é".repeat(2000))));
+        assert_eq!(prompt_text(&json!([{ "type": "text", "text": "a" }, { "type": "image" }, { "type": "text", "text": "b" }])), "a\nb");
+    }
+
     #[test]
     fn rejects_session_ids_that_could_escape_the_folder() {
         assert!(valid_session_id("a38210d7-7d33-467a-902e-e1c088932fb5"));
@@ -1330,6 +1613,7 @@ mod live {
             model: None,
             effort: None,
             fork,
+            auto_tasks: false,
         };
         let mut cmd = Command::new(hermes_program());
         cmd.arg("acp").current_dir(&dir).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());

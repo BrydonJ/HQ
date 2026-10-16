@@ -4,6 +4,8 @@
 mod dev;
 #[cfg(feature = "hermes")]
 mod hermes;
+#[cfg(target_os = "macos")]
+mod macos;
 mod session;
 mod store;
 mod update;
@@ -29,11 +31,13 @@ async fn spawn_session(
     model: Option<String>,
     effort: Option<String>,
     fork: Option<bool>,
+    auto_tasks: Option<bool>,
     backend: Option<String>,
     on_event: Channel<InvokeResponseBody>,
 ) -> Result<u64, String> {
     let fork = fork.unwrap_or(false);
-    let opts = SpawnOptions { cwd, resume, permission_mode, model, effort, fork };
+    let auto_tasks = auto_tasks.unwrap_or(true);
+    let opts = SpawnOptions { cwd, resume, permission_mode, model, effort, fork, auto_tasks };
     tauri::async_runtime::spawn_blocking(move || match backend.as_deref() {
         None | Some("claude") => app.state::<Sessions>().spawn(&app, opts, on_event),
         #[cfg(feature = "hermes")]
@@ -223,9 +227,30 @@ fn reveal_folder(app: AppHandle, path: String) -> Result<(), String> {
     app.opener().open_path(path, None::<&str>).map_err(|e| e.to_string())
 }
 
-/// Opens a folder, or a `.code-workspace` file, in VS Code. Nothing else is accepted.
+/// Runs a launcher on the blocking pool, off the main thread (where a sync command runs) and the
+/// async workers: on a Mac launchers wait for the login shell's PATH, which can take seconds
+/// right after launch.
+async fn blocking(f: impl FnOnce() -> Result<(), String> + Send + 'static) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
-fn open_in_vscode(path: String) -> Result<(), String> {
+async fn open_in_vscode(path: String) -> Result<(), String> {
+    blocking(move || vscode_now(path)).await
+}
+
+#[tauri::command]
+async fn open_terminal(path: Option<String>) -> Result<(), String> {
+    blocking(move || terminal_now(path)).await
+}
+
+#[tauri::command]
+async fn run_in_terminal(path: String, command: String, shell: Option<String>, lang: Option<String>) -> Result<(), String> {
+    blocking(move || run_now(path, command, shell, lang)).await
+}
+
+/// Opens a folder, or a `.code-workspace` file, in VS Code. Nothing else is accepted.
+fn vscode_now(path: String) -> Result<(), String> {
     let target = Path::new(&path);
     if store::is_workspace_file(target) {
         if !target.is_file() {
@@ -234,19 +259,34 @@ fn open_in_vscode(path: String) -> Result<(), String> {
     } else if !target.is_dir() {
         return Err("folder does not exist".into());
     }
-    let code = store::find_vscode().ok_or("VS Code (Code.exe) was not found")?;
-    std::process::Command::new(code).arg(&path).spawn().map(|_| ()).map_err(|e| e.to_string())
+    #[cfg(target_os = "macos")]
+    return macos::open_in_vscode(&path);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let code = store::find_vscode().ok_or("VS Code (Code.exe) was not found")?;
+        std::process::Command::new(code).arg(&path).spawn().map(|_| ()).map_err(|e| e.to_string())
+    }
 }
 
-/// Opens the default terminal (Windows Terminal, else a console window), in `path` when given.
-#[tauri::command]
-fn open_terminal(path: Option<String>) -> Result<(), String> {
+/// Opens the default terminal (Windows Terminal, else a console window; Terminal on a Mac), in
+/// `path` when given.
+fn terminal_now(path: Option<String>) -> Result<(), String> {
     let dir = path.filter(|p| !p.is_empty());
     if let Some(dir) = &dir {
         if !Path::new(dir).is_dir() {
             return Err("folder does not exist".into());
         }
     }
+    #[cfg(target_os = "macos")]
+    return macos::open_terminal(dir.as_deref());
+    #[cfg(not(target_os = "macos"))]
+    {
+        open_terminal_windows(dir)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_terminal_windows(dir: Option<String>) -> Result<(), String> {
     let mut wt = std::process::Command::new("wt.exe");
     if let Some(dir) = &dir {
         // wt treats `;` as a command separator, even inside a path.
@@ -273,14 +313,28 @@ fn open_terminal(path: Option<String>) -> Result<(), String> {
 /// neither wt's `;` splitting nor shell quoting can change it. `shell` is `cmd` for batch, else
 /// PowerShell (pwsh when installed, since it understands `&&` like the shells the blocks are
 /// usually written for).
-#[tauri::command]
-fn run_in_terminal(path: String, command: String, shell: Option<String>) -> Result<(), String> {
+fn run_now(path: String, command: String, shell: Option<String>, lang: Option<String>) -> Result<(), String> {
     if !Path::new(&path).is_dir() {
         return Err("folder does not exist".into());
     }
     if command.trim().is_empty() {
         return Err("nothing to run".into());
     }
+    // On a Mac `lang` picks bash, zsh, sh or pwsh (the UI maps the block's language); `shell` is for Windows.
+    #[cfg(target_os = "macos")]
+    {
+        let _ = shell;
+        return macos::run_in_terminal(&path, &command, lang.as_deref());
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = lang;
+        run_in_terminal_windows(path, command, shell)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn run_in_terminal_windows(path: String, command: String, shell: Option<String>) -> Result<(), String> {
     let cmd = shell.as_deref() == Some("cmd");
     let script = write_run_script(&command, cmd).map_err(|e| format!("could not write the script ({e})"))?;
     let script = script.to_string_lossy().into_owned();
@@ -309,6 +363,7 @@ fn run_in_terminal(path: String, command: String, shell: Option<String>) -> Resu
 }
 
 /// `pwsh.exe` when it is on PATH, else Windows PowerShell.
+#[cfg(not(target_os = "macos"))]
 fn powershell_program() -> String {
     let found = std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).any(|dir| dir.join("pwsh.exe").is_file()))
@@ -319,6 +374,7 @@ fn powershell_program() -> String {
 /// Writes the command to `%TEMP%\hq-run\`, as a `.cmd` or a `.ps1` that first echoes it. Scripts
 /// older than a day are removed. A `.cmd` runs with batch rules (cmd re-reads it as it goes, and a
 /// literal `%` must be `%%`); that is accepted for what are short, one-off commands.
+#[cfg(not(target_os = "macos"))]
 fn write_run_script(command: &str, cmd: bool) -> std::io::Result<std::path::PathBuf> {
     let dir = std::env::temp_dir().join("hq-run");
     std::fs::create_dir_all(&dir)?;
@@ -453,6 +509,58 @@ fn profile() -> Option<String> {
     }
 }
 
+/// Tauri's default Mac menu, less what would swallow HQ's own keys: its Close Window is Cmd+W
+/// (which would end the app and every session, where HQ means "close this cell") and its
+/// Minimize is Cmd+M (HQ's "maximize this cell"). A menu shortcut fires before the page sees the
+/// key, so those two are left out or given no shortcut. Edit stays, since Cmd+C/V/X/A/Z need it.
+#[cfg(target_os = "macos")]
+fn mac_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+    let name = app.package_info().name.clone();
+    Menu::with_items(
+        app,
+        &[
+            &Submenu::with_items(
+                app,
+                name,
+                true,
+                &[
+                    &PredefinedMenuItem::about(app, None, None)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::services(app, None)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::hide(app, None)?,
+                    &PredefinedMenuItem::hide_others(app, None)?,
+                    &PredefinedMenuItem::show_all(app, None)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::quit(app, None)?,
+                ],
+            )?,
+            &Submenu::with_items(
+                app,
+                "Edit",
+                true,
+                &[
+                    &PredefinedMenuItem::undo(app, None)?,
+                    &PredefinedMenuItem::redo(app, None)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::cut(app, None)?,
+                    &PredefinedMenuItem::copy(app, None)?,
+                    &PredefinedMenuItem::paste(app, None)?,
+                    &PredefinedMenuItem::select_all(app, None)?,
+                ],
+            )?,
+            &Submenu::with_items(app, "View", true, &[&PredefinedMenuItem::fullscreen(app, None)?])?,
+            &Submenu::with_items(
+                app,
+                "Window",
+                true,
+                &[&MenuItem::with_id(app, "minimize", "Minimize", true, None::<&str>)?, &PredefinedMenuItem::maximize(app, Some("Zoom"))?],
+            )?,
+        ],
+    )
+}
+
 fn main() {
     let profile = profile();
     let mut context = tauri::generate_context!();
@@ -465,8 +573,20 @@ fn main() {
     }
     #[cfg(debug_assertions)]
     dev::prepare(&mut context);
+    // Works out the login shell's PATH while the window opens; the first child waits for it.
+    #[cfg(target_os = "macos")]
+    macos::warm_path();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    let builder = builder.menu(mac_menu).on_menu_event(|app, event| {
+        if event.id().0 == "minimize" {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.minimize();
+            }
+        }
+    });
+    builder
         // Must come first: a second launch of the same profile hands over to the running copy.
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             if let Some(request) = parse_launch(&args) {

@@ -35,11 +35,19 @@ impl UpdateInfo {
 }
 
 /// The NSIS installer puts `uninstall.exe` next to the app; a build under `target\` has none.
+///
+/// On a Mac it is an app bundle in `/Applications` or `~/Applications`: a copy run from the DMG,
+/// a download folder or `target/` stays a dev copy.
 pub fn is_installed() -> bool {
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join("uninstall.exe").is_file()))
-        .unwrap_or(false)
+    #[cfg(target_os = "macos")]
+    return crate::macos::is_installed();
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join("uninstall.exe").is_file()))
+            .unwrap_or(false)
+    }
 }
 
 /// `HQ_NO_UPDATE` turns updates off; `HQ_UPDATE_ANY_COPY` allows them for a test build.

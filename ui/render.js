@@ -1,6 +1,26 @@
 'use strict';
 // Pure rendering helpers: markdown, tool rows, diffs. No session state lives here.
 
+// ---------- platform ----------
+
+const IS_MAC = /^Mac/i.test(navigator.platform || '') || /Mac OS X/.test(navigator.userAgent || '');
+const FILE_MANAGER = IS_MAC ? 'Finder' : 'Explorer';
+
+/** Shortcut text for the platform: `Ctrl+Shift+M` reads ⇧⌘M on a Mac, where Cmd takes Ctrl's place. */
+function keyLabel(text) {
+  return IS_MAC ? text.replace(/Ctrl\+Shift\+/g, '⇧⌘').replace(/Ctrl\+/g, '⌘') : text;
+}
+
+// The page's own shortcut labels and wording are written for Windows; fix them once at load.
+if (IS_MAC) {
+  const fix = root => {
+    for (const el of root.querySelectorAll('[title]')) el.title = keyLabel(el.title).replace('Explorer', FILE_MANAGER);
+    for (const el of root.querySelectorAll('.empty-keys')) el.textContent = keyLabel(el.textContent);
+  };
+  fix(document);
+  for (const t of document.querySelectorAll('template')) fix(t.content);
+}
+
 function h(tag, attrs, ...children) {
   const el = document.createElement(tag);
   if (attrs) {
@@ -71,8 +91,9 @@ function codeBlock(code, lang) {
   const key = (lang || '').toLowerCase();
   const preview = MARKDOWN_LANGS.has(key)
     ? '<button class="code-act code-preview" title="Preview the Markdown" tabindex="-1"><span class="codicon codicon-open-preview"></span></button>' : '';
-  const shell = /^(cmd|bat|batch)$/.test(key) ? 'cmd' : 'PowerShell';
-  const run = SHELL_LANGS.has(key) && code.trim()
+  const shell = IS_MAC ? 'Terminal' : /^(cmd|bat|batch)$/.test(key) ? 'cmd' : 'PowerShell';
+  // A Mac has no cmd; PowerShell runs only if pwsh is installed (the app says so when it is not).
+  const run = SHELL_LANGS.has(key) && code.trim() && !(IS_MAC && /^(cmd|bat|batch)$/.test(key))
     ? `<button class="code-act code-run" title="Run in ${shell}, in a new terminal in this session's folder" tabindex="-1"><span class="codicon codicon-play"></span></button>` : '';
   return `<div class="code-block" data-lang="${escapeHtml(key)}"><div class="code-head"><span class="code-lang">${escapeHtml(lang || 'text')}</span>`
     + `${preview}${run}<button class="code-copy" title="Copy code" tabindex="-1"><span class="codicon codicon-copy"></span></button></div>`
@@ -168,12 +189,23 @@ function normPath(p) {
   return String(p || '').replace(/\//g, '\\').replace(/\\+$/, '');
 }
 
+/** The interpreter a Mac runs a shell block with: its own language when it names one, else zsh. */
+function macShell(lang) {
+  if (/^(ps|ps1|pwsh|powershell)$/.test(lang)) return 'powershell';
+  return /^(bash|sh|zsh)$/.test(lang) ? lang : 'zsh';
+}
+
+/** A path in the form `like` is written in: slashes for a Unix path, backslashes otherwise. */
+function nativeSep(p, like) {
+  return String(like || '').startsWith('/') ? p.replace(/\\/g, '/') : p;
+}
+
 function relPath(p, cwd) {
   if (!p) return '';
   const np = normPath(p);
   const nc = normPath(cwd);
-  if (nc && np.toLowerCase().startsWith(nc.toLowerCase() + '\\')) return np.slice(nc.length + 1);
-  return np;
+  if (nc && np.toLowerCase().startsWith(nc.toLowerCase() + '\\')) return nativeSep(np.slice(nc.length + 1), p);
+  return nativeSep(np, p);
 }
 
 function baseName(p) {

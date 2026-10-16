@@ -604,10 +604,18 @@ fn scan_line(line: &str, scan: &mut Scan, newest_first: bool) {
         }
     }
     if !newest_first && scan.first_prompt.is_none() && text("type") == Some("user") && v.get("isMeta").is_none() {
-        let prompt = v.pointer("/message/content").and_then(Value::as_str).filter(|t| !t.trim_start().starts_with('<'));
+        // A prompt with an image or HQ's task-list nudge is sent as blocks; its first text block counts.
+        let content = v.pointer("/message/content");
+        let prompt = content
+            .and_then(Value::as_str)
+            .or_else(|| content?.as_array()?.iter().filter(|b| b["type"] == "text").find_map(|b| b["text"].as_str().filter(|t| !t.starts_with(TASK_HINT_PREFIX))))
+            .filter(|t| !t.trim_start().starts_with('<'));
         set(&mut scan.first_prompt, prompt.map(|t| t.lines().next().unwrap_or(t)));
     }
 }
+
+/// How the composer's task-list nudge (`TASK_HINT` in app.js) starts. It is HQ's text, not the user's.
+const TASK_HINT_PREFIX: &str = "(HQ: track this work";
 
 /// A message that matches a full-text search, and the session it is in.
 #[derive(Serialize)]
@@ -741,7 +749,7 @@ impl<'de> Deserialize<'de> for Texts {
                 let mut texts = Vec::new();
                 while let Some(block) = seq.next_element::<Block>()? {
                     if block.kind.as_deref() == Some("text") {
-                        texts.extend(block.text);
+                        texts.extend(block.text.filter(|t| !t.starts_with(TASK_HINT_PREFIX)));
                     }
                 }
                 Ok(Texts(texts))
@@ -858,6 +866,9 @@ fn snippet(text: &str, at: usize) -> String {
 
 /// Finds VS Code's executable directly so a folder path is passed as a plain argument,
 /// never through `cmd /c code ...` where `&` or `^` in a path would be interpreted.
+///
+/// On a Mac it is the `code` command (inside the app bundle, else on PATH), run by macos.rs.
+#[cfg(windows)]
 pub fn find_vscode() -> Option<PathBuf> {
     let mut candidates = Vec::new();
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
@@ -869,6 +880,11 @@ pub fn find_vscode() -> Option<PathBuf> {
         }
     }
     candidates.into_iter().find(|p| p.is_file())
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn find_vscode() -> Option<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?).map(|dir| dir.join("code")).find(|p| p.is_file())
 }
 
 pub fn is_workspace_file(path: &Path) -> bool {
@@ -1121,6 +1137,17 @@ mod tests {
         assert_eq!(found[0].2, "Please fix the FROBNICATOR now");
         assert_eq!(found[1].2, "I fixed the frobnicator today");
         assert_eq!(found[2].2, r#"say "hello" to the frobnicator"#);
+    }
+
+    #[test]
+    fn task_hint_is_neither_a_title_nor_a_search_hit() {
+        let prompt = r#"{"type":"user","message":{"content":[{"type":"text","text":"Fix the frobnicator\nplease"},{"type":"text","text":"(HQ: track this work with TaskCreate)"}]}}"#;
+        let mut scan = Scan::default();
+        scan_line(prompt, &mut scan, false);
+        assert_eq!(scan.first_prompt.as_deref(), Some("Fix the frobnicator"));
+        let file = TempTranscript::new("search-hint", &[prompt.to_string()], true);
+        assert_eq!(hits(&file, "frobnicator").len(), 1);
+        assert!(hits(&file, "TaskCreate").is_empty());
     }
 
     #[test]
