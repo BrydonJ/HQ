@@ -28,6 +28,15 @@ use crate::store::{self, TranscriptChunk};
 /// ACP version spoken; Hermes 0.21 answers 1.
 const PROTOCOL_VERSION: u64 = 1;
 
+/// Starts every note HQ adds to a prompt (this one, and the composer's task-list nudge), so a copy
+/// rebuilt from Hermes' history can cut them off.
+const TASK_HINT_PREFIX: &str = "(HQ: track this work";
+/// The composer's one-off nudge for a Hermes cell (`HERMES_TASK_HINT` in ui/app.js).
+const COMPOSER_TASK_HINT: &str = "(HQ: track this work with your todo tool so the user can follow progress.)";
+/// What Claude gets as an appended system prompt. ACP has no system prompt, so it rides on the
+/// first prompt a process sends instead; Hermes keeps it in the session's history from there.
+const TASK_PROMPT: &str = "(HQ: track this work with your todo tool when it has three or more steps or will take more than a few minutes: the user watches several sessions at once in HQ and judges progress from your todo list. Write the list before starting and keep it current, marking each item in_progress as you start it and completed as soon as it is done. Skip the list for questions and quick single-step jobs. This applies to the rest of the session.)";
+
 /// The `hermes` executable: `HQ_HERMES` when set, otherwise whatever is on PATH. Windows installs
 /// of Hermes 0.22 ship only `hermes.cmd`, which `Command` never finds by bare name (it only
 /// tries `.exe`), so PATH is searched here.
@@ -236,7 +245,13 @@ impl Replay {
     }
 
     fn flush_user(&mut self) {
-        let text = std::mem::take(&mut self.user);
+        let mut text = std::mem::take(&mut self.user);
+        // HQ's notes come last, after what the user wrote.
+        for note in [TASK_PROMPT, COMPOSER_TASK_HINT] {
+            if let Some(at) = text.find(note) {
+                text.replace_range(text[..at].trim_end().len()..at + note.len(), "");
+            }
+        }
         if !text.trim().is_empty() {
             self.lines.push(json!({ "type": "user", "message": { "role": "user", "content": text } }));
         }
@@ -464,10 +479,13 @@ struct Bridge {
     /// The running turn's prompt and the titles of its last tool calls, for side questions.
     turn_prompt: String,
     turn_tools: VecDeque<String>,
+    /// Whether this process still owes Hermes `TASK_PROMPT` (the Automatic task lists setting).
+    task_prompt_due: bool,
 }
 
 impl Bridge {
     fn new(hermes: ChildStdin, out: PipeWriter, mirror_dir: PathBuf, opts: SpawnOptions) -> Bridge {
+        let task_prompt_due = opts.auto_tasks;
         Bridge {
             hermes: Some(hermes),
             out: Some(out),
@@ -502,6 +520,7 @@ impl Bridge {
             todos_known: true,
             turn_prompt: String::new(),
             turn_tools: VecDeque::new(),
+            task_prompt_due,
         }
     }
 
@@ -1071,9 +1090,16 @@ impl Bridge {
     }
 
     /// Recorded only now, so HQ's copy keeps the order Hermes saw and leaves out prompts an interrupt dropped.
-    fn send_prompt(&mut self, prompt: Value, content: Value) {
+    fn send_prompt(&mut self, mut prompt: Value, content: Value) {
         // Like Claude, each turn starts with system/init; the cell shows it is working from here.
         let Some(id) = self.session.clone() else { return };
+        // Only to Hermes: HQ's copy keeps the prompt as the user wrote it. Added here rather than
+        // when queued, so a queued prompt an interrupt drops does not take the note with it.
+        if self.task_prompt_due {
+            if let Some(blocks) = prompt["prompt"].as_array_mut() {
+                self.task_prompt_due = !add_task_prompt(blocks);
+            }
+        }
         self.emit(json!({
             "type": "system", "subtype": "init", "session_id": id, "model": self.model,
             "permissionMode": claude_mode(&self.mode), "cwd": self.opts.cwd,
@@ -1225,6 +1251,22 @@ fn slash_command(text: &str) -> String {
         Some(rest) if rest.is_empty() || rest.starts_with(char::is_whitespace) => format!("/compress{rest}"),
         _ => text.to_owned(),
     }
+}
+
+/// Adds `TASK_PROMPT` to a prompt's blocks, and returns whether it did: not to a slash command,
+/// which Hermes only runs as the whole prompt, nor beside the composer's one-off nudge, which
+/// leaves it for the next prompt.
+fn add_task_prompt(blocks: &mut Vec<Value>) -> bool {
+    let mut texts = blocks.iter().filter_map(|b| b["text"].as_str());
+    if texts.clone().any(|t| t.starts_with(TASK_HINT_PREFIX)) {
+        return false;
+    }
+    let first = texts.next().unwrap_or_default().split_whitespace().next().unwrap_or_default();
+    if first.strip_prefix('/').is_some_and(|name| !name.is_empty() && !name.contains('/')) {
+        return false;
+    }
+    blocks.push(json!({ "type": "text", "text": TASK_PROMPT }));
+    true
 }
 
 /// A Hermes tool call as a Claude tool name and input, so the frontend draws it the same way:
@@ -1556,6 +1598,34 @@ mod tests {
         assert_eq!(last.as_array().unwrap().len(), 2);
         assert_eq!(last[0]["status"], "completed");
         assert_eq!(lines[3]["message"]["content"][0]["tool_use_id"], "t2");
+    }
+
+    #[test]
+    fn asks_for_a_task_list_once_and_never_on_a_slash_command() {
+        let text = |t: &str| json!({ "type": "text", "text": t });
+        let mut blocks = vec![text("/compress")];
+        assert!(!add_task_prompt(&mut blocks));
+        assert_eq!(blocks.len(), 1);
+        let mut blocks = vec![text("Fix /src/main.rs")];
+        assert!(add_task_prompt(&mut blocks));
+        assert_eq!(blocks[1]["text"], TASK_PROMPT);
+        // Not beside the composer's nudge; the next prompt gets it.
+        let mut blocks = vec![text("Do it"), text(COMPOSER_TASK_HINT)];
+        assert!(!add_task_prompt(&mut blocks));
+        assert_eq!(blocks.len(), 2);
+    }
+
+    #[test]
+    fn replay_leaves_out_hqs_task_note() {
+        let mut replay = Replay::default();
+        replay.push(&json!({ "sessionUpdate": "user_message_chunk", "content": { "type": "text", "text": "Fix the build\n" } }));
+        replay.push(&json!({ "sessionUpdate": "user_message_chunk", "content": { "type": "text", "text": TASK_PROMPT } }));
+        replay.push(&json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "On it." } }));
+        replay.push(&json!({ "sessionUpdate": "user_message_chunk", "content": { "type": "text", "text": "Quote (HQ: track this work back" } }));
+        replay.push(&json!({ "sessionUpdate": "user_message_chunk", "content": { "type": "text", "text": COMPOSER_TASK_HINT } }));
+        let lines = replay.finish();
+        assert_eq!(lines[0]["message"]["content"], "Fix the build");
+        assert_eq!(lines[2]["message"]["content"], "Quote (HQ: track this work back");
     }
 
     #[test]

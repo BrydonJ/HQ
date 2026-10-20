@@ -36,7 +36,6 @@ function hermesDecorate(cell) {
   cell.modeSel.replaceChildren(...HERMES_MODES.map(([value, label]) => h('option', { value, text: label })));
   if (!HERMES_MODES.some(([value]) => value === cell.permissionMode)) cell.permissionMode = 'default';
   cell.mcpBtn.classList.add('hidden'); // Hermes' MCP servers are set up in its own config
-  cell.taskBtn.classList.add('hidden'); // the task-list nudge names Claude Code's tools
   el.querySelector('.act-handoff').title = 'Handoff: Hermes writes a Markdown summary another session can continue from';
   cell.input.placeholder = 'Ask Hermes…  (Enter to send, Shift+Enter for new line)';
 }

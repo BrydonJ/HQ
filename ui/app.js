@@ -159,7 +159,7 @@ const nextRequestId = () => `hq-${Date.now().toString(36)}-${++reqSeq}`;
 class Cell {
   constructor({ cwd, sessionId = null, permissionMode = 'default', model = null, effort = null, title = '', aiTitle = false,
     customTitle = null, renamePending = false, detail, clean, progress = false, fork = false, collapsed = false,
-    missing = false, remote = null, bridgeSessionId = null, draft = '', backend = 'claude' }) {
+    missing = false, remote = null, bridgeSessionId = null, draft = '', backend = 'claude', resumeAfterUpdate = false, resumeQueued = null }) {
     this.cwd = cwd;
     this.backend = backend === 'hermes' ? 'hermes' : 'claude'; // the agent: Claude Code, or Hermes (hermes.js)
     this.sessionId = sessionId;
@@ -202,6 +202,10 @@ class Cell {
     this.remoteSeq = 0;            // drops the reply of an enable request that a newer one overtook
     this.sentPrompts = [];         // prompts HQ wrote, so a prompt from elsewhere (the phone) can be told apart
     this.initialDraft = typeof draft === 'string' ? draft : '';
+    this.resumeAfterUpdate = !!resumeAfterUpdate; // an update restarted HQ while this cell was working: it carries on by itself
+    this.resumeQueued = Array.isArray(resumeQueued) ? resumeQueued.filter(t => typeof t === 'string') : [];
+    this.queuedTexts = [];         // prompts sent while a turn ran, which the agent may not have read yet (until the turn ends)
+    this.resumeMark = null;        // set as an update starts installing: { queued } for a working cell, which the restart saves
     this.busyWord = '';            // the verb shown above the prompt box this turn
     this.lastReply = '';
     this.color = projectColor(cwd);
@@ -1437,16 +1441,20 @@ class Cell {
     return this.write({ type: 'control_response', response: { subtype: 'success', request_id: requestId, response } });
   }
 
-  async submit() {
+  /**
+   * Sends the composer's text and images, or `prompt` instead (HQ's own), which leaves the composer
+   * alone. `restore`: what of HQ's prompt goes back in the composer if it is never sent (the user's own words).
+   */
+  async submit(prompt = null, restore = '') {
     if (this.missing || this.clearing) return;
     if (this.historyLoading) await this.historyLoading; // the transcript is drawn first, so live messages follow it
-    const text = this.input.value.trim();
-    const images = this.attachments;
+    const text = prompt ?? this.input.value.trim();
+    const images = prompt == null ? this.attachments : [];
     if (!text && !images.length) return;
-    if (this.wmView) this.setWaitingMode(false); // sending is the user coming back (an armed idle cell keeps waiting for the work)
+    if (this.wmView && prompt == null) this.setWaitingMode(false); // sending is the user coming back (an armed idle cell keeps waiting for the work)
     // /clear (and its aliases) is answered here: Claude's own /clear would change the session
     // behind HQ's back. The cell starts a new session; the old one stays on disk for Resume.
-    const clear = !images.length && /^\/(?:clear|reset|new)(?:\s+([\s\S]*))?$/.exec(text);
+    const clear = prompt == null && !images.length && /^\/(?:clear|reset|new)(?:\s+([\s\S]*))?$/.exec(text);
     if (clear) {
       if (this.status === 'running' || this.pending.size || this.spawning) {
         this.notice('Claude is still working. Stop it (Esc) before you clear the conversation.', true);
@@ -1459,25 +1467,30 @@ class Cell {
       return;
     }
     for (const old of this.msgs.querySelectorAll('.item.user.unsent')) old.remove(); // a prompt that failed to send is replaced by this one
-    const draft = { text, images, cancelled: false, bubble: null, addedPrompt: false, titled: false };
-    this.input.value = '';
-    autoGrow(this.input);
-    slashClose(this);
-    saveState(); // the sent text is no longer a draft
-    this.attachments = [];
-    this.renderAttachments();
+    const draft = { text, images, cancelled: false, bubble: null, addedPrompt: false, titled: false, hq: prompt != null, restore };
+    if (prompt == null) {
+      this.input.value = '';
+      autoGrow(this.input);
+      slashClose(this);
+      saveState(); // the sent text is no longer a draft
+      this.attachments = [];
+      this.renderAttachments();
+    }
     this.stickToBottom = true;
-    draft.bubble = this.append(userBubble(text, images.map(i => i.url), Date.now()));
-    if (!this.aiTitle && !this.customTitle && text && this.promptText.length < 2000) {
+    // HQ's own prompt shows as a notice instead, and names nothing.
+    if (prompt == null) draft.bubble = this.append(userBubble(text, images.map(i => i.url), Date.now()));
+    if (prompt == null && !this.aiTitle && !this.customTitle && text && this.promptText.length < 2000) {
       this.promptText = `${this.promptText}\n${text}`.trim().slice(0, 2000);
       draft.addedPrompt = true;
     }
-    if (!this.title) {
+    if (!this.title && prompt == null) {
       this.setTitle(firstLine(text, 90) || 'Image');
       draft.titled = true;
       saveState();
     }
-    this.unread = false;
+    if (prompt == null) this.unread = false;
+    if (this.status !== 'running') this.queuedTexts = []; // a new turn: the agent has read everything sent before it
+    else if (prompt == null) this.queuedTexts.push({ text, images: images.length, results: 0 });
     this.setStatus('running');
     this.drafts.add(draft);
     const started = await this.ensureProcess();
@@ -1488,7 +1501,7 @@ class Cell {
       return;
     }
     // Not on a slash command: Claude Code only runs one sent as the whole prompt.
-    const hint = this.askTasks && this.backend === 'claude' && !/^\/[\w:-]+(\s|$)/.test(text.trimStart()) ? [{ type: 'text', text: TASK_HINT }] : [];
+    const hint = this.askTasks && prompt == null && !/^\/[\w:-]+(\s|$)/.test(text.trimStart()) ? [{ type: 'text', text: this.backend === 'hermes' ? HERMES_TASK_HINT : TASK_HINT }] : [];
     const content = images.length || hint.length
       ? [...images.map(i => ({ type: 'image', source: { type: 'base64', media_type: i.mediaType, data: i.data } })), ...(text ? [{ type: 'text', text }] : []), ...hint]
       : text;
@@ -1501,12 +1514,46 @@ class Cell {
     if (hint.length && await written) this.setAskTasks(false); // one prompt only; a failed send keeps the toggle for the retry
   }
 
+  /** Picks up the work an update cut off: the transcript is drawn (even in a collapsed cell), then the agent is told to carry on. */
+  async resumeAfterRestart() {
+    if (this.closing || this.missing || !app.cells.includes(this)) return;
+    if (this.historyPending) {
+      this.historyPending = false;
+      this.loadHistory();
+    }
+    if (this.historyLoading) await this.historyLoading; // drawn without the usual "resumes when you send" notices
+    this.resumeAfterUpdate = false;
+    const texts = this.resumeQueued;
+    this.resumeQueued = [];
+    // The user may have taken the cell over in the meantime (stagger and history load), or closed it.
+    if (this.closing || this.clearing || this.proc != null || this.status === 'running' || !app.cells.includes(this)) {
+      if (texts.length && !this.closing && this.proc == null) { // unread messages from before the update go back in the composer
+        this.input.value = [...texts, this.input.value].filter(Boolean).join('\n\n');
+        autoGrow(this.input);
+        saveState();
+      }
+      return;
+    }
+    this.notice(RESUME_NOTICE);
+    const queued = texts.map(t => `\n\n---\n${t}`).join('');
+    this.submit(queued ? `${RESUME_PROMPT}\n\nMessages I sent during that turn, which you may not have read yet:${queued}` : RESUME_PROMPT, texts.join('\n\n'));
+  }
+
   /**
    * Puts a prompt that was never sent back in the composer, and undoes the title and title text it
    * set, so a prompt Claude never saw cannot become the session's name. `keepBubble` marks the
    * bubble as not sent (a failed start); otherwise it is removed (the user pressed Esc).
    */
   unsend(draft, keepBubble) {
+    if (draft.hq) {
+      if (draft.restore) {
+        this.input.value = this.input.value ? `${draft.restore}\n${this.input.value}` : draft.restore;
+        autoGrow(this.input);
+        saveState();
+      }
+      this.notice('This session could not carry on by itself. Send a message to continue it.', true);
+      return;
+    }
     const current = this.input.value;
     this.input.value = draft.text && current ? `${draft.text}\n${current}` : draft.text || current;
     autoGrow(this.input);
@@ -2032,6 +2079,7 @@ class Cell {
         const text = block.text;
         if (text.startsWith('[Request interrupted')) this.notice('Interrupted');
         else if (/^\s*<(command-|local-command-|system-reminder|task-notification|ide_)/.test(text) || text.startsWith(TASK_HINT_PREFIX)) continue;
+        else if (text.startsWith(RESUME_PROMPT)) { if (this.replaying) this.notice(RESUME_NOTICE); } // live, resumeAfterRestart said so
         else texts.push(text);
       } else if (block.type === 'image') {
         const url = imageBlockUrl(block.source);
@@ -2063,6 +2111,8 @@ class Cell {
 
   onResult(m) {
     const local = !!m.local_command; // /compact and other commands the CLI answers itself
+    // A prompt sent during a turn can be read in it or start the next one, so it is kept through one more result.
+    this.queuedTexts = this.queuedTexts.filter(q => q.results++ < 1);
     this.clearForceNote();
     this.finishLive();
     this.closeTurn(m.subtype === 'success' && !m.is_error);
@@ -2098,6 +2148,7 @@ class Cell {
 
   onExit(m) {
     const wasRunning = this.status === 'running';
+    this.queuedTexts = []; // a new process starts from the transcript
     const forced = this.forced;
     this.forced = false;
     this.clearForceNote();
@@ -2363,8 +2414,8 @@ class Cell {
     if (this.historyStart > 0) this.msgs.prepend(this.earlierNote());
     if (this.fork) this.notice('Forked: your first message starts a copy of this session. The original is left as it was.');
     else if (this.missing) this.notice('The folder of this session is missing, so the session cannot continue. Use "Locate folder…" below, or close it.');
-    else this.notice(lines.length ? `Session restored. ${this.backend === 'hermes' ? 'Hermes' : 'Claude'} resumes when you send a message.` : 'Session restored (no history found).');
-    if (last && endsMidTurn(last)) this.notice('The last turn was interrupted when HQ closed.');
+    else if (!this.resumeAfterUpdate) this.notice(lines.length ? `Session restored. ${this.backend === 'hermes' ? 'Hermes' : 'Claude'} resumes when you send a message.` : 'Session restored (no history found).');
+    if (last && endsMidTurn(last) && !this.resumeAfterUpdate) this.notice('The last turn was interrupted when HQ closed.');
     if (this.resumeWarning) this.notice(this.resumeWarning, true);
     this.pinToBottom();
   }
@@ -3018,6 +3069,13 @@ const BG_LABELS = { local_agent: 'Agent', local_bash: 'Shell', local_monitor: 'M
 const WAIT_SETTLE_MS = 4000;
 /** Trails a prompt asked to keep a task list; the chat hides it, live and on resume. */
 const TASK_HINT = '(HQ: track this work with TaskCreate/TaskUpdate so the user can follow progress.)';
+/** Sent to a session that was working when an update restarted HQ, which stopped its turn and its background tasks. */
+const RESUME_PROMPT = 'HQ restarted to install an update while you were working. That stopped your last turn, including any '
+  + 'command still running and any background tasks or agents. Carry on from where you left off: check what finished, '
+  + 'rerun what was cut short, and restart any background task you still need.';
+const RESUME_NOTICE = 'HQ restarted to install an update while this session was working, so it carried on by itself.';
+/** Hermes' wording of TASK_HINT; hermes.rs (COMPOSER_TASK_HINT) cuts it out of replayed history. */
+const HERMES_TASK_HINT = '(HQ: track this work with your todo tool so the user can follow progress.)';
 const TASK_HINT_PREFIX = '(HQ: track this work';
 
 // Sent as a side question (like /btw), so Claude answers beside the running turn without stopping it.
@@ -4404,7 +4462,7 @@ function sanitizeSettings(x) {
     theme: THEMES.some(([t]) => t === v.theme) ? v.theme : 'auto',
     notify: v.notify !== false,
     autoUpdate: v.autoUpdate !== false,
-    autoTasks: v.autoTasks !== false, // read when a session starts: Claude is asked to keep a task list
+    autoTasks: v.autoTasks !== false, // read when a session starts: Claude or Hermes is asked to keep a task list
     claudePath: typeof v.claudePath === 'string' ? v.claudePath.trim().slice(0, 500) : '',
     autoCopy: v.autoCopy !== false,
     weeklyBar: v.weeklyBar !== false,
@@ -4513,7 +4571,7 @@ function renderSettings() {
     row('Remote Control for new sessions', 'Continue sessions from claude.ai/code or the Claude app.', toggle(!!app.remoteDefault, v => { app.remoteDefault = v; saveState(); renderRemoteButtons(); })),
     row('Default model for new sessions', 'The same as picking a model in a session. HQ_MODEL still applies when none is picked.',
       select(app.defaults.model || 'default', models, v => rememberChoice({ model: v }))),
-    row('Automatic task lists', 'Ask Claude to keep a task list on multi-step work. Off saves a few tokens per long job.', toggle(app.settings.autoTasks, v => changeSetting('autoTasks', v))),
+    row('Automatic task lists', 'Ask Claude and Hermes to keep a task list on multi-step work. Off saves a few tokens per long job.', toggle(app.settings.autoTasks, v => changeSetting('autoTasks', v))),
     row('Check for HQ updates automatically', 'The Check for updates button in the sessions list always works.', toggle(app.settings.autoUpdate, v => changeSetting('autoUpdate', v))),
     row('Claude command', 'Path to the claude program, for sessions started from now on. Empty uses HQ_CLAUDE, else claude on PATH.', path));
 }
@@ -4637,7 +4695,8 @@ const UPDATE_EVERY_MS = 4 * 60 * 60 * 1000;
 // active window, since the user may be reading it.
 const UPDATE_QUIET_MS = 2 * 60 * 1000;
 const UPDATE_QUIET_FOCUSED_MS = 15 * 60 * 1000;
-// `wanted`: the user asked to update while sessions were busy, so it installs as soon as they finish.
+// `wanted`: the user asked to update while a restart would still lose something (see restartLosesNothing),
+// so it installs as soon as it would not.
 const updater = { ready: null, checking: null, installing: false, wanted: false, lastInput: Date.now() };
 
 /** Resolves with the error text when the check fails, else null. */
@@ -4676,20 +4735,49 @@ function sessionsIdle() {
   return app.cells.every(c => !c.busy() && !c.spawning && !c.renaming && !c.input.value.trim() && !c.attachments.length);
 }
 
-function busyCount() {
-  return app.cells.filter(c => c.busy()).length;
+/**
+ * What an update the user asks for waits on. Sessions that are working are fine: they are marked
+ * in the board saved before the restart and carry on by themselves after it (resumeAfterRestart).
+ * Images not yet sent or read, a session still starting, a first turn and a rename in flight are not saved.
+ */
+function restartLosesNothing() {
+  // A first turn with no session ID yet, or a fork not yet made, has no transcript of its own to resume from.
+  return app.cells.every(c => !c.spawning && !c.renaming && !c.attachments.length && !(c.busy() && (!c.sessionId || c.fork))
+    // Images the agent may not have read yet: a resume carries text only.
+    && !(c.lastSent && c.lastSent.images.length) && !c.queuedTexts.some(q => q.images));
 }
 
 async function installUpdate() {
   if (!updater.ready || updater.installing) return;
   updater.installing = true;
   renderUpdate();
+  // Decided now, while the cells still show their work: installing stops every session, after which none looks busy.
+  for (const c of app.cells) {
+    c.resumeMark = c.busy() && !c.missing && c.sessionId ? { queued: c.queuedTexts.map(q => q.text).filter(Boolean) } : null;
+    // A prompt the agent has not answered may not be in its transcript yet; it goes with the resume, not back to the composer.
+    const sent = c.lastSent;
+    if (c.resumeMark && sent) {
+      const text = sent.hq ? sent.restore : sent.text;
+      if (text && !c.resumeMark.queued.includes(text)) c.resumeMark.queued.push(text);
+      c.lastSent = null;
+    }
+  }
   await flushState();
   try {
     await invoke('install_update'); // on success HQ exits here and the installer restarts it
   } catch (err) {
     console.error('update failed', err);
     updater.installing = false;
+    // Installing may have stopped the sessions before it failed; those carry on as after a restart.
+    const marked = app.cells.filter(c => c.resumeMark);
+    for (const c of marked) {
+      c.resumeAfterUpdate = true;
+      c.resumeQueued = c.resumeMark.queued;
+    }
+    for (const c of app.cells) c.resumeMark = null;
+    flushState(); // drops the resume marks the board was saved with
+    // After the stopped processes have reported their exit; a session still running is left alone.
+    marked.forEach((c, i) => setTimeout(() => c.resumeAfterRestart(), 2000 + i * 1000));
     updater.ready = null; // the download is used up; the next check fetches it again
     renderUpdate();
   }
@@ -4704,19 +4792,19 @@ function renderUpdate() {
     text.textContent = 'Updating…';
     updatePill.title = `Installing HQ ${version}. HQ restarts when it is done.`;
   } else if (updater.wanted) {
-    const n = busyCount();
-    text.textContent = n ? `Updates when ${n === 1 ? '1 session finishes' : `${n} sessions finish`}` : 'Updates once unsent messages are sent';
-    updatePill.title = `HQ ${version} installs as soon as no session is working and no message is left unsent. Click to cancel.`;
+    text.textContent = 'Updates in a moment';
+    updatePill.title = `HQ ${version} installs once no image is waiting to be sent and no session is starting. Click to cancel.`;
   } else {
     text.textContent = `Update to ${version}`;
-    updatePill.title = `HQ ${version} is ready (you have ${currentVersion}). It installs by itself when no session is busy, or when you close HQ. Click to install now.`;
+    updatePill.title = `HQ ${version} is ready (you have ${currentVersion}). It installs by itself when no session is busy, or when you close HQ. `
+      + 'Click to install now: sessions that are working carry on by themselves after the restart.';
   }
 }
 
-// Updating never stops a session: while any is busy, a click queues the update instead.
+// A click installs now, and working sessions carry on after the restart; the update installs by itself only when all are idle.
 updatePill.addEventListener('click', () => {
   if (updater.installing) return;
-  if (updater.wanted || !sessionsIdle()) {
+  if (updater.wanted || !restartLosesNothing()) {
     updater.wanted = !updater.wanted;
     renderUpdate();
     return;
@@ -4748,7 +4836,7 @@ function autoCheckForUpdate() {
 }
 setInterval(autoCheckForUpdate, UPDATE_EVERY_MS);
 setInterval(() => {
-  if (updater.ready && !updater.installing && (updater.wanted ? sessionsIdle() : safeToRestart())) installUpdate();
+  if (updater.ready && !updater.installing && (updater.wanted ? restartLosesNothing() : safeToRestart())) installUpdate();
 }, 5 * 1000);
 
 // ======================================================================================
@@ -4860,6 +4948,9 @@ function flushState() {
       bridgeSessionId: c.bridgeSessionId || undefined,
       draft: c.input.value.trim() ? c.input.value : undefined,
       backend: c.backend === 'claude' ? undefined : c.backend,
+      // Only in the save just before an update restarts HQ; the first save after it drops the mark.
+      resumeAfterUpdate: c.resumeMark ? true : undefined,
+      resumeQueued: c.resumeMark && c.resumeMark.queued.length ? c.resumeMark.queued : undefined,
     })),
     recent: app.recent,
     models: app.models,
@@ -4926,7 +5017,9 @@ async function restore() {
   renderSidebar();
   for (const c of app.cells) if (!c.collapsed) autoGrow(c.input); // restored drafts, now that the cells are laid out
   restoring = false;
-  saveState(); // anything saved while the board was coming back
+  saveState(); // anything saved while the board was coming back (and drops the resume marks)
+  // A second apart, so a board of working sessions does not start every agent at once.
+  app.cells.filter(c => c.resumeAfterUpdate).forEach((c, i) => setTimeout(() => c.resumeAfterRestart(), i * 1000));
   updateClaude(); // after the cells are back: it saves the time of the run
   if (app.focused) focusCell(app.focused, true);
   setTimeout(() => refreshUsage(), 1500);
