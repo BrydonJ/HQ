@@ -301,34 +301,57 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .waiting-view { display: none; }
 .cell.wm-on .stage { display: none; }
 .cell.wm-on:not(.collapsed) .waiting-view {
-  display: flex; flex-direction: column; align-items: center; gap: 6px; flex: 1; min-height: 0;
-  overflow-y: auto; padding: 16px 18px 36px; user-select: text; /* the bottom leaves room for .busy over the composer */
+  display: flex; flex-direction: column; align-items: center; gap: 10px; flex: 1; min-height: 0;
+  overflow-y: auto; padding: 20px 18px; user-select: text;
+  /* A faint glow in the project's colour over a few still stars: painted once, nothing animates. */
+  background:
+    radial-gradient(1px 1px at 12% 18%, color-mix(in srgb, var(--fg) 45%, transparent), transparent),
+    radial-gradient(1px 1px at 83% 12%, color-mix(in srgb, var(--fg) 35%, transparent), transparent),
+    radial-gradient(1.5px 1.5px at 68% 31%, color-mix(in srgb, var(--fg) 30%, transparent), transparent),
+    radial-gradient(1px 1px at 24% 64%, color-mix(in srgb, var(--fg) 25%, transparent), transparent),
+    radial-gradient(1px 1px at 91% 58%, color-mix(in srgb, var(--fg) 30%, transparent), transparent),
+    radial-gradient(1.5px 1.5px at 7% 86%, color-mix(in srgb, var(--fg) 25%, transparent), transparent),
+    radial-gradient(1px 1px at 52% 92%, color-mix(in srgb, var(--fg) 20%, transparent), transparent),
+    radial-gradient(1px 1px at 38% 8%, color-mix(in srgb, var(--fg) 30%, transparent), transparent),
+    radial-gradient(ellipse 70% 45% at 50% 0%, color-mix(in srgb, var(--proj, var(--link)) 9%, transparent), transparent);
 }
-.wv-body { flex: none; width: min(440px, 100%); font-size: 13px; }
-.wv-body .pv-bar { height: 5px; }
+/* Centred when it fits, scrolls from the top when it does not. */
+.waiting-view > :first-child { margin-top: auto; }
+.waiting-view > :last-child { margin-bottom: auto; }
+/* One of the loaders in loaders.css on a soft halo; hovering it says which one it is. */
+.wv-hero {
+  position: relative; flex: none; display: grid; place-items: center; width: 116px; height: 116px; border-radius: 50%;
+  background: radial-gradient(circle, color-mix(in srgb, var(--proj, var(--link)) 16%, transparent) 0%, transparent 68%);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--proj, var(--link)) 14%, transparent);
+}
+.wv-loader { width: 64px; height: 64px; }
+.wv-busy {
+  display: none; max-width: 100%; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 14px; letter-spacing: 0.01em; color: color-mix(in srgb, var(--claude) 80%, var(--fg-strong));
+}
+.cell.state-running .wv-busy { display: block; }
+.cell.wrapping-up .wv-busy { color: var(--waiting); }
+.wv-body { flex: none; width: min(460px, 100%); font-size: 13px; }
+.wv-body > .pv-progress { margin: 0 0 12px; }
+.wv-body .pv-bar { height: 4px; background: color-mix(in srgb, var(--fg) 10%, transparent); }
+.wv-body .pv-bar > span { box-shadow: 0 0 8px color-mix(in srgb, var(--proj, var(--link)) 70%, transparent); }
+.wv-body .pv-label { text-align: center; }
+.wv-body .pv-head { padding: 0 2px; }
+.wv-body .pv-now { margin-top: 10px; padding: 0 2px; }
+/* Tasks, agents and Claude's sitrep sit on soft cards. */
+.wv-body .pv-section {
+  margin-top: 12px; padding: 10px 12px; border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-alt) 70%, transparent); border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
 .wv-body .pv-tasks li, .wv-body .pv-agents li { padding: 3px 0; }
-/* Rings that swell and fade out of a breathing dot: transform and opacity only, so the compositor runs them. */
-.wv-anim { position: relative; flex: none; width: 64px; height: 64px; margin-bottom: 2px; }
-.wv-anim span {
-  position: absolute; inset: 0; border-radius: 50%; border: 1.5px solid var(--proj, var(--link));
-  opacity: 0; transform: scale(0.2); animation: wv-ring 3.6s ease-out infinite;
-}
-.wv-anim span:nth-child(2) { animation-delay: 1.2s; }
-.wv-anim span:nth-child(3) { animation-delay: 2.4s; }
-.wv-anim::after {
-  content: ""; position: absolute; left: 50%; top: 50%; width: 14px; height: 14px; margin: -7px 0 0 -7px;
-  border-radius: 50%; background: var(--proj, var(--link)); opacity: 0.85; animation: wv-breathe 3.6s ease-in-out infinite;
-}
-@keyframes wv-ring { 0% { opacity: 0.5; transform: scale(0.2); } 100% { opacity: 0; transform: scale(1); } }
-@keyframes wv-breathe { 50% { opacity: 0.5; transform: scale(1.3); } }
-/* Still when nothing is running (the few seconds before waiting mode lets go), and when nobody is looking. */
-.cell.wm-on:not(.state-running):not(.state-bg) .wv-anim span,
-.cell.wm-on:not(.state-running):not(.state-bg) .wv-anim::after { animation: none; }
-.doc-hidden .wv-anim span, .doc-hidden .wv-anim::after { animation-play-state: paused; }
-@media (prefers-reduced-motion: reduce) {
-  .wv-anim span, .wv-anim::after { animation: none; }
-  .wv-anim span:first-child { opacity: 0.25; transform: scale(0.7); }
-}
+/* The busy line, the name's sweep and the header's progress bar all live in the waiting view instead. */
+.cell.wm-on .composer .busy, .cell.wm-on .cell-project .sweep, .cell.wm-on .head-progress { display: none; }
+/*
+ * Still when nothing is running (the few seconds before waiting mode lets go), and when nobody is
+ * looking. !important because the loaders' own animation shorthands would reset the play state.
+ */
+.cell.wm-on:not(.state-running):not(.state-bg) .wv-loader svg * { animation: none !important; }
+.doc-hidden .wv-loader svg * { animation-play-state: paused !important; }
 .item { position: relative; padding-left: 16px; margin: 0 0 10px 0; }
 .item::before {
   content: ""; position: absolute; left: 1px; top: 7px;

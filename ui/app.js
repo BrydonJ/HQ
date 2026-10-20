@@ -114,6 +114,20 @@ function nextBusyVerb(avoid) {
   }
   return `${busyDeck.pop()}…`;
 }
+const loaderDeck = [];
+
+/** The next waiting-view loader ([name, description, svg] from loaders.js), dealt like the busy verbs. */
+function nextLoader(avoid) {
+  if (!loaderDeck.length) {
+    loaderDeck.push(...LOADERS);
+    for (let i = loaderDeck.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [loaderDeck[i], loaderDeck[j]] = [loaderDeck[j], loaderDeck[i]];
+    }
+    if (loaderDeck[loaderDeck.length - 1] === avoid) loaderDeck.unshift(loaderDeck.pop());
+  }
+  return loaderDeck.pop();
+}
 
 setInterval(() => {
   for (const cell of app.cells) if (cell.status === 'running' && !cell.compacting && !cell.wrapUp && !cell.collapsed) cell.nextBusyWord();
@@ -275,6 +289,7 @@ class Cell {
     this.waitBtn = el.querySelector('.act-waiting');
     this.waitEl = el.querySelector('.waiting-view');
     this.waitBody = el.querySelector('.wv-body');
+    this.loader = null;            // the waiting view's current loader, a fresh one each time the view opens
     this.taskBtn = el.querySelector('.act-tasklist');
     this.bgEl = el.querySelector('.bg-tasks');
     this.stateEl = el.querySelector('.cell-state');
@@ -922,7 +937,7 @@ class Cell {
         : h('button', { class: 'icon-btn pv-close', title: 'Close', onclick: () => this.setProgressView(false) }, icon('close')));
 
     let bar = null;
-    if (pct != null || running) {
+    if (pct != null || (running && !asWaiting)) { // the waiting view's loader stands in for the indeterminate bar
       const fill = h('span');
       if (pct != null) fill.style.setProperty('--pct', `${pct}%`);
       bar = h('div', { class: 'pv-progress' }, h('div', { class: `pv-bar${pct == null ? ' indeterminate' : ''}` }, fill),
@@ -972,7 +987,8 @@ class Cell {
     const empty = !bar && !now && !tasks && !agentsEl
       ? h('div', { class: 'pv-empty', text: 'Nothing is running. Progress shows here while Claude works.' }) : null;
 
-    (asWaiting ? this.waitBody : this.progressEl).replaceChildren(...[head, bar, now, tasks, agentsEl, answerEl, empty].filter(Boolean));
+    const parts = asWaiting ? [bar, head, now, tasks, agentsEl, answerEl, empty] : [head, bar, now, tasks, agentsEl, answerEl, empty];
+    (asWaiting ? this.waitBody : this.progressEl).replaceChildren(...parts.filter(Boolean));
   }
 
   /** "3/7 · Creating b.txt" for the header and the sessions list; touches the DOM only when it changes. */
@@ -1044,7 +1060,13 @@ class Cell {
 
   setWmView(view) {
     if (view === this.wmView) return;
-    if (view) { // a display:none scroller forgets where it was; a collapsed cell kept it in savedScroll
+    if (view) {
+      // Set once per opening, outside wv-body, so redrawing the progress never restarts the animation.
+      this.loader = nextLoader(this.loader);
+      const [name, desc, svg] = this.loader;
+      this.waitEl.querySelector('.wv-loader').innerHTML = `<svg viewBox="0 0 40 40">${svg}</svg>`;
+      this.waitEl.querySelector('.wv-hero').title = `${name}: ${desc}`;
+      // a display:none scroller forgets where it was; a collapsed cell kept it in savedScroll
       [this.wmTop, this.wmStick] = this.collapsed && this.savedScroll ? this.savedScroll : [this.msgs.scrollTop, this.stickToBottom];
     }
     this.wmView = view;

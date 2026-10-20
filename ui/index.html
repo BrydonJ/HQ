@@ -5,10 +5,12 @@
   <title>HQ</title>
   <link rel="stylesheet" href="vendor/codicon.css" />
   <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="loaders.css" />
   <script src="vendor/marked.umd.js"></script>
   <script src="vendor/highlight.min.js"></script>
   <script src="render.js" defer></script>
   <script src="hermes.js" defer></script>
+  <script src="loaders.js" defer></script>
   <script src="app.js" defer></script>
 </head>
 <body>
@@ -131,7 +133,8 @@
         <div class="progress-panel"></div>
       </div>
       <div class="waiting-view">
-        <div class="wv-anim" aria-hidden="true"><span></span><span></span><span></span></div>
+        <div class="wv-hero"><div class="wv-loader" aria-hidden="true"></div></div>
+        <div class="wv-busy busy-word"></div>
         <div class="wv-body"></div>
       </div>
       <button class="prompts-bar hidden" type="button"><span class="codicon codicon-chevron-down"></span><span class="pb-text"></span></button>
