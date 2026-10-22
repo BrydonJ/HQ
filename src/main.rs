@@ -32,12 +32,13 @@ async fn spawn_session(
     effort: Option<String>,
     fork: Option<bool>,
     auto_tasks: Option<bool>,
+    max_agents: Option<u32>,
     backend: Option<String>,
     on_event: Channel<InvokeResponseBody>,
 ) -> Result<u64, String> {
     let fork = fork.unwrap_or(false);
     let auto_tasks = auto_tasks.unwrap_or(true);
-    let opts = SpawnOptions { cwd, resume, permission_mode, model, effort, fork, auto_tasks };
+    let opts = SpawnOptions { cwd, resume, permission_mode, model, effort, fork, auto_tasks, max_agents };
     tauri::async_runtime::spawn_blocking(move || match backend.as_deref() {
         None | Some("claude") => app.state::<Sessions>().spawn(&app, opts, on_event),
         #[cfg(feature = "hermes")]

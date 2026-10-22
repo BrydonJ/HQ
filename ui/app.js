@@ -1412,6 +1412,7 @@ class Cell {
       fork: this.fork,
       backend: this.backend,
       autoTasks: app.settings.autoTasks !== false,
+      maxAgents: app.settings.maxAgents || null,
       onEvent: channel,
     });
   }
@@ -4469,6 +4470,8 @@ const CUSTOM_COLORS = [['--accent', 'Accent'], ['--link', 'Links'], ['--claude',
 const HEAD_BUTTONS = [['act-handoff', 'Handoff'], ['act-detail', 'Detail level'], ['act-progress', 'Progress'], ['act-waiting', 'Waiting mode'], ['act-code', 'VS Code'],
   ['act-terminal', 'Terminal'], ['act-reveal', FILE_MANAGER], ['act-collapse', 'Collapse'], ['act-max', 'Maximize'], ['act-close', 'Close']];
 const HEX = /^#[0-9a-f]{6}$/i;
+const DEFAULT_MAX_AGENTS = 5;
+const MAX_AGENTS_CAP = 50;
 const lightQuery = window.matchMedia('(prefers-color-scheme: light)');
 
 /** Keeps known keys with the right types, so a hand-edited board.json cannot break the app. */
@@ -4485,6 +4488,8 @@ function sanitizeSettings(x) {
     notify: v.notify !== false,
     autoUpdate: v.autoUpdate !== false,
     autoTasks: v.autoTasks !== false, // read when a session starts: Claude or Hermes is asked to keep a task list
+    // The most subagents one Claude session runs at once; 0 leaves Claude's own limit (20).
+    maxAgents: Number.isInteger(v.maxAgents) && v.maxAgents >= 0 && v.maxAgents <= MAX_AGENTS_CAP ? v.maxAgents : DEFAULT_MAX_AGENTS,
     claudePath: typeof v.claudePath === 'string' ? v.claudePath.trim().slice(0, 500) : '',
     autoCopy: v.autoCopy !== false,
     weeklyBar: v.weeklyBar !== false,
@@ -4587,6 +4592,15 @@ function renderSettings() {
   }
   const path = h('input', { type: 'text', value: app.settings.claudePath, placeholder: 'claude', spellcheck: 'false' });
   path.addEventListener('change', () => changeSetting('claudePath', path.value.trim()));
+  const maxAgents = h('input', { type: 'number', min: '0', max: String(MAX_AGENTS_CAP), step: '1', value: String(app.settings.maxAgents) });
+  maxAgents.addEventListener('change', () => {
+    // A cleared box reads as '', which Number() would turn into 0 and so lift the limit.
+    const raw = maxAgents.value.trim();
+    const n = raw === '' ? NaN : Math.round(Number(raw));
+    const v = Number.isFinite(n) ? Math.min(MAX_AGENTS_CAP, Math.max(0, n)) : DEFAULT_MAX_AGENTS;
+    maxAgents.value = String(v);
+    changeSetting('maxAgents', v);
+  });
   const models = modelList().map(m => [m.value, m.displayName || m.value]);
   body.replaceChildren(
     row('Notifications', 'A notification when a turn finishes, or Claude needs you, while HQ is in the background.', toggle(app.settings.notify, v => changeSetting('notify', v))),
@@ -4594,6 +4608,7 @@ function renderSettings() {
     row('Default model for new sessions', 'The same as picking a model in a session. HQ_MODEL still applies when none is picked.',
       select(app.defaults.model || 'default', models, v => rememberChoice({ model: v }))),
     row('Automatic task lists', 'Ask Claude and Hermes to keep a task list on multi-step work. Off saves a few tokens per long job.', toggle(app.settings.autoTasks, v => changeSetting('autoTasks', v))),
+    row('Agents per session', 'The most subagents one Claude session runs at once, workflows included; more are refused until one finishes. For sessions started from now on. 0 uses Claude\'s own limit (20).', maxAgents),
     row('Check for HQ updates automatically', 'The Check for updates button in the sessions list always works.', toggle(app.settings.autoUpdate, v => changeSetting('autoUpdate', v))),
     row('Claude command', 'Path to the claude program, for sessions started from now on. Empty uses HQ_CLAUDE, else claude on PATH.', path));
 }

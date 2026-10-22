@@ -32,6 +32,9 @@ const REMOTE_PREFIX_VAR: &str = "CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX";
 /// Claude Code withholds TaskCreate/TaskUpdate in `-p` mode unless this is set, which left HQ's
 /// progress panel with no checklist to show.
 const TODO_TOOLS_VAR: &str = "CLAUDE_CODE_ENABLE_TODO_TOOLS";
+/// Claude Code refuses an Agent call once this many subagents run in the session (default 20).
+/// Workflows have a gate of their own, so both are set to HQ's limit.
+const AGENT_CAP_VARS: [&str; 2] = ["CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS", "CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS"];
 /// Asks for a task list only where one helps, so a one-off question still gets a plain answer.
 const TASK_PROMPT: &str = "You are running inside HQ, a dashboard where the user watches several sessions at once and judges progress from your task list. For work with three or more steps, or that will take more than a few minutes, create the tasks with TaskCreate before starting and keep them current with TaskUpdate: mark each one in_progress as you start it and completed as soon as it is done. Skip the task list for questions and quick single-step jobs.";
 
@@ -62,6 +65,8 @@ pub struct SpawnOptions {
     pub fork: bool,
     /// Appends HQ's task-list prompt. Off leaves Claude's system prompt untouched.
     pub auto_tasks: bool,
+    /// The most subagents the session runs at once. None or 0 leaves Claude's own limit.
+    pub max_agents: Option<u32>,
 }
 
 /// The `claude` executable chosen in HQ's own settings, which beats `HQ_CLAUDE`.
@@ -257,6 +262,11 @@ impl Sessions {
         if opts.auto_tasks && tools_on {
             cmd.args(["--append-system-prompt", TASK_PROMPT]);
         }
+        // HQ's setting beats the inherited environment, but an `env` block in Claude's own settings
+        // is applied after start-up and still wins over both.
+        for (var, value) in agent_cap_env(opts.max_agents) {
+            cmd.env(var, value);
+        }
         // A prefix the user set themselves wins.
         if std::env::var_os(REMOTE_PREFIX_VAR).is_none_or(|v| v.is_empty()) {
             cmd.env(REMOTE_PREFIX_VAR, remote_name_prefix(&opts.cwd));
@@ -374,6 +384,11 @@ fn spawn_stderr_reader(stderr: impl Read + Send + 'static, tail: Arc<Mutex<VecDe
             t.push_back(line);
         }
     });
+}
+
+/// The variables that hold a session to `max` subagents at once; none for None or 0.
+fn agent_cap_env(max: Option<u32>) -> Vec<(&'static str, String)> {
+    max.filter(|&n| n > 0).map(|n| AGENT_CAP_VARS.map(|var| (var, n.to_string())).to_vec()).unwrap_or_default()
 }
 
 fn remote_name_prefix(cwd: &str) -> String {
@@ -668,6 +683,16 @@ mod tests {
         assert_eq!(remote_name_prefix("/Users/me/my app/"), "HQ-my app");
         assert_eq!(remote_name_prefix("/"), "HQ");
         assert_eq!(remote_name_prefix(""), "HQ");
+    }
+
+    #[test]
+    fn the_agent_limit_sets_both_caps_and_zero_leaves_claudes_own() {
+        assert_eq!(
+            agent_cap_env(Some(3)),
+            vec![("CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS", "3".to_string()), ("CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS", "3".to_string())]
+        );
+        assert!(agent_cap_env(Some(0)).is_empty());
+        assert!(agent_cap_env(None).is_empty());
     }
 
     #[cfg(windows)]
