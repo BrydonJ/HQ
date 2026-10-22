@@ -33,8 +33,13 @@ const REMOTE_PREFIX_VAR: &str = "CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX";
 /// progress panel with no checklist to show.
 const TODO_TOOLS_VAR: &str = "CLAUDE_CODE_ENABLE_TODO_TOOLS";
 /// Claude Code refuses an Agent call once this many subagents run in the session (default 20).
-/// Workflows have a gate of their own, so both are set to HQ's limit.
-const AGENT_CAP_VARS: [&str; 2] = ["CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS", "CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS"];
+/// It takes any whole number from 1.
+const SUBAGENT_CAP_VAR: &str = "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS";
+/// Workflows have a gate of their own, which Claude Code only reads from 1 to 256.
+const WORKFLOW_CAP_VAR: &str = "CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS";
+const WORKFLOW_CAP_MAX: u32 = 256;
+/// What "no limit" sets the subagent cap to, as Claude Code has no value meaning unlimited.
+const NO_SUBAGENT_CAP: u32 = 1_000_000;
 /// Asks for a task list only where one helps, so a one-off question still gets a plain answer.
 const TASK_PROMPT: &str = "You are running inside HQ, a dashboard where the user watches several sessions at once and judges progress from your task list. For work with three or more steps, or that will take more than a few minutes, create the tasks with TaskCreate before starting and keep them current with TaskUpdate: mark each one in_progress as you start it and completed as soon as it is done. Skip the task list for questions and quick single-step jobs.";
 
@@ -65,7 +70,7 @@ pub struct SpawnOptions {
     pub fork: bool,
     /// Appends HQ's task-list prompt. Off leaves Claude's system prompt untouched.
     pub auto_tasks: bool,
-    /// The most subagents the session runs at once. None or 0 leaves Claude's own limit.
+    /// The most subagents the session runs at once: 0 for no limit, None for Claude's own.
     pub max_agents: Option<u32>,
 }
 
@@ -386,9 +391,13 @@ fn spawn_stderr_reader(stderr: impl Read + Send + 'static, tail: Arc<Mutex<VecDe
     });
 }
 
-/// The variables that hold a session to `max` subagents at once; none for None or 0.
+/// The variables that hold a session to `max` subagents at once. 0 lifts both caps as far as
+/// Claude Code allows; None sets nothing, leaving Claude's own limits.
 fn agent_cap_env(max: Option<u32>) -> Vec<(&'static str, String)> {
-    max.filter(|&n| n > 0).map(|n| AGENT_CAP_VARS.map(|var| (var, n.to_string())).to_vec()).unwrap_or_default()
+    let Some(max) = max else { return Vec::new() };
+    let subagents = if max == 0 { NO_SUBAGENT_CAP } else { max };
+    let workflow = if max == 0 { WORKFLOW_CAP_MAX } else { max.min(WORKFLOW_CAP_MAX) };
+    vec![(SUBAGENT_CAP_VAR, subagents.to_string()), (WORKFLOW_CAP_VAR, workflow.to_string())]
 }
 
 fn remote_name_prefix(cwd: &str) -> String {
@@ -686,13 +695,12 @@ mod tests {
     }
 
     #[test]
-    fn the_agent_limit_sets_both_caps_and_zero_leaves_claudes_own() {
-        assert_eq!(
-            agent_cap_env(Some(3)),
-            vec![("CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS", "3".to_string()), ("CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS", "3".to_string())]
-        );
-        assert!(agent_cap_env(Some(0)).is_empty());
-        assert!(agent_cap_env(None).is_empty());
+    fn the_agent_limit_sets_both_caps_and_zero_lifts_them() {
+        let env = |max| agent_cap_env(max).into_iter().map(|(var, v)| format!("{var}={v}")).collect::<Vec<_>>();
+        assert_eq!(env(Some(3)), ["CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS=3", "CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS=3"]);
+        assert_eq!(env(Some(0)), ["CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS=1000000", "CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS=256"]);
+        assert_eq!(env(Some(300)), ["CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS=300", "CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS=256"]);
+        assert!(env(None).is_empty());
     }
 
     #[cfg(windows)]
