@@ -830,6 +830,11 @@ button, input, select, textarea { font: inherit; color: inherit; }
 }
 .ctx-btn.compacting .ctx-ring { background: conic-gradient(var(--link) 25%, var(--border-strong) 0); animation: ctx-spin 0.9s linear infinite; }
 @keyframes ctx-spin { to { transform: rotate(360deg); } }
+/* Prompt cache age: green while warm, amber in its last fifth, faint once it has expired. */
+.cache-age { display: inline-flex; align-items: center; gap: 3px; height: 22px; padding: 0 4px; color: var(--done); font-size: 11px; white-space: nowrap; cursor: default; }
+.cache-age .codicon { font-size: 12px; }
+.cache-age.cooling { color: var(--waiting); }
+.cache-age.cold { color: var(--fg-faint); }
 .context-pop { width: 300px; }
 .ctx-line { display: flex; justify-content: space-between; gap: 8px; color: var(--fg-strong); }
 .ctx-line.muted { color: var(--fg-muted); }

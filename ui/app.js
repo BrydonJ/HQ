@@ -136,6 +136,22 @@ setInterval(() => {
   for (const cell of app.cells) if (cell.status === 'running' && !cell.compacting && !cell.wrapUp && !cell.collapsed) cell.nextBusyWord();
 }, BUSY_ROTATE_MS);
 
+// Prompt cache lifetimes: Claude Code asks for an hour on a plan, and the API's default is five minutes.
+const CACHE_TTL_LONG_MS = 60 * 60 * 1000;
+const CACHE_TTL_SHORT_MS = 5 * 60 * 1000;
+setInterval(() => {
+  for (const cell of app.cells) if (cell.cache && !cell.collapsed) cell.renderCache();
+}, 15000);
+
+/** A duration in ms, coarse: "40s", "12m", "1h 5m". */
+function formatAge(ms) {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  return m % 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${Math.floor(m / 60)}h`;
+}
+
 // The eye button's levels: [icon, what shows, what the next click shows].
 const DETAIL_LEVELS = {
   1: ['eye', 'everything', 'replies, thinking and narration'],
@@ -251,6 +267,7 @@ class Cell {
     this.taskProgress = new Map(); // task_id -> latest task_progress of an agent Claude started
     this.stoppingTasks = new Set(); // task ids a stop_task was sent for and not yet answered
     this.ctx = { tokens: null, window: null, info: null, infoAt: 0, loading: null, model: null }; // context window use
+    this.cache = null;         // { at, ttl } (ms): when the last request read or wrote the prompt cache, and how long it lives
     this.compacting = false;   // a compaction is running (the CLI's status 'compacting')
     this.wrapUp = null;        // the plan's limit was hit mid-turn and Claude is finishing on the wrap-up allowance: { credits }
     this.limitResetAt = 0;     // when the limit that refused the last request resets (ms), from its rate_limit_event
@@ -312,6 +329,7 @@ class Cell {
     this.codeBtn = el.querySelector('.act-code');
     this.collapseBtn = el.querySelector('.act-collapse');
     this.ctxBtn = el.querySelector('.act-context');
+    this.cacheEl = el.querySelector('.cache-age');
     this.remoteBtn = el.querySelector('.act-remote');
     this.missingBar = el.querySelector('.missing-bar');
 
@@ -1829,6 +1847,8 @@ class Cell {
     this.customTitle = title || null;
     this.renamePending = !!title; // saved in the new transcript once Claude has written it
     this.ctx = { tokens: null, window: null, info: null, infoAt: 0, loading: null, model: null };
+    this.cache = null;
+    this.renderCache();
     for (const m of [this.tools, this.tasks, this.taskCreates, this.taskProgress, this.openTools, this.stoppingTasks]) m.clear();
     this.msgs.replaceChildren();
     this.stickToBottom = true;
@@ -2764,7 +2784,45 @@ class Cell {
     this.ctx.tokens = tokens;
     this.ctx.stale = false;
     if (msg.model) this.ctx.model = msg.model;
+    this.noteCache(m, u);
     if (!this.replaying) this.renderContext();
+  }
+
+  // ---------- prompt cache age ----------
+
+  /**
+   * Any request that reads or writes the prompt cache restarts its lifetime. The lifetime is the one
+   * the request wrote with (1 hour or 5 minutes); a request that only read keeps the last one known.
+   * A replayed message carries its transcript timestamp, so a resumed session shows its real age.
+   */
+  noteCache(m, u) {
+    if (this.backend !== 'claude' || !(u.cache_read_input_tokens || u.cache_creation_input_tokens)) return;
+    const at = this.replaying ? Date.parse(m.timestamp) : Date.now();
+    if (!Number.isFinite(at) || (this.cache && at < this.cache.at)) return;
+    const made = u.cache_creation || {};
+    const ttl = made.ephemeral_1h_input_tokens > 0 ? CACHE_TTL_LONG_MS
+      : made.ephemeral_5m_input_tokens > 0 ? CACHE_TTL_SHORT_MS
+        : this.cache ? this.cache.ttl
+          : this.procOnApi || this.apiSource === 'ANTHROPIC_API_KEY' ? CACHE_TTL_SHORT_MS : CACHE_TTL_LONG_MS;
+    this.cache = { at, ttl };
+    this.renderCache();
+  }
+
+  renderCache() {
+    const c = this.cache;
+    this.cacheEl.classList.toggle('hidden', !c);
+    if (!c) return;
+    const age = Math.max(0, Date.now() - c.at);
+    const left = c.ttl - age;
+    this.cacheEl.classList.toggle('cold', left <= 0);
+    this.cacheEl.classList.toggle('cooling', left > 0 && left < c.ttl / 5);
+    this.cacheEl.querySelector('.cache-text').textContent = left > 0 ? formatAge(age) : 'cold';
+    const size = this.ctx.tokens ? ` (about ${formatTokens(this.ctx.tokens)} tokens)` : '';
+    this.cacheEl.title = `Prompt cache: last used ${formatAge(age)} ago, kept for ${formatAge(c.ttl)} after each use.
+`
+      + (left > 0
+        ? `Expires in ${formatAge(left)}. Until then the next message re-reads the conversation from the cache, cheaply.`
+        : `Expired: the next message writes the conversation${size} to the cache again, at full price.`);
   }
 
   /** A result carries the window size per model (its token counts are cumulative, so only `contextWindow` is read) and the cost. */
