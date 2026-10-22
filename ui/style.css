@@ -931,7 +931,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .tool-row.err pre { color: var(--error); }
 .filters button#resume-deep { margin-left: 4px; }
 
-/* Hermes Agent cells (hermes.js) */
+/* Codex (codex.js) and Hermes Agent (hermes.js) cells */
 .agent-tag { flex: none; padding: 0 5px; border: 1px solid var(--border-strong); border-radius: 3px; color: var(--fg-muted); font-size: 10px; line-height: 15px; text-transform: uppercase; letter-spacing: 0.04em; }
 .picker-agent { margin: 0 6px 6px; }
 .hermes-loading { display: flex; align-items: center; gap: 6px; }

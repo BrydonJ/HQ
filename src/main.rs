@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(feature = "codex")]
+mod codex;
 #[cfg(debug_assertions)]
 mod dev;
 #[cfg(feature = "hermes")]
@@ -20,7 +22,7 @@ use tauri_plugin_opener::OpenerExt;
 
 /// Every message on `on_event` is a JSON array of the session's stdout lines (as objects), and
 /// the last element of the last array is the `hq_exit` object. `backend` picks the agent:
-/// `claude` (the default) or, when built in, `hermes`.
+/// `claude` (the default) or, when built in, `codex` or `hermes`.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn spawn_session(
@@ -41,6 +43,8 @@ async fn spawn_session(
     let opts = SpawnOptions { cwd, resume, permission_mode, model, effort, fork, auto_tasks, max_agents };
     tauri::async_runtime::spawn_blocking(move || match backend.as_deref() {
         None | Some("claude") => app.state::<Sessions>().spawn(&app, opts, on_event),
+        #[cfg(feature = "codex")]
+        Some("codex") => codex::spawn(&app, opts, on_event),
         #[cfg(feature = "hermes")]
         Some("hermes") => hermes::spawn(&app, opts, on_event),
         Some(other) => Err(format!("This build of HQ has no {other} support")),
@@ -155,6 +159,43 @@ async fn load_transcript(session_id: String, before: Option<u64>) -> Result<stor
     tauri::async_runtime::spawn_blocking(move || store::load_transcript(&session_id, before))
         .await
         .map_err(|e| e.to_string())?
+}
+
+#[cfg(feature = "codex")]
+#[tauri::command]
+async fn load_codex_transcript(session_id: String, before: Option<u64>) -> Result<store::TranscriptChunk, String> {
+    tauri::async_runtime::spawn_blocking(move || codex::load_transcript(&session_id, before))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[cfg(feature = "codex")]
+#[tauri::command]
+async fn list_codex_sessions(limit: Option<usize>, cwd: Option<String>) -> Result<Vec<serde_json::Value>, String> {
+    let limit = limit.unwrap_or(80).min(500);
+    tauri::async_runtime::spawn_blocking(move || codex::list_sessions(cwd.as_deref(), limit))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Codex's model menu, for a Codex cell that has not started yet.
+#[cfg(feature = "codex")]
+#[tauri::command]
+async fn codex_models() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(codex::list_models).await.map_err(|e| e.to_string())?
+}
+
+#[cfg(feature = "codex")]
+#[tauri::command]
+async fn update_codex() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(codex::update_codex).await.map_err(|e| e.to_string())?
+}
+
+/// Sets the `codex` executable that Codex cells start from now on; blank goes back to the default.
+#[cfg(feature = "codex")]
+#[tauri::command]
+fn set_codex_path(path: Option<String>) {
+    codex::set_codex_path(path);
 }
 
 #[cfg(feature = "hermes")]
@@ -489,6 +530,8 @@ fn build_info(app: AppHandle, profile: State<'_, Profile>) -> BuildInfo {
         updatable: update::updates_enabled(),
         backends: vec![
             "claude",
+            #[cfg(feature = "codex")]
+            "codex",
             #[cfg(feature = "hermes")]
             "hermes",
         ],
@@ -627,6 +670,16 @@ fn main() {
             load_state,
             save_state,
             load_transcript,
+            #[cfg(feature = "codex")]
+            load_codex_transcript,
+            #[cfg(feature = "codex")]
+            list_codex_sessions,
+            #[cfg(feature = "codex")]
+            codex_models,
+            #[cfg(feature = "codex")]
+            update_codex,
+            #[cfg(feature = "codex")]
+            set_codex_path,
             #[cfg(feature = "hermes")]
             load_hermes_transcript,
             #[cfg(feature = "hermes")]
@@ -652,6 +705,8 @@ fn main() {
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
                 app.state::<Sessions>().kill_all();
+                #[cfg(feature = "codex")]
+                codex::stop_helper();
                 // The frontend's last save may still be waiting for the writer thread.
                 store::flush_state();
                 // An update that never found an idle moment installs as HQ closes.

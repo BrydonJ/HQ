@@ -24,6 +24,7 @@ const app = {
   claudeUpdateAt: 0,   // when `claude update` last ran (ms), so a restart does not repeat it
   remoteDefault: null, // new sessions start with Remote Control on; null until seeded from the account
   remoteAvailable: null, // from the last initialize reply: null until a session has reported it
+  nextBackend: 'claude', // the agent the new-session picker starts (see agentPickerSwitch)
   settings: null,      // the Settings screen; see sanitizeSettings for the keys
   sidebarOpen: false,
   query: '',
@@ -163,6 +164,11 @@ function updateClaude() {
   return run;
 }
 
+/** The agents a cell can run, by `backend`, as the UI names them. */
+const AGENT_NAMES = { claude: 'Claude', codex: 'Codex', hermes: 'Hermes' };
+/** Where each agent's history comes from: Claude's transcript, Codex's thread, HQ's copy of Hermes'. */
+const TRANSCRIPT_COMMANDS = { claude: 'load_transcript', codex: 'load_codex_transcript', hermes: 'load_hermes_transcript' };
+
 let reqSeq = 0;
 const nextRequestId = () => `hq-${Date.now().toString(36)}-${++reqSeq}`;
 
@@ -175,7 +181,8 @@ class Cell {
     customTitle = null, renamePending = false, detail, clean, progress = false, fork = false, collapsed = false,
     missing = false, remote = null, bridgeSessionId = null, draft = '', backend = 'claude', resumeAfterUpdate = false, resumeQueued = null }) {
     this.cwd = cwd;
-    this.backend = backend === 'hermes' ? 'hermes' : 'claude'; // the agent: Claude Code, or Hermes (hermes.js)
+    this.backend = AGENT_NAMES[backend] ? backend : 'claude'; // the agent: Claude Code, Codex (codex.js) or Hermes (hermes.js)
+    this.agent = AGENT_NAMES[this.backend];
     this.sessionId = sessionId;
     this.fork = !!(fork && sessionId); // resume into a new session ID, leaving the original alone
     this.permissionMode = permissionMode || 'default';
@@ -303,6 +310,7 @@ class Cell {
     for (const name of el.querySelectorAll('.proj-name, .cell-project .sweep-name')) name.textContent = baseName(this.cwd) || this.cwd;
     el.querySelector('.cell-path').textContent = this.cwd;
     if (this.backend === 'hermes') hermesDecorate(this);
+    if (this.backend === 'codex') codexDecorate(this);
     this.modeSel.value = this.permissionMode;
     this.setTitle(this.title);
     this.applyDetail();
@@ -843,7 +851,7 @@ class Cell {
       // Only the label line and the first sentence count: a later "no background work is running" is a detail.
       if (this.status === 'running' && /\b(?:nothing|no (?:task|work|request)s?)\s+(?:is |are |was |currently |actively )*(?:in progress|running|underway|being worked)/i.test(m[0] + text.split(/[.!?](?:\s|$)|\n/, 1)[0])) percent = null;
     }
-    const name = this.backend === 'hermes' ? 'Hermes' : 'Claude';
+    const name = this.agent;
     const error = !text && percent == null;
     if (error) text = reply && reply.subtype === 'error' ? `Could not ask: ${reply.error || `rejected by ${name}`}` : `${name} gave no answer.`;
     this.statusAnswer = { text, percent, error, at: Date.now(), asking: false };
@@ -913,7 +921,7 @@ class Cell {
       : this.status === 'exited' ? ['Stopped', 'exited']
       : ['Idle', ''];
     const answer = this.statusAnswer;
-    const agent = this.backend === 'hermes' ? 'Hermes' : 'Claude';
+    const agent = this.agent;
     const estimate = answer && answer.percent != null && this.turnStart && answer.at >= this.turnStart ? answer.percent : null;
     const pct = live ? taskPct : estimate;
     const barLabel = live ? `${taskPct}%  ·  ${done} of ${list.length} tasks done`
@@ -1125,11 +1133,12 @@ class Cell {
   /** Keeps a pick made in this cell as the default for the next new session of the same agent. */
   remember(choice) {
     if (this.backend === 'hermes') hermesRemember(choice);
+    else if (this.backend === 'codex') codexRemember(choice);
     else rememberChoice(choice);
   }
 
   models() {
-    return this.backend === 'hermes' ? hermesModels() : modelList();
+    return this.backend === 'hermes' ? hermesModels() : this.backend === 'codex' ? codexModels() : modelList();
   }
 
   modelLabel() {
@@ -1148,7 +1157,8 @@ class Cell {
   /** Effort levels the chosen model accepts; empty when it has no effort setting. */
   effortLevels() {
     if (this.backend === 'hermes') return []; // Hermes has no effort setting
-    // Searches the unfiltered list: a saved choice outside ALLOWED_MODELS still has its real effort levels.
+    if (this.backend === 'codex') return codexEffortLevels(this);
+    // Searches the unfiltered list: a saved choice of a full model id still has its real effort levels.
     const m = (app.models.length ? app.models : FALLBACK_MODELS).find(x => x.value === (this.modelChoice || 'default'));
     if (!m || !app.models.length) return ALL_EFFORTS; // unknown yet: let Claude decide
     if (!m.supportsEffort) return [];
@@ -1170,7 +1180,7 @@ class Cell {
     if (this.proc == null) return; // applied with --model on the next spawn
     const reply = await this.control({ subtype: 'set_model', model: this.modelChoice || 'default' });
     if (reply && reply.subtype === 'error') {
-      this.notice(`Could not switch model: ${reply.error || 'rejected by Claude'}`, true);
+      this.notice(`Could not switch model: ${reply.error || `rejected by ${this.agent}`}`, true);
       this.modelChoice = previous;
       this.updateModelLabel();
       saveState();
@@ -1187,7 +1197,7 @@ class Cell {
     if (this.proc == null) return; // applied with --effort on the next spawn
     const reply = await this.control({ subtype: 'apply_flag_settings', settings: { effortLevel: level } });
     if (reply && reply.subtype === 'error') {
-      this.notice(`Could not change effort: ${reply.error || 'rejected by Claude'}`, true);
+      this.notice(`Could not change effort: ${reply.error || `rejected by ${this.agent}`}`, true);
       this.effort = previous;
       this.updateModelLabel();
       saveState();
@@ -1364,6 +1374,7 @@ class Cell {
     if (this.spawning) return this.spawning;
     this.spawning = (async () => {
       if (this.backend === 'claude') updateClaude(); // runs in the background; a spawn does not wait for it
+      if (this.backend === 'codex') await codexBeforeSpawn(this);
       this.spawnedFresh = !this.sessionId; // Remote Control waits for a new session's first prompt
       try {
         for (let attempt = 0; ; attempt++) {
@@ -1420,8 +1431,9 @@ class Cell {
   async initialize() {
     const reply = await this.control({ subtype: 'initialize' });
     const r = reply && reply.subtype === 'success' && reply.response;
-    if (this.backend === 'hermes') { // keeps its own lists, and has no Remote Control
-      if (r) hermesInitialized(r);
+    if (this.backend !== 'claude') { // keeps its own lists, and has no Remote Control
+      if (r && this.backend === 'hermes') hermesInitialized(r);
+      if (r && this.backend === 'codex') codexInitialized(r);
       await this.refreshApplied();
       return;
     }
@@ -1480,7 +1492,7 @@ class Cell {
     const clear = prompt == null && !images.length && /^\/(?:clear|reset|new)(?:\s+([\s\S]*))?$/.exec(text);
     if (clear) {
       if (this.status === 'running' || this.pending.size || this.spawning) {
-        this.notice('Claude is still working. Stop it (Esc) before you clear the conversation.', true);
+        this.notice(`${this.agent} is still working. Stop it (Esc) before you clear the conversation.`, true);
         return;
       }
       this.input.value = '';
@@ -1524,7 +1536,7 @@ class Cell {
       return;
     }
     // Not on a slash command: Claude Code only runs one sent as the whole prompt.
-    const hint = this.askTasks && prompt == null && !/^\/[\w:-]+(\s|$)/.test(text.trimStart()) ? [{ type: 'text', text: this.backend === 'hermes' ? HERMES_TASK_HINT : TASK_HINT }] : [];
+    const hint = this.askTasks && prompt == null && !/^\/[\w:-]+(\s|$)/.test(text.trimStart()) ? [{ type: 'text', text: this.backend === 'hermes' ? HERMES_TASK_HINT : this.backend === 'codex' ? CODEX_TASK_HINT : TASK_HINT }] : [];
     const content = images.length || hint.length
       ? [...images.map(i => ({ type: 'image', source: { type: 'base64', media_type: i.mediaType, data: i.data } })), ...(text ? [{ type: 'text', text }] : []), ...hint]
       : text;
@@ -1617,7 +1629,7 @@ class Cell {
   offerForceStop() {
     this.interruptTimer = null;
     if (this.proc == null || (this.status !== 'running' && !this.pending.size)) return;
-    const note = this.notice('Claude has not stopped yet.');
+    const note = this.notice(`${this.agent} has not stopped yet.`);
     note.append(' ', h('button', { class: 'btn', text: 'Force stop', onclick: () => { this.clearForceNote(); this.forceStop(); } }));
     this.forceNote = note;
   }
@@ -1655,7 +1667,7 @@ class Cell {
       await withTimeout(exited, 5000);
       this.exitWaiter = null;
       if (this.proc != null) { // the process did not end; quietExit stays set so its late exit says nothing
-        this.notice('Could not clear: Claude did not stop. Try again.', true);
+        this.notice(`Could not clear: ${this.agent} did not stop. Try again.`, true);
         return;
       }
     }
@@ -1689,7 +1701,7 @@ class Cell {
     if (this.proc == null) return; // applied with --permission-mode on the next spawn
     const reply = await this.control({ subtype: 'set_permission_mode', mode });
     if (reply && reply.subtype === 'error') {
-      this.notice(`Could not switch mode: ${reply.error || 'rejected by Claude'}`, true);
+      this.notice(`Could not switch mode: ${reply.error || `rejected by ${this.agent}`}`, true);
       this.permissionMode = previous;
       this.modeSel.value = previous;
       saveState();
@@ -1699,7 +1711,7 @@ class Cell {
   requestClose(btn) {
     if (this.busy() && !btn.classList.contains('confirm')) {
       btn.classList.add('confirm');
-      btn.title = this.status === 'running' || this.pending.size ? 'Claude is working. Click again to close.' : 'Background tasks are still running. Click again to stop them and close.';
+      btn.title = this.status === 'running' || this.pending.size ? `${this.agent} is working. Click again to close.` : 'Background tasks are still running. Click again to stop them and close.';
       btn.style.color = 'var(--error)';
       setTimeout(() => { btn.classList.remove('confirm'); btn.style.color = ''; btn.title = 'Close session'; }, 3000);
       return;
@@ -2197,11 +2209,11 @@ class Cell {
       this.quietExit = false;
       this.setStatus('idle');
     } else if (forced) {
-      this.notice('Stopped. Claude resumes this session when you send a message.');
+      this.notice(`Stopped. ${this.agent} resumes this session when you send a message.`);
       this.setStatus('idle');
     } else if (m.code !== 0 && m.code != null) {
       const tail = (m.stderr || []).slice(-8).join('\n');
-      this.notice(`Claude exited with code ${m.code}${tail ? '\n' + tail : ''}`, true);
+      this.notice(`${this.agent} exited with code ${m.code}${tail ? '\n' + tail : ''}`, true);
       if (lost) this.unsend(lost, true);
       this.setStatus('exited');
     } else {
@@ -2217,7 +2229,7 @@ class Cell {
     if (req.subtype !== 'can_use_tool') {
       // Hooks and SDK MCP servers are never registered by HQ, so refuse anything else, and say so.
       this.write({ type: 'control_response', response: { subtype: 'error', request_id: m.request_id, error: `HQ does not handle ${req.subtype}` } });
-      this.notice(`Claude sent a request that HQ does not handle (${req.subtype || 'unknown'}), and HQ refused it.`, true);
+      this.notice(`${this.agent} sent a request that HQ does not handle (${req.subtype || 'unknown'}), and HQ refused it.`, true);
       return;
     }
     let card;
@@ -2295,7 +2307,7 @@ class Cell {
     }
     const reason = req.decision_reason ? h('div', { class: 'desc', text: String(req.decision_reason) }) : null;
 
-    const feedback = h('input', { type: 'text', placeholder: 'No — tell Claude what to do instead (optional), then Enter' });
+    const feedback = h('input', { type: 'text', placeholder: `No — tell ${this.agent} what to do instead (optional), then Enter` });
     const allow = () => this.answer(requestId, { behavior: 'allow', updatedInput: input });
     const allowAlways = () => this.answer(requestId, { behavior: 'allow', updatedInput: input, updatedPermissions: req.permission_suggestions });
     const deny = () => this.answer(requestId, { behavior: 'deny', message: feedback.value.trim() || 'The user denied this tool use.' });
@@ -2416,7 +2428,7 @@ class Cell {
   async drawHistory() {
     let chunk = { lines: [], start: 0 };
     try {
-      chunk = await invoke(this.backend === 'hermes' ? 'load_hermes_transcript' : 'load_transcript', { sessionId: this.sessionId, cwd: this.cwd, before: null });
+      chunk = await invoke(TRANSCRIPT_COMMANDS[this.backend], { sessionId: this.sessionId, cwd: this.cwd, before: null });
     } catch (err) {
       this.notice(`Could not load history: ${err}`, true);
     }
@@ -2437,7 +2449,7 @@ class Cell {
     if (this.historyStart > 0) this.msgs.prepend(this.earlierNote());
     if (this.fork) this.notice('Forked: your first message starts a copy of this session. The original is left as it was.');
     else if (this.missing) this.notice('The folder of this session is missing, so the session cannot continue. Use "Locate folder…" below, or close it.');
-    else if (!this.resumeAfterUpdate) this.notice(lines.length ? `Session restored. ${this.backend === 'hermes' ? 'Hermes' : 'Claude'} resumes when you send a message.` : 'Session restored (no history found).');
+    else if (!this.resumeAfterUpdate) this.notice(lines.length ? `Session restored. ${this.agent} resumes when you send a message.` : 'Session restored (no history found).');
     if (last && endsMidTurn(last) && !this.resumeAfterUpdate) this.notice('The last turn was interrupted when HQ closed.');
     if (this.resumeWarning) this.notice(this.resumeWarning, true);
     this.pinToBottom();
@@ -2482,7 +2494,7 @@ class Cell {
   async loadEarlier() {
     let chunk;
     try {
-      chunk = await invoke(this.backend === 'hermes' ? 'load_hermes_transcript' : 'load_transcript', { sessionId: this.sessionId, before: this.historyStart });
+      chunk = await invoke(TRANSCRIPT_COMMANDS[this.backend], { sessionId: this.sessionId, before: this.historyStart });
     } catch (err) {
       this.notice(`Could not load earlier history: ${err}`, true);
       return;
@@ -2728,7 +2740,7 @@ class Cell {
   }
 
   async enableRemote() {
-    if (this.proc == null || this.backend === 'hermes' || app.remoteAvailable === false || this.remoteState === 'policy' || this.remoteState === 'connecting' || this.remoteState === 'on') return;
+    if (this.proc == null || this.backend !== 'claude' || app.remoteAvailable === false || this.remoteState === 'policy' || this.remoteState === 'connecting' || this.remoteState === 'on') return;
     this.remote = true;
     const seq = ++this.remoteSeq;
     this.setRemoteState('connecting');
@@ -2791,7 +2803,7 @@ class Cell {
 
   renderRemote() {
     const btn = this.remoteBtn;
-    const hidden = this.backend === 'hermes' || app.remoteAvailable === false || this.remoteState === 'policy';
+    const hidden = this.backend !== 'claude' || app.remoteAvailable === false || this.remoteState === 'policy';
     btn.classList.toggle('hidden', hidden);
     if (hidden) return;
     const armed = this.remote && this.proc == null;
@@ -2849,7 +2861,7 @@ class Cell {
   async writeHandoff() {
     if (this.missing || this.handoffBusy) return;
     if (!this.sessionId && !this.promptWritten) {
-      this.notice('Nothing to hand off yet: send Claude a message first.');
+      this.notice(`Nothing to hand off yet: send ${this.agent} a message first.`);
       return;
     }
     this.setHandoffBusy(true);
@@ -2861,7 +2873,7 @@ class Cell {
       const r = reply && reply.subtype === 'success' && reply.response;
       const text = r && typeof r.response === 'string' ? r.response.trim() : '';
       if (!text) {
-        this.notice(`Could not write the handoff: ${reply && reply.subtype === 'error' ? reply.error || 'rejected by Claude' : 'Claude gave no answer.'}`, true);
+        this.notice(`Could not write the handoff: ${reply && reply.subtype === 'error' ? reply.error || `rejected by ${this.agent}` : `${this.agent} gave no answer.`}`, true);
         return;
       }
       const path = await invoke('save_text_file', { defaultName: 'HANDOFF.md', text: `${text}\n`, directory: this.cwd });
@@ -3036,12 +3048,13 @@ document.addEventListener('keydown', e => {
   }
 }, true);
 
-// The only models HQ offers; the aliases resolve to the current 5.x releases. Anything else the
-// session reports (dated or older model ids) is hidden.
-const ALLOWED_MODELS = ['default', 'fable', 'opus', 'sonnet', 'haiku'];
+// HQ offers Claude's model aliases (default, opus, sonnet, ...), which always resolve to the newest
+// release, so a new alias shows up by itself after `claude update`. Full model ids the session
+// reports (dated or older releases) are hidden.
+const isModelAlias = m => !/^claude-/i.test(m.value);
 
 function modelList() {
-  const list = app.models.filter(m => ALLOWED_MODELS.includes(m.value));
+  const list = app.models.filter(isModelAlias);
   return list.length ? list : FALLBACK_MODELS;
 }
 
@@ -3358,7 +3371,7 @@ function slashToken(input) {
 function slashUpdate(cell) {
   const token = slashToken(cell.input);
   // After other text a lone "/" is not taken as a command until a letter follows it.
-  const commands = cell.backend === 'hermes' ? hermes.commands : app.commands;
+  const commands = cell.backend === 'hermes' ? hermes.commands : cell.backend === 'codex' ? codex.commands : app.commands;
   if (!token || !commands.length || cell.collapsed || (token.start > 0 && !token.query)) { slashClose(cell); return; }
   const q = token.query.toLowerCase();
   const rank = c => {
@@ -3542,7 +3555,7 @@ function placeCell(cell) {
 
 /** Opens a new session with the permission mode, model and effort the user picked last. */
 function addNewCell(opts, flags) {
-  const { permissionMode = 'default', model = null, effort = null } = opts.backend === 'hermes' ? hermes.defaults : app.defaults;
+  const { permissionMode = 'default', model = null, effort = null } = opts.backend === 'hermes' ? hermes.defaults : opts.backend === 'codex' ? codexDefaults() : app.defaults;
   return addCell({ permissionMode, model, effort, ...opts }, flags);
 }
 
@@ -3912,7 +3925,7 @@ async function openPicker() {
       icon('folder'), h('span', { class: 'name', text: baseName(path) || path }), h('span', { class: 'path', text: path }), forget));
   });
   pickerIndex = -1;
-  hermesPickerSwitch(picker);
+  agentPickerSwitch(picker);
   picker.classList.remove('hidden');
   if (!list.children.length) browseFolder();
   else picker.querySelector('.picker-item').focus();
@@ -3920,6 +3933,40 @@ async function openPicker() {
 
 function closePicker() {
   picker.classList.add('hidden');
+}
+
+/** The agents this build can start, in the order the switch shows them. */
+function availableBackends() {
+  return ['claude', 'codex', 'hermes'].filter(b => b === 'claude' || (Array.isArray(build.backends) && build.backends.includes(b)));
+}
+
+/** The agent the new-session picker is set to. */
+function pickerBackend() {
+  return availableBackends().includes(app.nextBackend) ? app.nextBackend : 'claude';
+}
+
+/** The Claude / Codex / Hermes switch at the top of the new-session picker, when this build has more than Claude. */
+function agentPickerSwitch(picker) {
+  let row = picker.querySelector('.picker-agent');
+  const backends = availableBackends();
+  if (backends.length < 2) {
+    if (row) row.remove();
+    return;
+  }
+  if (!row) {
+    row = h('div', { class: 'segmented picker-agent', title: 'Which agent the new session runs' });
+    picker.querySelector('.picker-title').after(row);
+  }
+  const current = pickerBackend();
+  row.replaceChildren(...backends.map(b => h('button', {
+    class: current === b ? 'on' : '',
+    onclick: e => {
+      e.stopPropagation();
+      app.nextBackend = b;
+      saveState();
+      agentPickerSwitch(picker);
+    },
+  }, AGENT_NAMES[b])));
 }
 
 async function browseFolder() {
@@ -3974,6 +4021,7 @@ async function openResumer() {
   resumeSearch.value = '';
   resumeState.project = '';
   hermesResumeFilter($('#resume-filters'));
+  codexResumeFilter($('#resume-filters')); // after HQ's too, so before Hermes
   renderProjectOptions();
   resumeSearch.focus();
   await loadResumeSessions();
@@ -3987,8 +4035,8 @@ async function loadResumeSessions() {
   renderResumeList();
   let sessions = null;
   let error = null;
-  const others = hermesSessions(cwd); // read alongside, added once Claude's are shown
-  resumeState.othersLoading = !!others;
+  const others = otherSessions(cwd); // read alongside, added once Claude's are shown
+  resumeState.othersLoading = others ? others.names : false;
   try {
     sessions = await invoke('list_sessions', { limit: 80, cwd });
   } catch (err) {
@@ -4006,7 +4054,7 @@ async function loadResumeSessions() {
   resumeState.loading = false;
   renderResumeList();
   if (!others) return;
-  const extra = await others;
+  const extra = await others.list;
   if (seq !== resumeState.seq) return;
   resumeState.othersLoading = false;
   if (!extra.length) { renderResumeList(); return; }
@@ -4017,6 +4065,16 @@ async function loadResumeSessions() {
     renderProjectOptions();
   }
   renderResumeList();
+}
+
+/**
+ * Codex's and Hermes' sessions for the resume list, each read by a short-lived helper: `list`
+ * resolves to all of them, `names` says whose are coming. Null when neither is asked for.
+ */
+function otherSessions(cwd) {
+  const sources = [['Codex', codexSessions(cwd)], ['Hermes', hermesSessions(cwd)]].filter(([, p]) => p);
+  if (!sources.length) return null;
+  return { names: sources.map(([n]) => n).join(' and '), list: Promise.all(sources.map(([, p]) => p)).then(lists => lists.flat()) };
 }
 
 /** Every folder with a recent session, an open cell or a place in the recent list, by name. */
@@ -4168,7 +4226,7 @@ function renderResumeList() {
     const text = resumeState.loading ? 'Reading sessions…' : resumeState.sessions.length ? 'No sessions match.' : 'No sessions found.';
     rows.push(h('div', { class: 'session-empty', text }));
   }
-  if (resumeState.othersLoading && !resumeState.loading) rows.unshift(hermesSessionsLoading());
+  if (resumeState.othersLoading && !resumeState.loading) rows.unshift(h('div', { class: 'session-empty hermes-loading', text: `Loading ${resumeState.othersLoading} sessions…` }));
   resumeList.replaceChildren(...rows);
 }
 
@@ -4487,10 +4545,11 @@ function sanitizeSettings(x) {
     theme: THEMES.some(([t]) => t === v.theme) ? v.theme : 'auto',
     notify: v.notify !== false,
     autoUpdate: v.autoUpdate !== false,
-    autoTasks: v.autoTasks !== false, // read when a session starts: Claude or Hermes is asked to keep a task list
+    autoTasks: v.autoTasks !== false, // read when a session starts: Claude or Hermes is asked to keep a task list (Codex plans on its own)
     // The most subagents one Claude session runs at once; 0 is no limit.
     maxAgents: Number.isInteger(v.maxAgents) && v.maxAgents >= 0 && v.maxAgents <= MAX_AGENTS_CAP ? v.maxAgents : DEFAULT_MAX_AGENTS,
     claudePath: typeof v.claudePath === 'string' ? v.claudePath.trim().slice(0, 500) : '',
+    codexPath: typeof v.codexPath === 'string' ? v.codexPath.trim().slice(0, 500) : '',
     autoCopy: v.autoCopy !== false,
     weeklyBar: v.weeklyBar !== false,
     // How the header buttons show: always, fading in as the pointer nears, or only while the header is hovered.
@@ -4510,6 +4569,7 @@ function activeTheme() {
 function applySettings() {
   applyAppearance();
   invoke('set_claude_path', { path: app.settings.claudePath || null }).catch(() => {}); // the backend uses it for every claude it starts
+  if (codexAvailable()) invoke('set_codex_path', { path: app.settings.codexPath || null }).catch(() => {});
 }
 
 /** Theme, custom colours, hidden header buttons and the fade. Cheap, so a colour picker can call it while it is dragged. */
@@ -4538,7 +4598,7 @@ lightQuery.addEventListener('change', () => { if (app.settings.theme === 'auto')
 
 function changeSetting(key, value) {
   app.settings = { ...app.settings, [key]: value };
-  if (key === 'claudePath') applySettings();
+  if (key === 'claudePath' || key === 'codexPath') applySettings();
   else applyAppearance();
   saveState();
 }
@@ -4592,6 +4652,8 @@ function renderSettings() {
   }
   const path = h('input', { type: 'text', value: app.settings.claudePath, placeholder: 'claude', spellcheck: 'false' });
   path.addEventListener('change', () => changeSetting('claudePath', path.value.trim()));
+  const codexPath = h('input', { type: 'text', value: app.settings.codexPath, placeholder: 'codex', spellcheck: 'false' });
+  codexPath.addEventListener('change', () => changeSetting('codexPath', codexPath.value.trim()));
   const maxAgents = h('input', { type: 'number', min: '0', max: String(MAX_AGENTS_CAP), step: '1', value: String(app.settings.maxAgents) });
   maxAgents.addEventListener('change', () => {
     // A cleared box reads as '', which Number() would turn into 0 and so lift the limit.
@@ -4602,7 +4664,7 @@ function renderSettings() {
     changeSetting('maxAgents', v);
   });
   const models = modelList().map(m => [m.value, m.displayName || m.value]);
-  body.replaceChildren(
+  body.replaceChildren(...[
     row('Notifications', 'A notification when a turn finishes, or Claude needs you, while HQ is in the background.', toggle(app.settings.notify, v => changeSetting('notify', v))),
     row('Remote Control for new sessions', 'Continue sessions from claude.ai/code or the Claude app.', toggle(!!app.remoteDefault, v => { app.remoteDefault = v; saveState(); renderRemoteButtons(); })),
     row('Default model for new sessions', 'The same as picking a model in a session. HQ_MODEL still applies when none is picked.',
@@ -4610,7 +4672,9 @@ function renderSettings() {
     row('Automatic task lists', 'Ask Claude and Hermes to keep a task list on multi-step work. Off saves a few tokens per long job.', toggle(app.settings.autoTasks, v => changeSetting('autoTasks', v))),
     row('Agents per session', 'The most subagents one Claude session runs at once, workflows included; more are refused until one finishes. For sessions started from now on. 0 is no limit.', maxAgents),
     row('Check for HQ updates automatically', 'The Check for updates button in the sessions list always works.', toggle(app.settings.autoUpdate, v => changeSetting('autoUpdate', v))),
-    row('Claude command', 'Path to the claude program, for sessions started from now on. Empty uses HQ_CLAUDE, else claude on PATH.', path));
+    row('Claude command', 'Path to the claude program, for sessions started from now on. Empty uses HQ_CLAUDE, else claude on PATH.', path),
+    codexAvailable() ? row('Codex command', 'Path to the codex program, for Codex sessions started from now on. Empty uses HQ_CODEX, else codex on PATH. HQ keeps Codex up to date while no Codex session runs.', codexPath) : null,
+  ].filter(Boolean));
 }
 
 function renderAppearanceSettings(row, toggle, select) {
@@ -4994,6 +5058,8 @@ function flushState() {
     commands: app.commands,
     defaults: app.defaults,
     hermes: hermesState(),
+    codex: codexState(),
+    nextBackend: app.nextBackend === 'claude' ? undefined : app.nextBackend,
     workspaces: app.workspaces,
     projectColors: projectColorPicks,
     claudeUpdateAt: app.claudeUpdateAt || undefined,
@@ -5031,6 +5097,9 @@ async function restore() {
   // (updateClaude runs at the end: its first save must not write a board that has no cells yet)
   app.defaults = sanitizeDefaults(state && (state.defaults || (state.cells || []).at(-1)));
   hermesRestore(state && state.hermes);
+  codexRestore(state && state.codex);
+  // Boards saved before Codex kept the picker's choice as a Hermes flag.
+  app.nextBackend = state && typeof state.nextBackend === 'string' ? state.nextBackend : state && state.hermes && state.hermes.next === true ? 'hermes' : 'claude';
   app.workspaces = sanitizeWorkspaces(state && state.workspaces);
   projectColorPicks = sanitizeProjectColors(state && state.projectColors);
   app.sidebarOpen = !!(state && state.sidebarOpen);
