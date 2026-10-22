@@ -41,6 +41,11 @@ const WORKFLOW_CAP_MAX: u32 = 256;
 /// What "no limit" sets the subagent cap to, as Claude Code has no value meaning unlimited.
 const NO_SUBAGENT_CAP: u32 = 1_000_000;
 /// Asks for a task list only where one helps, so a one-off question still gets a plain answer.
+/// The Claude Console key a session marked for it bills to. In `-p` mode Claude Code always uses it
+/// when it is set, but these outrank it in Claude Code's authentication precedence, so such a
+/// session must not inherit them.
+const API_KEY_VAR: &str = "ANTHROPIC_API_KEY";
+const OUTRANK_API_KEY: [&str; 4] = ["ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"];
 const TASK_PROMPT: &str = "You are running inside HQ, a dashboard where the user watches several sessions at once and judges progress from your task list. For work with three or more steps, or that will take more than a few minutes, create the tasks with TaskCreate before starting and keep them current with TaskUpdate: mark each one in_progress as you start it and completed as soon as it is done. Skip the task list for questions and quick single-step jobs.";
 
 pub struct Session {
@@ -72,6 +77,8 @@ pub struct SpawnOptions {
     pub auto_tasks: bool,
     /// The most subagents the session runs at once: 0 for no limit, None for Claude's own.
     pub max_agents: Option<u32>,
+    /// Runs on the API key saved in HQ's settings instead of Claude's own login.
+    pub api_key: bool,
 }
 
 /// The `claude` executable chosen in HQ's own settings, which beats `HQ_CLAUDE`.
@@ -272,6 +279,10 @@ impl Sessions {
         for (var, value) in agent_cap_env(opts.max_agents) {
             cmd.env(var, value);
         }
+        if opts.api_key {
+            let key = crate::store::api_key(app).ok_or("No API key is saved in HQ's settings.")?;
+            use_api_key(&mut cmd, &key);
+        }
         // A prefix the user set themselves wins.
         if std::env::var_os(REMOTE_PREFIX_VAR).is_none_or(|v| v.is_empty()) {
             cmd.env(REMOTE_PREFIX_VAR, remote_name_prefix(&opts.cwd));
@@ -398,6 +409,15 @@ fn agent_cap_env(max: Option<u32>) -> Vec<(&'static str, String)> {
     let subagents = if max == 0 { NO_SUBAGENT_CAP } else { max };
     let workflow = if max == 0 { WORKFLOW_CAP_MAX } else { max.min(WORKFLOW_CAP_MAX) };
     vec![(SUBAGENT_CAP_VAR, subagents.to_string()), (WORKFLOW_CAP_VAR, workflow.to_string())]
+}
+
+/// Points the session at `key`, past any credential that would outrank it. An `env` block in
+/// Claude's own settings still wins, so the frontend checks the `apiKeySource` Claude reports.
+fn use_api_key(cmd: &mut Command, key: &str) {
+    cmd.env(API_KEY_VAR, key);
+    for var in OUTRANK_API_KEY {
+        cmd.env_remove(var);
+    }
 }
 
 fn remote_name_prefix(cwd: &str) -> String {
@@ -701,6 +721,20 @@ mod tests {
         assert_eq!(env(Some(0)), ["CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS=1000000", "CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS=256"]);
         assert_eq!(env(Some(300)), ["CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS=300", "CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS=256"]);
         assert!(env(None).is_empty());
+    }
+
+    #[test]
+    fn an_api_key_session_sets_the_key_and_drops_what_outranks_it() {
+        let mut cmd = Command::new("claude");
+        use_api_key(&mut cmd, "sk-ant-api03-test");
+        let envs: HashMap<String, Option<String>> = cmd
+            .get_envs()
+            .map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned())))
+            .collect();
+        assert_eq!(envs[API_KEY_VAR].as_deref(), Some("sk-ant-api03-test"));
+        for var in OUTRANK_API_KEY {
+            assert_eq!(envs[var], None, "{var} must be removed");
+        }
     }
 
     #[cfg(windows)]

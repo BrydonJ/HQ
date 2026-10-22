@@ -33,12 +33,14 @@ async fn spawn_session(
     fork: Option<bool>,
     auto_tasks: Option<bool>,
     max_agents: Option<u32>,
+    api_key: Option<bool>,
     backend: Option<String>,
     on_event: Channel<InvokeResponseBody>,
 ) -> Result<u64, String> {
     let fork = fork.unwrap_or(false);
     let auto_tasks = auto_tasks.unwrap_or(true);
-    let opts = SpawnOptions { cwd, resume, permission_mode, model, effort, fork, auto_tasks, max_agents };
+    let api_key = api_key.unwrap_or(false);
+    let opts = SpawnOptions { cwd, resume, permission_mode, model, effort, fork, auto_tasks, max_agents, api_key };
     tauri::async_runtime::spawn_blocking(move || match backend.as_deref() {
         None | Some("claude") => app.state::<Sessions>().spawn(&app, opts, on_event),
         #[cfg(feature = "hermes")]
@@ -105,6 +107,22 @@ async fn save_text_file(window: WebviewWindow, default_name: String, text: Strin
 #[tauri::command]
 fn set_claude_path(path: Option<String>) {
     session::set_claude_path(path);
+}
+
+/// What the saved API key looks like (its last characters), or None when there is none. The key
+/// itself never goes to the webview.
+#[tauri::command]
+fn api_key_hint(app: AppHandle) -> Option<String> {
+    store::api_key(&app).as_deref().map(store::api_key_hint)
+}
+
+/// Saves the API key that sessions switched to API credits run on (blank removes it) and returns its hint.
+#[tauri::command]
+fn set_api_key(app: AppHandle, key: Option<String>) -> Result<Option<String>, String> {
+    let key = key.filter(|k| !k.trim().is_empty()).map(|k| store::clean_api_key(&k)).transpose()?;
+    let hint = key.as_deref().map(store::api_key_hint);
+    store::set_api_key(&app, key)?;
+    Ok(hint)
 }
 
 /// Picks the VS Code workspace file that the cell's VS Code button opens for this folder.
@@ -621,6 +639,8 @@ fn main() {
             pick_folder,
             save_text_file,
             set_claude_path,
+            api_key_hint,
+            set_api_key,
             pick_workspace,
             find_workspaces,
             folder_exists,
