@@ -647,6 +647,7 @@ class Cell {
     layout();
     if (!on) {
       this.expandedAt = Date.now();
+      if (this.cache) this.renderCache(); // the ticker skipped it while collapsed
       autoGrow(this.input); // a draft restored while the cell was collapsed
       if (this.historyPending) {
         this.historyPending = false;
@@ -1204,6 +1205,7 @@ class Cell {
   async setModel(value) {
     const previous = this.modelChoice;
     this.modelChoice = value && value !== 'default' ? value : null;
+    if (this.modelChoice !== previous) this.dropCache(); // the prompt cache belongs to a model
     this.updateModelLabel();
     saveState();
     if (this.proc == null) return; // applied with --model on the next spawn
@@ -1523,6 +1525,7 @@ class Cell {
         for (let attempt = 0; ; attempt++) {
           try {
             this.proc = await this.spawnProcess(onApi);
+            if (this.procOnApi !== onApi) this.dropCache(); // the plan's prompt cache does not carry over to the key, or back
             this.procOnApi = onApi;
             break;
           } catch (err) {
@@ -2805,6 +2808,11 @@ class Cell {
         : this.cache ? this.cache.ttl
           : this.procOnApi || this.apiSource === 'ANTHROPIC_API_KEY' ? CACHE_TTL_SHORT_MS : CACHE_TTL_LONG_MS;
     this.cache = { at, ttl };
+    this.renderCache();
+  }
+
+  dropCache() {
+    this.cache = null;
     this.renderCache();
   }
 
