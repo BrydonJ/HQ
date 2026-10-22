@@ -144,12 +144,16 @@ pub fn set_api_key(app: &AppHandle, key: Option<String>) -> Result<(), String> {
     match &key {
         Some(k) => {
             let tmp = path.with_extension("tmp");
+            let _ = fs::remove_file(&tmp); // a leftover keeps its old mode; a new file gets 0600
             let mut options = fs::OpenOptions::new();
             options.write(true).create(true).truncate(true);
             #[cfg(unix)]
             std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
             let written = options.open(&tmp).and_then(|mut f| io::Write::write_all(&mut f, k.as_bytes()));
-            written.and_then(|_| fs::rename(&tmp, &path)).map_err(|e| format!("could not save the API key: {e}"))?;
+            if let Err(e) = written.and_then(|_| fs::rename(&tmp, &path)) {
+                let _ = fs::remove_file(&tmp);
+                return Err(format!("could not save the API key: {e}"));
+            }
         }
         None => match fs::remove_file(&path) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(format!("could not remove the API key: {e}")),

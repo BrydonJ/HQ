@@ -1659,7 +1659,8 @@ class Cell {
     else if (prompt == null) this.queuedTexts.push({ text, images: images.length, results: 0 });
     this.setStatus('running');
     this.drafts.add(draft);
-    if (idle && this.apiSwitchDue()) {
+    // A message sent during a restart onto the other credential waits for it rather than writing to the dying process.
+    if (this.apiSwitch || (idle && this.apiSwitchDue())) {
       await this.syncApi();
       if (draft.cancelled || this.closing) {
         this.drafts.delete(draft);
@@ -1675,8 +1676,11 @@ class Cell {
       return;
     }
     // Not on a slash command: Claude Code only runs one sent as the whole prompt.
-    const hint = this.askTasks && prompt == null && !/^\/[\w:-]+(\s|$)/.test(text.trimStart()) ? [{ type: 'text', text: this.backend === 'hermes' ? HERMES_TASK_HINT : this.backend === 'codex' ? CODEX_TASK_HINT : TASK_HINT }] : [];
-    const content = images.length || hint.length
+    const slash = /^\/[\w:-]+(\s|$)/.test(text.trimStart());
+    const hint = this.askTasks && prompt == null && !slash ? [{ type: 'text', text: this.backend === 'hermes' ? HERMES_TASK_HINT : this.backend === 'codex' ? CODEX_TASK_HINT : TASK_HINT }] : [];
+    // Blocks even for plain text: Claude then records no prompt text in the transcript's first enqueue,
+    // which is how the resume list tells HQ's sessions from an agent's `claude -p` (store.rs is_agent).
+    const content = images.length || hint.length || (text && !slash)
       ? [...images.map(i => ({ type: 'image', source: { type: 'base64', media_type: i.mediaType, data: i.data } })), ...(text ? [{ type: 'text', text }] : []), ...hint]
       : text;
     if (text) this.sentPrompts.push(text);
@@ -2107,7 +2111,8 @@ class Cell {
   /** Arms or disarms carrying on by itself once the plan's usage is back (checkLimitResumes). */
   setLimitResume(on) {
     // With no reset known, the first look at usage waits a few minutes rather than sending at once.
-    this.limitResume = on ? { resetsAt: Math.max(this.limitResetAt, usageResetAt()) || Date.now() + LIMIT_RESUME_UNKNOWN_MS } : null;
+    const known = this.limitResetAt > Date.now() ? this.limitResetAt : 0; // a past reset says nothing about this limit
+    this.limitResume = on ? { resetsAt: Math.max(known, usageResetAt()) || Date.now() + LIMIT_RESUME_UNKNOWN_MS } : null;
     this.drawLimitResume();
     if (on) watchLimitResumes();
   }
@@ -3248,13 +3253,12 @@ document.addEventListener('keydown', e => {
   }
 }, true);
 
-// HQ offers Claude's model aliases (default, opus, sonnet, ...), which always resolve to the newest
-// release, so a new alias shows up by itself after `claude update`. Full model ids the session
-// reports (dated or older releases) are hidden.
-const isModelAlias = m => !/^claude-/i.test(m.value);
+// The only models HQ offers; the aliases resolve to the current 5.x releases. Anything else the
+// session reports (dated or older model ids, opusplan, [1m] variants) is hidden.
+const ALLOWED_MODELS = ['default', 'fable', 'opus', 'sonnet', 'haiku'];
 
 function modelList() {
-  const list = app.models.filter(isModelAlias);
+  const list = app.models.filter(m => ALLOWED_MODELS.includes(m.value));
   return list.length ? list : FALLBACK_MODELS;
 }
 
@@ -4632,6 +4636,7 @@ function usageResetAt() {
 const LIMIT_RESUME_PROMPT = 'The usage limit has reset. Continue where you left off.';
 const LIMIT_RESUME_CHECK_MS = 60 * 1000;
 const LIMIT_RESUME_UNKNOWN_MS = 5 * 60 * 1000;
+const LIMIT_RESUME_BLIND_MS = 15 * 60 * 1000; // how long past the reset an unreadable usage holds the "continue" back
 let limitResumeTimer = 0;
 
 function watchLimitResumes() {
@@ -4651,12 +4656,14 @@ async function checkLimitResumes() {
   if (!due.length) return;
   const latest = Math.max(...due.map(c => c.limitResume.resetsAt));
   if (usage.fetchedAt < latest || now - usage.fetchedAt > USAGE_EVERY_MS) await refreshUsage();
-  if (usage.fetchedAt < latest) return; // unread (an error): tried again on a later tick
-  const still = usageResetAt();
+  // Unread (an error): tried again on a later tick, until the reset is long past and it goes anyway.
+  if (usage.fetchedAt < latest && now - latest < LIMIT_RESUME_BLIND_MS) return;
+  const still = usage.fetchedAt < latest ? 0 : usageResetAt();
   for (const cell of due) {
     if (!cell.limitResume || !app.cells.includes(cell) || cell.closing) continue;
     if (still) { cell.limitResume.resetsAt = still; cell.drawLimitResume(); continue; }
     if (cell.status === 'running' || cell.pending.size || cell.spawning) continue; // busy; the next tick sends it
+    cell.setLimitResume(false); // before submit, which can wait: an overlapping tick must not send it twice
     cell.notice('Usage is back: continuing.');
     cell.submit(LIMIT_RESUME_PROMPT);
   }

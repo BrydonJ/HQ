@@ -214,8 +214,9 @@ async fn update_codex() -> Result<String, String> {
 /// Sets the `codex` executable that Codex cells start from now on; blank goes back to the default.
 #[cfg(feature = "codex")]
 #[tauri::command]
-fn set_codex_path(path: Option<String>) {
-    codex::set_codex_path(path);
+async fn set_codex_path(path: Option<String>) {
+    // Off the main thread: stopping the helper waits on its lock, which a question can hold for a minute.
+    let _ = tauri::async_runtime::spawn_blocking(move || codex::set_codex_path(path)).await;
 }
 
 #[cfg(feature = "hermes")]

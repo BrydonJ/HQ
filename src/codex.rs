@@ -1619,14 +1619,15 @@ fn sides_of(diff: &str) -> (String, String) {
         if line.starts_with("@@") || line.starts_with("---") || line.starts_with("+++") || line.starts_with('\\') {
             continue;
         }
-        match line.split_at(line.len().min(1)) {
-            ("-", rest) => old.push(rest),
-            ("+", rest) => new.push(rest),
-            (_, _) => {
-                let rest = line.strip_prefix(' ').unwrap_or(line);
-                old.push(rest);
-                new.push(rest);
-            }
+        // strip_prefix, not split_at: a line that opens with a multibyte character must not panic.
+        if let Some(rest) = line.strip_prefix('-') {
+            old.push(rest);
+        } else if let Some(rest) = line.strip_prefix('+') {
+            new.push(rest);
+        } else {
+            let rest = line.strip_prefix(' ').unwrap_or(line);
+            old.push(rest);
+            new.push(rest);
         }
     }
     (old.join("\n"), new.join("\n"))
@@ -1804,7 +1805,7 @@ fn history_lines(turns: &[Value]) -> Vec<Value> {
                                 }
                             }
                             // The image itself stays in Codex; the bubble notes it was there.
-                            Some("image") | Some("localImage") => content.push(json!({ "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": "" } })),
+                            Some("image") | Some("localImage") => content.push(json!({ "type": "text", "text": "[image]" })),
                             _ => {}
                         }
                     }
@@ -2111,6 +2112,7 @@ mod live {
             fork,
             auto_tasks: false,
             max_agents: None,
+            api_key: false,
         };
         let mut cmd = app_server();
         cmd.current_dir(&work).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
