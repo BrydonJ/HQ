@@ -1205,10 +1205,10 @@ class Cell {
   async setModel(value) {
     const previous = this.modelChoice;
     this.modelChoice = value && value !== 'default' ? value : null;
-    if (this.modelChoice !== previous) this.dropCache(); // the prompt cache belongs to a model
     this.updateModelLabel();
     saveState();
-    if (this.proc == null) return; // applied with --model on the next spawn
+    const dropCache = () => { if (this.modelChoice !== previous) this.dropCache(); }; // the prompt cache belongs to a model
+    if (this.proc == null) return dropCache(); // applied with --model on the next spawn
     const reply = await this.control({ subtype: 'set_model', model: this.modelChoice || 'default' });
     if (reply && reply.subtype === 'error') {
       this.notice(`Could not switch model: ${reply.error || `rejected by ${this.agent}`}`, true);
@@ -1217,6 +1217,7 @@ class Cell {
       saveState();
       return;
     }
+    dropCache();
     await this.refreshApplied();
   }
 
@@ -1525,7 +1526,8 @@ class Cell {
         for (let attempt = 0; ; attempt++) {
           try {
             this.proc = await this.spawnProcess(onApi);
-            if (this.procOnApi !== onApi) this.dropCache(); // the plan's prompt cache does not carry over to the key, or back
+            // The plan's prompt cache does not carry over to the key, or back. A replayed cache's credential is unknown.
+            if (this.cache && this.cache.onApi != null && this.cache.onApi !== onApi) this.dropCache();
             this.procOnApi = onApi;
             break;
           } catch (err) {
@@ -2807,7 +2809,7 @@ class Cell {
       : made.ephemeral_5m_input_tokens > 0 ? CACHE_TTL_SHORT_MS
         : this.cache ? this.cache.ttl
           : this.procOnApi || this.apiSource === 'ANTHROPIC_API_KEY' ? CACHE_TTL_SHORT_MS : CACHE_TTL_LONG_MS;
-    this.cache = { at, ttl };
+    this.cache = { at, ttl, onApi: this.replaying ? null : this.procOnApi };
     this.renderCache();
   }
 
