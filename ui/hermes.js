@@ -14,7 +14,6 @@ const hermes = {
   models: [],   // from the last Hermes initialize reply; Claude's list is app.models
   commands: [], // Hermes' slash commands; Claude's are app.commands
   defaults: {}, // permission mode and model picked last in a Hermes cell
-  next: false,  // the new-session picker starts the next session in Hermes
 };
 
 // Hermes' modes under the names HQ saves (Claude's); src/hermes.rs maps them. Hermes has no plan mode.
@@ -64,36 +63,8 @@ function hermesRemember(choice) {
   saveState();
 }
 
-/** The agent the new-session picker is set to. */
-function pickerBackend() {
-  return hermes.next && hermesAvailable() ? 'hermes' : 'claude';
-}
-
-/** Adds the Claude / Hermes switch to the new-session picker, when this build has Hermes. */
-function hermesPickerSwitch(picker) {
-  let row = picker.querySelector('.picker-agent');
-  if (!hermesAvailable()) {
-    if (row) row.remove();
-    return;
-  }
-  if (!row) {
-    row = h('div', { class: 'segmented picker-agent', title: 'Which agent the new session runs' });
-    picker.querySelector('.picker-title').after(row);
-  }
-  const option = (label, value) => h('button', {
-    class: hermes.next === value ? 'on' : '',
-    onclick: e => {
-      e.stopPropagation();
-      hermes.next = value;
-      saveState();
-      hermesPickerSwitch(picker);
-    },
-  }, label);
-  row.replaceChildren(option('Claude', false), option('Hermes', true));
-}
-
 function hermesState() {
-  return { models: hermes.models, commands: hermes.commands, defaults: hermes.defaults, next: hermes.next || undefined };
+  return { models: hermes.models, commands: hermes.commands, defaults: hermes.defaults };
 }
 
 function hermesRestore(saved) {
@@ -101,7 +72,6 @@ function hermesRestore(saved) {
   hermes.models = sanitizeModels(s.models);
   hermes.commands = sanitizeCommands(s.commands);
   hermes.defaults = sanitizeDefaults(s.defaults);
-  hermes.next = s.next === true;
 }
 
 /**
@@ -123,11 +93,6 @@ async function readHermesSessions(cwd) {
     console.warn('Hermes sessions unavailable', err);
     return [];
   }
-}
-
-/** Shown at the top of the resume list while Hermes' sessions are still being read. */
-function hermesSessionsLoading() {
-  return h('div', { class: 'session-empty hermes-loading', text: 'Loading Hermes sessions…' });
 }
 
 /** Adds a Hermes filter after HQ's in the resume dialog, when this build has Hermes. */

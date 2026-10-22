@@ -56,7 +56,9 @@ The dev copy runs next to the installed HQ. A debug build also:
   DevTools MCP server. Right-click > Inspect works too.
 
 `cargo test` runs the backend's unit tests (stream filtering, batching, transcript reading,
-session search). The UI has none; check it in the dev copy.
+session search). The UI has none; check it in the dev copy. With `codex` on PATH,
+`cargo test codex::live -- --ignored --test-threads=1` drives a real Codex through HQ's bridge
+against a fake model server, so it needs no account.
 
 ## Releases and updates
 
@@ -122,7 +124,8 @@ What differs from Windows:
   VS Code button uses the `code` command or the VS Code app.
 - An app started from the Dock gets only a bare `PATH`, so HQ asks your login shell for the real
   one at start (and adds `~/.local/bin`, `~/.claude/local`, Homebrew and npm/bun folders).
-  `claude` and `hermes` are found from there; Settings still lets you point to either.
+  `claude`, `codex` and `hermes` are found from there; Settings still lets you point to the
+  first two.
 - Closing a cell (or quitting HQ) ends its `claude` and everything it started, through a
   process group in place of the Windows job object. If HQ itself is killed, they are not ended.
 - The dev copy has no DevTools port. Use Safari's Develop menu to inspect it.
@@ -378,6 +381,40 @@ the repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the contents of the updater 
     file…** browses for any other.
   - If the workspace file is gone, the button opens the folder and says so.
 
+### Codex cells
+
+A cell can run [Codex](https://developers.openai.com/codex) (OpenAI's coding agent) instead of
+Claude Code. Pick **Codex** in the switch at the top of the new-session picker; the switch stays
+where you left it. A Codex cell has a **Codex** tag in its header.
+
+- Install Codex once (`npm install -g @openai/codex`, or any of its installers) and sign in with
+  `codex login` in a terminal (a ChatGPT plan or an API key). HQ never sees your credentials:
+  Codex keeps them in its own folder (`~/.codex`).
+- HQ starts `codex app-server` for the cell: the JSON-RPC protocol the Codex VS Code extension
+  uses, built into the `codex` CLI. `src/codex.rs` translates between it and the chat. Nothing
+  starts until the cell's first message, and closing the cell ends Codex, so with no Codex cell
+  open there is no cost. Only the protocol's stable part is used, and unknown messages are
+  ignored, so a Codex update adds what HQ does not know about instead of breaking it.
+- Codex stays current by itself: HQ runs `codex update` soon after it starts and then at most
+  every 6 hours, but only while no Codex cell is running (the update replaces the binary). A cell
+  that starts during an update waits for it.
+- The model menu lists the models Codex reports, each with the effort levels it supports, so new
+  models show up without an HQ update. **Default** is the model in Codex's own `config.toml`.
+- Permission modes are Codex's three presets: **Read only** (asks before it edits a file or
+  runs anything that needs more), **Edit automatically** (Codex's default: edits and commands
+  inside the folder, asking for anything beyond it) and **Full access** (never asks).
+  **Yes, and don't ask again** allows that command for the rest of the session (or, when Codex
+  offers only that, adds Codex's own rule for it); for edits it switches to Edit automatically.
+- A message sent while Codex works goes into the running turn, as with Claude. Stop interrupts
+  the turn. The compact button (and `/compact`) asks Codex to compact the conversation.
+- Handoff and the progress button ask in a throwaway, read-only fork that is never saved.
+- Codex keeps the conversations. A restored cell draws its history from Codex's own copy (through
+  a short-lived helper shared by all cells), so turns taken in the Codex CLI or VS Code since show
+  too. Once a Codex cell has run, the Resume dialog also lists Codex's sessions.
+- Not available in Codex cells: Remote Control, the MCP menu (set up Codex's MCP servers with
+  `codex mcp` or its config), plan mode and automatic task lists (newer Codex models plan
+  without a todo tool). Plan usage in the sidebar is Claude's.
+
 ### Hermes Agent cells
 
 A cell can run [Hermes Agent](https://hermes-agent.nousresearch.com) instead of Claude Code.
@@ -408,7 +445,8 @@ left it. A Hermes cell has a **Hermes** tag in its header.
 Environment overrides:
 
 - `HQ_CLAUDE`: path to the `claude` binary. The **Claude command** setting overrides it.
-- `HQ_MODEL`: default model for HQ sessions that have no model picked.
+- `HQ_MODEL`: default model for HQ's Claude sessions that have no model picked.
+- `HQ_CODEX`: path to the `codex` binary. The **Codex command** setting overrides it.
 - `HQ_HERMES`: path to the `hermes` binary (default: `hermes` on PATH).
 - `HQ_NO_UPDATE`: never check for updates.
 - `HQ_UPDATE_ANY_COPY`: check for updates even in a copy that was not installed (for testing).
@@ -425,6 +463,9 @@ src/session.rs   spawns one `claude -p --input-format stream-json ...` per cell;
                  whole process tree when a cell (or HQ) closes; usage probe
 src/store.rs     board.json persistence, transcript loading (newest part, backwards), cached
                  session list, search inside transcripts, VS Code and workspace lookup
+src/codex.rs     Codex cells: runs `codex app-server` and translates it to and from the stream-json
+                 lines the UI speaks; a shared helper reads history, sessions and models; runs
+                 `codex update`. Built with the `codex` Cargo feature (on by default)
 src/hermes.rs    Hermes cells: runs `hermes acp` and translates ACP to and from the stream-json
                  lines the UI speaks; HQ's copy of each Hermes conversation. Built with the
                  `hermes` Cargo feature (on by default; `--no-default-features` leaves it out)
@@ -434,6 +475,8 @@ src/dev.rs       debug builds only: UI read from disk, DevTools port (Windows)
 src/macos.rs     macOS only: login-shell PATH, Terminal and VS Code launchers, installed-app check
 ui/app.js        cells, protocol handling, prompts, menus, sessions list, grid layout, persistence,
                  context indicator, Remote Control, settings
+ui/codex.js      what Codex cells do differently: their model list, commands, defaults, modes,
+                 keeping Codex up to date
 ui/hermes.js     what Hermes cells do differently: their model list, commands, defaults, modes
 ui/render.js     markdown (raw HTML escaped, http(s) links only; incremental while streaming),
                  tool rows, line diffs, images, project colors

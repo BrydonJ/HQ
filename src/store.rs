@@ -200,6 +200,14 @@ pub struct TranscriptChunk {
     start: u64,
 }
 
+impl TranscriptChunk {
+    /// For a backend that builds the lines itself; `start` is whatever its `before` reads back.
+    #[allow(dead_code)]
+    pub(crate) fn new(lines: Vec<String>, start: u64) -> Self {
+        TranscriptChunk { lines, start }
+    }
+}
+
 /// Returns the user/assistant and title lines of a session's transcript so a restored cell can
 /// show its history and name. Finds the file by name under every project folder instead of
 /// re-deriving Claude's folder-name encoding, which is an internal detail that may change.
