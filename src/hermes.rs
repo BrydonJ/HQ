@@ -1697,6 +1697,7 @@ mod live {
             fork,
             auto_tasks: false,
             max_agents: None,
+            api_key: false,
         };
         let mut cmd = Command::new(hermes_program());
         cmd.arg("acp").current_dir(&dir).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());

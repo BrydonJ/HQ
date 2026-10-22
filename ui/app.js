@@ -25,6 +25,8 @@ const app = {
   remoteDefault: null, // new sessions start with Remote Control on; null until seeded from the account
   remoteAvailable: null, // from the last initialize reply: null until a session has reported it
   settings: null,      // the Settings screen; see sanitizeSettings for the keys
+  apiKeyHint: null,    // "sk-ant-…abcd" while an API key is saved (the key itself stays in the backend)
+  planLimitedUntil: 0, // when the plan's usage comes back (ms), from a plan session's refused request
   sidebarOpen: false,
   query: '',
 };
@@ -173,7 +175,7 @@ const nextRequestId = () => `hq-${Date.now().toString(36)}-${++reqSeq}`;
 class Cell {
   constructor({ cwd, sessionId = null, permissionMode = 'default', model = null, effort = null, title = '', aiTitle = false,
     customTitle = null, renamePending = false, detail, clean, progress = false, fork = false, collapsed = false,
-    missing = false, remote = null, bridgeSessionId = null, draft = '', backend = 'claude', resumeAfterUpdate = false, resumeQueued = null }) {
+    missing = false, remote = null, bridgeSessionId = null, draft = '', backend = 'claude', resumeAfterUpdate = false, resumeQueued = null, api = false }) {
     this.cwd = cwd;
     this.backend = backend === 'hermes' ? 'hermes' : 'claude'; // the agent: Claude Code, or Hermes (hermes.js)
     this.sessionId = sessionId;
@@ -246,7 +248,11 @@ class Cell {
     this.wrapUp = null;        // the plan's limit was hit mid-turn and Claude is finishing on the wrap-up allowance: { credits }
     this.limitResetAt = 0;     // when the limit that refused the last request resets (ms), from its rate_limit_event
     this.limitResume = null;   // { resetsAt }: carry on by itself once the plan's usage is back (checkLimitResumes)
-    this.cost = { usd: 0, tokens: 0, procUsd: 0, procTokens: 0 }; // this HQ run's spend; proc* = last total of the current process
+    this.cost = { usd: 0, tokens: 0, procUsd: 0, procTokens: 0, apiUsd: 0 }; // this HQ run's spend; proc* = last total of the current process; apiUsd = on HQ's API key
+    this.apiMode = !!api && this.backend === 'claude'; // the user switched this session to HQ's API key until the plan's usage is back
+    this.procOnApi = false;    // the running claude was started with HQ's API key
+    this.apiSource = null;     // the credential Claude reports using (init's apiKeySource)
+    this.apiSwitch = null;     // promise while the process restarts onto the other credential
     this.drafts = new Set();   // prompts submitted while claude was still starting, which Esc can take back
     this.openTools = new Set(); // tool_use ids of tool calls that have not reported a result yet
     this.lastDuration = '';    // how long the last turn took, for the line under the composer
@@ -279,6 +285,7 @@ class Cell {
     this.modeSel = el.querySelector('.mode');
     this.modelBtn = el.querySelector('.act-model');
     this.mcpBtn = el.querySelector('.act-mcp');
+    this.apiBtn = el.querySelector('.act-api');
     this.attachEl = el.querySelector('.attachments');
     this.metaEl = el.querySelector('.meta');
     this.stopBtn = el.querySelector('.act-stop');
@@ -318,6 +325,7 @@ class Cell {
     this.updateModelLabel();
     this.renderContext();
     this.renderRemote();
+    this.renderApi();
     if (this.initialDraft) {
       this.input.value = this.initialDraft;
       autoGrow(this.input);
@@ -366,6 +374,7 @@ class Cell {
     this.stopBtn.addEventListener('click', () => this.interrupt());
     this.modeSel.addEventListener('change', () => this.setMode(this.modeSel.value).then(() => this.remember({ permissionMode: this.permissionMode })));
     this.modelBtn.addEventListener('click', () => openMenu(this.modelBtn, this, menuEl => this.buildModelMenu(menuEl)));
+    this.apiBtn.addEventListener('click', () => openMenu(this.apiBtn, this, menuEl => this.buildApiMenu(menuEl)));
     this.mcpBtn.addEventListener('click', () => {
       openMenu(this.mcpBtn, this, menuEl => this.buildMcpMenu(menuEl));
       if (menuState.anchor === this.mcpBtn) this.loadMcp();
@@ -715,6 +724,7 @@ class Cell {
     if (!info || typeof info !== 'object') return;
     const resetsAt = Number(info.resetsAt) * (Number(info.resetsAt) < 1e12 ? 1000 : 1);
     if (info.status === 'rejected' && Number.isFinite(resetsAt) && resetsAt > Date.now()) this.limitResetAt = resetsAt;
+    notePlanLimit(info);
     // An event about another window (weekly, overage) says nothing about the 5-hour wrap-up; it must not end it.
     if (info.rateLimitGraceActive !== true && info.rateLimitType && info.rateLimitType !== 'five_hour') return;
     const grace = info.rateLimitGraceActive === true && info.status !== 'rejected'
@@ -1231,6 +1241,118 @@ class Cell {
     if (!this.effort) menuEl.append(h('div', { class: 'menu-note', text: active ? `Using your default (${active}).` : 'Using your default effort.' }));
   }
 
+  // ---------- API credits ----------
+
+  /** Whether the session is on HQ's API key, or switched to it, so a turn may first need a restart. */
+  apiSwitchDue() {
+    return this.backend === 'claude' && (this.apiMode || this.procOnApi);
+  }
+
+  /** The session runs on HQ's API key only while the user chose it and the plan's usage is out. */
+  apiWanted() {
+    return this.apiMode && this.backend === 'claude' && !!app.apiKeyHint && planLimitedUntil() > Date.now();
+  }
+
+  /** Ends the switch once the plan's usage is back (or the key is gone), so the key never runs longer than needed. */
+  settleApiMode() {
+    if (!this.apiMode || this.apiWanted()) return;
+    this.apiMode = false;
+    for (const card of this.msgs.querySelectorAll('.limit-card[data-live]')) this.retireLimitCard(card); // that limit is over
+    saveState();
+    this.renderApi();
+    this.notice(app.apiKeyHint ? "Your plan's usage is back, so this session is on your plan again." : 'The API key was removed from HQ, so this session is on your plan again.');
+  }
+
+  /**
+   * Before HQ sends work: a claude started on the other credential is restarted, and the next start
+   * resumes the session (--resume), so nothing is lost. Only between turns, since a stop ends the
+   * prompts and background tasks of the process.
+   */
+  syncApi() {
+    if (this.backend !== 'claude') return Promise.resolve();
+    if (!this.apiSwitch) this.apiSwitch = this.switchCredential().finally(() => { this.apiSwitch = null; });
+    return this.apiSwitch;
+  }
+
+  async switchCredential() {
+    if (this.apiMode && !this.apiWanted() && !usage.data) await withTimeout(refreshUsage(), 15000); // just started: no figures yet
+    this.settleApiMode();
+    if (this.proc == null || this.procOnApi === this.apiMode) return;
+    if (this.pending.size || this.bgTasks.length) {
+      this.notice(`Claude still has work running, so this message stays on ${this.procOnApi ? 'your API key' : 'your plan'}.`);
+      return;
+    }
+    if (!(await this.stopQuietly())) this.notice('Claude did not stop to change credentials, so this message uses the one it started with.', true);
+  }
+
+  /** The limit card's button: from the next message, this session runs on HQ's API key until the plan's usage is back. */
+  async switchToApi() {
+    if (this.apiMode || this.backend !== 'claude') return;
+    if (!app.apiKeyHint) {
+      openSettings();
+      return;
+    }
+    if (!planLimitedUntil()) await refreshUsage();
+    if (!planLimitedUntil()) {
+      // Without usage figures the limit card is the only word on it, so the plan is tried again later.
+      if (usage.error || !(usage.data && usage.data.available)) app.planLimitedUntil = Date.now() + API_RECHECK_MS;
+      else {
+        this.notice('Your plan has usage left, so this session stays on it.');
+        return;
+      }
+    }
+    this.apiMode = true;
+    if (this.limitResume) this.setLimitResume(false); // it carries on now, on the key, rather than waiting for the plan
+    saveState();
+    this.renderApi();
+    const size = this.ctx.tokens ? ` Its first request re-reads the conversation (about ${formatTokens(this.ctx.tokens)} tokens), as the plan's prompt cache does not carry over.` : '';
+    const model = this.modelChoice ? '' : " With no model picked here, Claude uses the API's default model.";
+    this.notice(`From your next message, this session runs on your API key (${app.apiKeyHint}) until your plan's usage is back (${resetText(planLimitedUntil()).replace(/^Resets/, 'resets')}).${size}${model} Nothing is sent until you send.`);
+  }
+
+  backToPlan() {
+    if (!this.apiMode) return;
+    this.apiMode = false;
+    saveState();
+    this.renderApi();
+    this.notice('Back on your plan from the next message.');
+  }
+
+  /** Claude names the credential it runs on as each turn starts; a session meant for HQ's key that is not on it says so. */
+  noteApiSource(source) {
+    const was = this.apiSource;
+    this.apiSource = source;
+    if (was === source) return;
+    if (this.procOnApi && source !== 'ANTHROPIC_API_KEY') {
+      this.notice(`Claude is not using HQ's API key (it reports "${source}"), so this turn does not draw on your API credits. An env block in Claude's settings may set another credential.`, true);
+    }
+    this.renderApi();
+  }
+
+  /** The API chip: while the session is switched to HQ's key, or Claude reports running on an API key anyway. */
+  renderApi() {
+    const onHqKey = this.apiMode || this.procOnApi;
+    const show = this.backend === 'claude' && (onHqKey || this.apiSource === 'ANTHROPIC_API_KEY');
+    this.apiBtn.classList.toggle('hidden', !show);
+    const spent = this.cost.apiUsd > 0 ? `\n${formatCost(this.cost.apiUsd)} spent on it in this HQ run, as Claude Code reports it` : '';
+    this.apiBtn.title = !show ? '' : onHqKey
+      ? `On your API key${app.apiKeyHint ? ` (${app.apiKeyHint})` : ''}${this.apiMode ? " until your plan's usage is back" : ', back on your plan from the next message'}${spent}`
+      : `Claude is using an ANTHROPIC_API_KEY from HQ's environment, not your plan${spent}`;
+    const offer = this.backend === 'claude' && !onHqKey;
+    for (const b of this.msgs.querySelectorAll('.limit-card[data-live] .limit-api')) {
+      labelLimitApi(b);
+      b.classList.toggle('hidden', !offer);
+    }
+    if (menuState.cell === this && menuState.anchor === this.apiBtn) refreshMenu();
+  }
+
+  buildApiMenu(menuEl) {
+    const item = (name, ico, run) => h('button', { class: 'menu-item', onclick: () => { closeMenu(); run(); } }, icon(ico), h('span', { class: 'menu-main' }, h('span', { class: 'name', text: name })));
+    menuEl.append(h('div', { class: 'menu-title', text: 'API credits' }), h('div', { class: 'menu-note', text: this.apiBtn.title }));
+    if (this.apiMode) menuEl.append(item('Back to my plan now', 'arrow-left', () => this.backToPlan()));
+    menuEl.append(h('div', { class: 'menu-note', text: "Max and Team plans' monthly API credits pay only for a key from the Console organization linked in claude.ai's billing settings. Any other key is billed as usual." }));
+  }
+
   // ---------- MCP servers ----------
 
   async loadMcp() {
@@ -1366,10 +1488,13 @@ class Cell {
     this.spawning = (async () => {
       if (this.backend === 'claude') updateClaude(); // runs in the background; a spawn does not wait for it
       this.spawnedFresh = !this.sessionId; // Remote Control waits for a new session's first prompt
+      this.settleApiMode();
+      const onApi = this.backend === 'claude' && this.apiMode;
       try {
         for (let attempt = 0; ; attempt++) {
           try {
-            this.proc = await this.spawnProcess();
+            this.proc = await this.spawnProcess(onApi);
+            this.procOnApi = onApi;
             break;
           } catch (err) {
             // The spawn can fail while `claude update` replaces the binary: wait for it, then try once more.
@@ -1395,13 +1520,14 @@ class Cell {
       this.cost.procUsd = 0;
       this.cost.procTokens = 0;
       this.remoteAsked = false;
+      this.renderApi();
       this.initialize();
       return true;
     })();
     return this.spawning;
   }
 
-  spawnProcess() {
+  spawnProcess(apiKey) {
     const channel = new Channel();
     channel.onmessage = batch => this.onLine(batch);
     return invoke('spawn_session', {
@@ -1414,6 +1540,7 @@ class Cell {
       backend: this.backend,
       autoTasks: app.settings.autoTasks !== false,
       maxAgents: app.settings.maxAgents, // 0 is no limit
+      apiKey,
       onEvent: channel,
     });
   }
@@ -1426,7 +1553,8 @@ class Cell {
       await this.refreshApplied();
       return;
     }
-    if (r) {
+    // An API key's account has its own models and no Remote Control; HQ's lists follow the plan.
+    if (r && !this.procOnApi) {
       if (Array.isArray(r.models) && r.models.length) {
         app.models = sanitizeModels(r.models);
         saveState();
@@ -1514,10 +1642,19 @@ class Cell {
       saveState();
     }
     if (prompt == null) this.unread = false;
+    const idle = this.status !== 'running'; // between turns: syncApi checks the rest
     if (this.status !== 'running') this.queuedTexts = []; // a new turn: the agent has read everything sent before it
     else if (prompt == null) this.queuedTexts.push({ text, images: images.length, results: 0 });
     this.setStatus('running');
     this.drafts.add(draft);
+    if (idle && this.apiSwitchDue()) {
+      await this.syncApi();
+      if (draft.cancelled || this.closing) {
+        this.drafts.delete(draft);
+        return;
+      }
+      if (this.status !== 'running') this.setStatus('running'); // the restart's exit set the cell idle
+    }
     const started = await this.ensureProcess();
     this.drafts.delete(draft);
     if (draft.cancelled || this.closing) return;
@@ -1648,18 +1785,22 @@ class Cell {
     }
   }
 
+  /** Ends the process without a word in the chat; resolves to whether it ended. */
+  async stopQuietly() {
+    if (this.proc == null) return true;
+    this.quietExit = true;
+    const exited = new Promise(resolve => { this.exitWaiter = resolve; });
+    invoke('kill_session', { id: this.proc });
+    await withTimeout(exited, 5000);
+    this.exitWaiter = null;
+    return this.proc == null; // when not, quietExit stays set so its late exit says nothing
+  }
+
   async resetSession(name) {
     this.epoch = (this.epoch || 0) + 1; // a handoff still being written belongs to the old session
-    if (this.proc != null) {
-      this.quietExit = true;
-      const exited = new Promise(resolve => { this.exitWaiter = resolve; });
-      invoke('kill_session', { id: this.proc });
-      await withTimeout(exited, 5000);
-      this.exitWaiter = null;
-      if (this.proc != null) { // the process did not end; quietExit stays set so its late exit says nothing
-        this.notice('Could not clear: Claude did not stop. Try again.', true);
-        return;
-      }
+    if (!(await this.stopQuietly())) {
+      this.notice('Could not clear: Claude did not stop. Try again.', true);
+      return;
     }
     for (const id of [...this.pending.keys()]) this.dropPrompt(id);
     Object.assign(this, {
@@ -1757,7 +1898,7 @@ class Cell {
       case 'control_response': return this.onControlResponse(m);
       case 'hq_exit': return this.onExit(m);
       case 'rate_limit_event':
-        if (this.backend !== 'claude') return;
+        if (this.backend !== 'claude' || this.procOnApi) return; // an API key's limits say nothing about the plan
         this.onRateLimit(m.rate_limit_info);
         return scheduleUsageRefresh(this);
       case 'custom-title':
@@ -1772,6 +1913,7 @@ class Cell {
       this.sessionId = m.session_id || this.sessionId;
       if (changed) this.fork = false; // the fork now has its own ID
       if (m.model) { this.resolvedModel = m.model; this.updateModelLabel(); }
+      if (this.backend === 'claude' && typeof m.apiKeySource === 'string') this.noteApiSource(m.apiKeySource);
       if (Array.isArray(m.mcp_servers)) this.setMcpBadge(sanitizeMcp(m.mcp_servers));
       if (m.permissionMode && m.permissionMode !== this.permissionMode) {
         this.permissionMode = m.permissionMode;
@@ -1929,8 +2071,16 @@ class Cell {
         h('span', { class: 'limit-icon' }, icon('watch')),
         h('div', { class: 'limit-main' }, h('div', { class: 'limit-title' }), h('div', { class: 'limit-reset' })),
         h('span', { class: 'limit-count' }),
+        h('button', { class: 'btn limit-api', onclick: () => this.switchToApi() }),
         h('button', { class: 'btn limit-usage', text: 'Plan usage', onclick: () => { usagePill.focus(); refreshUsage(this); } })));
     }
+    // Offered on the latest limit hit only, not on old ones or those in the transcript.
+    for (const old of this.msgs.querySelectorAll('.limit-card[data-live]')) if (old !== card) this.retireLimitCard(old);
+    if (replay) delete card.dataset.live;
+    else card.dataset.live = '';
+    const api = card.querySelector('.limit-api');
+    labelLimitApi(api);
+    api.classList.toggle('hidden', replay || this.backend !== 'claude' || this.apiMode || this.procOnApi);
     card.querySelector('.limit-title').textContent = title || 'Usage limit reached';
     card.querySelector('.limit-reset').textContent = reset;
     if (!replay && this.backend === 'claude') {
@@ -1959,6 +2109,11 @@ class Cell {
           : 'Continuing when usage is back · Cancel';
       btn.title = this.limitResume ? 'Cancel: stay stopped' : 'Send "continue" by itself once the usage limit resets';
     }
+  }
+
+  retireLimitCard(card) {
+    delete card.dataset.live;
+    card.querySelector('.limit-api').classList.add('hidden');
   }
 
   /** Text followed by a tool call is Claude narrating its work, not its answer. */
@@ -2184,7 +2339,8 @@ class Cell {
       notifyTurnDone(this, m);
     }
     this.refreshState();
-    if (this.backend === 'claude') scheduleUsageRefresh(this); // Claude's plan usage; Hermes turns do not touch it
+    // Claude's plan usage; Hermes turns and turns on an API key do not touch it.
+    if (this.backend === 'claude' && !this.procOnApi) scheduleUsageRefresh(this);
     this.syncTitle();
   }
 
@@ -2216,6 +2372,9 @@ class Cell {
     this.bgTasks = []; // they ran inside this claude, so they ended with it
     this.compacting = false;
     this.setWrapUp(null);
+    this.procOnApi = false;
+    this.apiSource = null; // the next process reports its own
+    this.renderApi();
     this.remoteState = this.remoteState === 'policy' ? 'policy' : 'off'; // the claude.ai session ended with the process
     this.remoteUrl = null;
     this.renderRemote();
@@ -2597,7 +2756,13 @@ class Cell {
     if (win) this.ctx.window = win;
     const total = Number(m.total_cost_usd);
     if (Number.isFinite(total)) {
-      if (total > this.cost.procUsd) this.cost.usd += total - this.cost.procUsd;
+      if (total > this.cost.procUsd) {
+        this.cost.usd += total - this.cost.procUsd;
+        if (this.procOnApi || this.apiSource === 'ANTHROPIC_API_KEY') {
+          this.cost.apiUsd += total - this.cost.procUsd;
+          this.renderApi();
+        }
+      }
       this.cost.procUsd = Math.max(total, this.cost.procUsd);
     }
     let tokens = 0;
@@ -2673,6 +2838,7 @@ class Cell {
   async runCompact(instructions) {
     if (this.historyLoading) await this.historyLoading;
     if (this.status === 'running' || this.compacting) return;
+    if (this.apiSwitchDue()) await this.syncApi();
     this.setCompacting(true); // the line over the prompt box says so; its result brings the cell back to idle
     if (!(await this.ensureProcess())) { this.setCompacting(false); return; }
     if (instructions) this.notice(`Compacting with instructions: ${instructions}`);
@@ -2749,7 +2915,7 @@ class Cell {
 
   /** Turns Remote Control on once per process, without the user asking: a failure is shown once, not at every prompt. */
   autoEnableRemote() {
-    if (this.remoteAsked) return;
+    if (this.remoteAsked || this.procOnApi) return;
     this.remoteAsked = true;
     this.enableRemote();
   }
@@ -2882,6 +3048,7 @@ class Cell {
     this.setHandoffBusy(true);
     const epoch = this.epoch;
     try {
+      if (this.apiSwitchDue() && this.status !== 'running') await this.syncApi();
       if (this.proc == null && !(await this.ensureProcess())) return;
       const reply = await this.control({ subtype: 'side_question', question: HANDOFF_QUESTION });
       if (this.epoch !== epoch || this.closing) return; // /clear started the cell over meanwhile
@@ -2926,6 +3093,12 @@ function suggestionLabel(suggestions) {
     }
   }
   return "Yes, and don't ask again";
+}
+
+/** The limit card's API button: it switches the session, or opens Settings while no key is saved. */
+function labelLimitApi(btn) {
+  btn.textContent = app.apiKeyHint ? 'Continue on API credits' : 'Use API credits…';
+  btn.title = app.apiKeyHint ? `From your next message, this session runs on your API key (${app.apiKeyHint}) until your plan's usage is back` : 'Save a Claude Console API key in Settings first';
 }
 
 // Claude Code's synthetic reply when the plan's usage is out: "You've hit your session limit · resets 9:50pm (...)".
@@ -4337,13 +4510,39 @@ function withTimeout(promise, ms) {
   return Promise.race([promise, new Promise(resolve => setTimeout(() => resolve(null), ms))]);
 }
 
+/** How long a session switched to API credits waits to try the plan again when HQ cannot tell when the plan's usage is back. */
+const API_RECHECK_MS = 60 * 60 * 1000;
+
+/**
+ * A plan session's refused request names the limit and when it resets. The usage credits' own
+ * (overage) events are left out: they say nothing about the plan.
+ */
+function notePlanLimit(info) {
+  if (info.status !== 'rejected' || info.rateLimitType === 'overage') return;
+  const resetsAt = Number(info.resetsAt) * (Number(info.resetsAt) < 1e12 ? 1000 : 1);
+  if (!Number.isFinite(resetsAt) || resetsAt <= Date.now()) return;
+  app.planLimitedUntil = Math.max(app.planLimitedUntil, resetsAt);
+  saveState();
+}
+
+/** When the plan's usage is back (ms), or 0 when nothing says it is out now. Per-model weekly limits count only through a refused request. */
+function planLimitedUntil() {
+  const now = Date.now();
+  let until = app.planLimitedUntil > now ? app.planLimitedUntil : 0;
+  for (const r of (usage.data && usage.data.rows) || []) {
+    if ((r.key === 'five_hour' || r.key === 'seven_day') && r.percent >= 100 && r.resetsAt > now) until = Math.max(until, r.resetsAt);
+  }
+  return until;
+}
+
 /** Asks a running session for usage when there is one, otherwise starts a short-lived probe. */
 function refreshUsage(preferred) {
   if (usage.loading) return usage.loading;
   renderUsage();
   usage.loading = (async () => {
     let reply = null;
-    const cell = [preferred, ...app.cells].find(c => c && c.backend === 'claude' && c.proc != null && !c.closing);
+    // A session on an API key would report that account, not the plan.
+    const cell = [preferred, ...app.cells].find(c => c && c.backend === 'claude' && c.proc != null && !c.closing && !c.procOnApi && c.apiSource !== 'ANTHROPIC_API_KEY');
     if (cell) {
       const r = await withTimeout(cell.control({ subtype: 'get_usage' }), 15000);
       if (r && r.subtype === 'success') reply = r.response;
@@ -4413,7 +4612,7 @@ function scheduleUsageRefresh(cell) {
 
 function scheduleNextUsage() {
   clearTimeout(usage.timer);
-  const anyRunning = app.cells.some(c => c.proc != null);
+  const anyRunning = app.cells.some(c => c.proc != null && !c.procOnApi); // one refreshUsage can ask without a probe
   usage.timer = setTimeout(() => {
     // Starting a probe for a window nobody is looking at is waste; catch up when it is shown.
     if (document.hidden && !app.cells.some(c => c.proc != null)) return;
@@ -4637,6 +4836,32 @@ const PREVIEW_MARKDOWN = '## Heading\nSome **bold** text, some *italic*, `inline
   + '- a list item\n- another\n\n```js\n// a comment\nfunction greet(name) {\n  return `Hello, ${name}`;\n}\n```';
 
 let settingsTab = 'general';
+let apiKeyError = null; // why the last key could not be saved, shown under the box
+
+/** A saved key shows only its hint, with Remove; otherwise a box saves the key pasted in. The key never comes back from the backend. */
+function apiKeyControl() {
+  const error = apiKeyError ? h('div', { class: 'api-key-error', text: apiKeyError }) : null;
+  if (app.apiKeyHint) {
+    return h('div', { class: 'api-key' }, h('span', { class: 'api-key-hint', text: app.apiKeyHint }), h('button', { class: 'btn', text: 'Remove', onclick: () => saveApiKey(null) }), error);
+  }
+  const input = h('input', { type: 'password', placeholder: 'sk-ant-api03-…', spellcheck: 'false', autocomplete: 'off' });
+  input.addEventListener('change', () => { if (input.value.trim()) saveApiKey(input.value); });
+  return h('div', { class: 'api-key' }, input, error);
+}
+
+async function saveApiKey(key) {
+  try {
+    app.apiKeyHint = await invoke('set_api_key', { key });
+    apiKeyError = null;
+  } catch (err) {
+    apiKeyError = String(err);
+  }
+  for (const c of app.cells) {
+    c.settleApiMode(); // a removed key ends every switch to it
+    c.renderApi();
+  }
+  if (!settingsPanel.classList.contains('hidden')) renderSettings();
+}
 
 function renderSettings() {
   const row = (name, desc, control) => h('div', { class: 'setting' }, h('div', { class: 'setting-main' }, h('span', { class: 'name', text: name }), desc ? h('span', { class: 'desc', text: desc }) : null), control);
@@ -4680,6 +4905,7 @@ function renderSettings() {
       select(app.defaults.model || 'default', models, v => rememberChoice({ model: v }))),
     row('Automatic task lists', 'Ask Claude and Hermes to keep a task list on multi-step work. Off saves a few tokens per long job.', toggle(app.settings.autoTasks, v => changeSetting('autoTasks', v))),
     row('Agents per session', 'The most subagents one Claude session runs at once, workflows included; more are refused until one finishes. For sessions started from now on. 0 is no limit.', maxAgents),
+    row('API key for API credits', "A session that hits your plan's usage limit can carry on with this Claude Console key, from its limit card, until the plan's usage is back. Max and Team plans' monthly API credits pay only for a key from the Console organization linked in claude.ai's billing settings; any other key is billed as usual. Kept on this computer, outside the board.", apiKeyControl()),
     row('Check for HQ updates automatically', 'The Check for updates button in the sessions list always works.', toggle(app.settings.autoUpdate, v => changeSetting('autoUpdate', v))),
     row('Claude command', 'Path to the claude program, for sessions started from now on. Empty uses HQ_CLAUDE, else claude on PATH.', path));
 }
@@ -5076,6 +5302,7 @@ function flushState() {
       bridgeSessionId: c.bridgeSessionId || undefined,
       draft: c.input.value.trim() ? c.input.value : undefined,
       backend: c.backend === 'claude' ? undefined : c.backend,
+      api: c.apiMode || undefined,
       // Only in the save just before an update restarts HQ; the first save after it drops the mark.
       resumeAfterUpdate: c.resumeMark ? true : undefined,
       resumeQueued: c.resumeMark && c.resumeMark.queued.length ? c.resumeMark.queued : undefined,
@@ -5089,6 +5316,7 @@ function flushState() {
     projectColors: projectColorPicks,
     claudeUpdateAt: app.claudeUpdateAt || undefined,
     remoteDefault: app.remoteDefault == null ? undefined : app.remoteDefault,
+    planLimitedUntil: app.planLimitedUntil > Date.now() ? app.planLimitedUntil : undefined,
     settings: app.settings,
     sidebarOpen: app.sidebarOpen,
   };
@@ -5117,6 +5345,8 @@ async function restore() {
   app.commands = sanitizeCommands(state && state.commands);
   app.claudeUpdateAt = state && Number.isFinite(state.claudeUpdateAt) ? state.claudeUpdateAt : 0;
   app.remoteDefault = state && typeof state.remoteDefault === 'boolean' ? state.remoteDefault : null;
+  app.planLimitedUntil = state && Number.isFinite(state.planLimitedUntil) ? state.planLimitedUntil : 0;
+  app.apiKeyHint = await invoke('api_key_hint').catch(() => null);
   app.settings = sanitizeSettings(state && state.settings);
   applySettings();
   // (updateClaude runs at the end: its first save must not write a board that has no cells yet)

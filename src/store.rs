@@ -119,6 +119,68 @@ fn write_state(app: &AppHandle, json: &str) -> Result<(), String> {
     fs::rename(&tmp, &path).map_err(|e| e.to_string())
 }
 
+/// The Claude Console API key from HQ's settings, beside board.json but never in it: the board
+/// is a snapshot the webview sends on every save. Outer None: not read from disk yet.
+static API_KEY: Mutex<Option<Option<String>>> = Mutex::new(None);
+
+fn api_key_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(state_path(app)?.with_file_name("api-key"))
+}
+
+/// The saved API key, read from disk the first time it is asked for.
+pub fn api_key(app: &AppHandle) -> Option<String> {
+    let mut key = API_KEY.lock().unwrap();
+    key.get_or_insert_with(|| {
+        let text = fs::read_to_string(api_key_path(app).ok()?).ok()?;
+        clean_api_key(&text).ok()
+    })
+    .clone()
+}
+
+/// Saves the key, or with None deletes it. Unix: readable by the user only. Windows: the folder
+/// is in the user's profile, which only that user can read (as with Claude's own credentials).
+pub fn set_api_key(app: &AppHandle, key: Option<String>) -> Result<(), String> {
+    let path = api_key_path(app)?;
+    match &key {
+        Some(k) => {
+            let tmp = path.with_extension("tmp");
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+            let written = options.open(&tmp).and_then(|mut f| io::Write::write_all(&mut f, k.as_bytes()));
+            written.and_then(|_| fs::rename(&tmp, &path)).map_err(|e| format!("could not save the API key: {e}"))?;
+        }
+        None => match fs::remove_file(&path) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(format!("could not remove the API key: {e}")),
+            _ => {}
+        },
+    }
+    *API_KEY.lock().unwrap() = Some(key);
+    Ok(())
+}
+
+/// Checks a pasted key. Only a Console API key draws on API credits: a subscription token from
+/// `claude setup-token` bills the plan, and as an API key it fails.
+pub fn clean_api_key(raw: &str) -> Result<String, String> {
+    let key = raw.trim().trim_matches('"').trim();
+    if key.starts_with("sk-ant-oat") {
+        return Err("That is a Claude subscription token (from `claude setup-token`), not an API key. Create one at platform.claude.com.".into());
+    }
+    if !key.starts_with("sk-ant-api") {
+        return Err("That is not a Claude API key: Console keys start with sk-ant-api.".into());
+    }
+    if key.len() > 300 || !key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+        return Err("The key has characters an API key never has. Copy it again.".into());
+    }
+    Ok(key.to_owned())
+}
+
+/// Enough of the key to tell which one is saved, never enough to use it.
+pub fn api_key_hint(key: &str) -> String {
+    format!("sk-ant-…{}", &key[key.len().saturating_sub(4)..])
+}
+
 fn claude_config_dir() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("CLAUDE_CONFIG_DIR") {
         return Some(PathBuf::from(dir));
@@ -995,6 +1057,17 @@ fn resolve(base: &Path, relative: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_console_api_key_is_accepted() {
+        let key = "sk-ant-api03-AbC_def-123";
+        assert_eq!(clean_api_key(&format!("  \"{key}\"\n")).unwrap(), key);
+        assert!(clean_api_key("sk-ant-oat01-abc").unwrap_err().contains("subscription token"));
+        assert!(clean_api_key("sk-proj-abc").is_err());
+        assert!(clean_api_key("sk-ant-api03-a b").is_err());
+        assert!(clean_api_key(&format!("sk-ant-api03-{}", "a".repeat(300))).is_err());
+        assert_eq!(api_key_hint(key), "sk-ant-…-123");
+    }
 
     /// A transcript on disk that is removed again when the test ends.
     struct TempTranscript(PathBuf);

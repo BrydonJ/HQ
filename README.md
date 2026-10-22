@@ -174,6 +174,26 @@ the repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the contents of the updater 
     HQ asks a running session when there is one. Otherwise it starts a short-lived `claude`
     that skips MCP servers and hooks and saves no transcript.
   - It refreshes after each finished turn, and every 5 minutes (15 when no session is running).
+- **API credits** let a session carry on past your plan's usage limit on a Claude Console API
+  key. Max and Team plans include monthly API credits, which pay only for a key from the
+  Console organization linked in claude.ai's billing settings; any other key is billed as usual.
+  - Save the key under Settings > API key for API credits. It is kept in a file beside the
+    board (readable by your user only), never in the board, and the UI only ever sees
+    `sk-ant-…` and its last four characters.
+  - Nothing switches by itself. A session that hits the limit shows **Continue on API credits**
+    on its limit card. Clicking it sends nothing: from your next message, that session's `claude`
+    restarts with `ANTHROPIC_API_KEY` (and without `ANTHROPIC_AUTH_TOKEN` or cloud provider
+    variables, which would outrank it) and resumes the conversation.
+  - The first request on the key re-reads the whole conversation, since the plan's prompt cache
+    does not carry over. With no model picked in the session, Claude uses the API's default.
+  - The **API** chip in the composer bar marks a session on the key and shows what it has spent.
+    Its menu goes back to the plan at once.
+  - The session goes back to the plan by itself, restarting before the next message, once the
+    plan's usage is back (from the refused request's reset time and the usage figures).
+  - Claude reports the credential it uses at the start of each turn; if a session meant for the
+    key is not on it (an `env` block in Claude's settings wins over HQ), HQ says so.
+  - Sessions on the key leave plan usage, the model list and Remote Control alone: those follow
+    the plan.
 - **Context window:** a small ring in the composer bar (it appears after the first reply) shows
   how full the session's context is.
   - The ring fills toward the auto-compact point and turns from green to red as it nears it
