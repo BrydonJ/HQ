@@ -4,6 +4,8 @@
 mod dev;
 #[cfg(feature = "hermes")]
 mod hermes;
+#[cfg(not(target_os = "macos"))]
+mod icon;
 #[cfg(target_os = "macos")]
 mod macos;
 mod session;
@@ -175,9 +177,10 @@ async fn list_hermes_sessions(limit: Option<usize>, cwd: Option<String>) -> Resu
 }
 
 #[tauri::command]
-async fn list_sessions(app: AppHandle, limit: Option<usize>, cwd: Option<String>) -> Result<Vec<store::SessionInfo>, String> {
+async fn list_sessions(app: AppHandle, limit: Option<usize>, cwd: Option<String>, agents: Option<bool>) -> Result<Vec<store::SessionInfo>, String> {
     let limit = limit.unwrap_or(80).min(500);
-    tauri::async_runtime::spawn_blocking(move || store::list_sessions(&app.state::<store::Index>(), limit, cwd.as_deref()))
+    let agents = agents.unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || store::list_sessions(&app.state::<store::Index>(), limit, cwd.as_deref(), agents))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -474,25 +477,34 @@ struct BuildInfo {
     live_ui: bool,
     /// Whether this copy installs updates (the installed app, or a test build that opts in).
     updatable: bool,
-    /// The agents this build can start in a cell.
+    /// The agents this copy can start in a cell: built in and, for Hermes, installed.
     backends: Vec<&'static str>,
+    /// Whether a custom app icon is set; absent where HQ cannot change its icon (macOS).
+    app_icon: Option<bool>,
 }
 
 struct Profile(Option<String>);
 
+/// Async because finding Hermes can wait on the macOS login-shell PATH (see `macos::path`).
 #[tauri::command]
-fn build_info(app: AppHandle, profile: State<'_, Profile>) -> BuildInfo {
-    BuildInfo {
+async fn build_info(app: AppHandle, profile: State<'_, Profile>) -> Result<BuildInfo, String> {
+    let mut backends = vec!["claude"];
+    // Hermes is offered only where it is installed, so no one without it sees it in the UI.
+    #[cfg(feature = "hermes")]
+    if tauri::async_runtime::spawn_blocking(hermes::installed).await.unwrap_or(false) {
+        backends.push("hermes");
+    }
+    Ok(BuildInfo {
         profile: profile.0.clone(),
         version: app.package_info().version.to_string(),
         live_ui: cfg!(debug_assertions),
         updatable: update::updates_enabled(),
-        backends: vec![
-            "claude",
-            #[cfg(feature = "hermes")]
-            "hermes",
-        ],
-    }
+        backends,
+        #[cfg(not(target_os = "macos"))]
+        app_icon: Some(icon::is_set(&app)),
+        #[cfg(target_os = "macos")]
+        app_icon: None,
+    })
 }
 
 /// Which copy of HQ this is. The installed app is the default profile. Any other copy (a build
@@ -646,7 +658,16 @@ fn main() {
             kill_all_sessions,
             build_info,
             take_launches,
+            #[cfg(not(target_os = "macos"))]
+            icon::pick_app_icon,
+            #[cfg(not(target_os = "macos"))]
+            icon::reset_app_icon,
         ])
+        .setup(|_app| {
+            #[cfg(not(target_os = "macos"))]
+            icon::apply(_app.handle());
+            Ok(())
+        })
         .build(context)
         .expect("failed to start HQ")
         .run(|app, event| {

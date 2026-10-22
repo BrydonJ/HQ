@@ -13,7 +13,7 @@ hermes = []
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["image-png", "image-ico"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 # Desktop toasts only fire and forget: the plugin has no click or action callback on Windows.

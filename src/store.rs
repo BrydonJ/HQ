@@ -357,6 +357,8 @@ pub struct SessionInfo {
     entrypoint: Option<String>,
     /// When the session started: the first line's timestamp, as written (ISO 8601).
     started: Option<String>,
+    /// Started headless by another agent or script (`claude -p "<prompt>"`), not by a person.
+    agent: bool,
     modified_ms: u64,
 }
 
@@ -443,12 +445,13 @@ fn transcript_files() -> Result<Vec<TranscriptFile>, String> {
 }
 
 /// Lists the most recently used sessions across every project folder, newest first, or only
-/// those whose folder is `cwd`.
+/// those whose folder is `cwd`. `agents` picks the sessions other agents started headless
+/// instead of everyone else's, so a busy agent run does not push a person's sessions off the list.
 ///
 /// The transcript format is internal to Claude Code, so every field is optional and a
 /// transcript that cannot be read is skipped rather than failing the whole list. A file that
 /// has not changed costs one stat.
-pub fn list_sessions(index: &Index, limit: usize, cwd: Option<&str>) -> Result<Vec<SessionInfo>, String> {
+pub fn list_sessions(index: &Index, limit: usize, cwd: Option<&str>, agents: bool) -> Result<Vec<SessionInfo>, String> {
     let files = transcript_files()?;
     index.retain(&files);
     // Lazy, so reading stops once `limit` sessions are found.
@@ -456,7 +459,7 @@ pub fn list_sessions(index: &Index, limit: usize, cwd: Option<&str>) -> Result<V
     Ok(files
         .iter()
         .filter_map(|file| index.info(file))
-        .filter(|info| wanted.as_ref().is_none_or(|w| info.in_folder(w)))
+        .filter(|info| info.agent == agents && wanted.as_ref().is_none_or(|w| info.in_folder(w)))
         .take(limit)
         .map(|info| SessionInfo { cwd_exists: Path::new(&info.cwd).is_dir(), ..info })
         .collect())
@@ -488,6 +491,11 @@ struct Scan {
     ai_title: Option<String>,
     last_prompt: Option<String>,
     first_prompt: Option<String>,
+    /// A `bridge-session` line came first: Remote Control was on, so a person was at it (HQ, the CLI).
+    bridged: bool,
+    /// What the first `queue-operation` enqueued: a string for `claude -p "<prompt>"`. Prompts HQ
+    /// sends as blocks (its task-list nudge rides along) are enqueued without one.
+    enqueued: Option<Option<String>>,
 }
 
 fn read_session_info(path: &Path, modified: SystemTime) -> Option<SessionInfo> {
@@ -500,7 +508,7 @@ fn read_session_info(path: &Path, modified: SystemTime) -> Option<SessionInfo> {
     let head = read_range(&mut file, 0, HEAD_BYTES.min(len))?;
     for line in head.split('\n') {
         scan_origin(line, &mut scan);
-        if scan.first_cwd.is_some() && scan.started.is_some() {
+        if scan.first_cwd.is_some() && scan.started.is_some() && scan.enqueued.is_some() {
             break;
         }
     }
@@ -529,6 +537,7 @@ fn read_session_info(path: &Path, modified: SystemTime) -> Option<SessionInfo> {
         }
     }
 
+    let agent = is_agent(&scan);
     let last_cwd = scan.cwd?; // a session without a folder cannot be resumed
     let cwd = scan.first_cwd.unwrap_or_else(|| last_cwd.clone());
     let last_cwd = (folder_key(&last_cwd) != folder_key(&cwd)).then_some(last_cwd);
@@ -540,14 +549,33 @@ fn read_session_info(path: &Path, modified: SystemTime) -> Option<SessionInfo> {
         last_cwd,
         title: scan.custom_title.or(scan.ai_title),
         last_prompt: scan.last_prompt.or(scan.first_prompt),
+        agent,
         entrypoint: scan.entrypoint,
         started: scan.started,
         modified_ms,
     })
 }
 
-/// Picks the first folder and the first timestamp out of a line from the start of a transcript.
+/// Whether another agent started the session headless: `claude -p "<prompt>"` through the SDK
+/// entrypoint, with no Remote Control and its first prompt given as text. Claude Code does not
+/// record who started a session, so this is inferred; a slash command counts as a person's.
+fn is_agent(scan: &Scan) -> bool {
+    scan.entrypoint.as_deref() == Some("sdk-cli")
+        && !scan.bridged
+        && scan.enqueued.as_ref().and_then(Option::as_deref).is_some_and(|p| !p.trim_start().starts_with('/'))
+}
+
+/// Picks the first folder and the first timestamp out of a line from the start of a transcript,
+/// and how the session was started.
 fn scan_origin(line: &str, scan: &mut Scan) {
+    if scan.enqueued.is_none() && line.contains("\"type\":\"bridge-session\"") {
+        scan.bridged = true;
+    }
+    if scan.enqueued.is_none() && line.contains("\"queue-operation\"") && line.contains("\"enqueue\"") {
+        if let Ok(v) = serde_json::from_str::<Value>(line) {
+            scan.enqueued = Some(v.get("content").and_then(Value::as_str).map(str::to_owned));
+        }
+    }
     let wanted = (scan.first_cwd.is_none() && line.contains("\"cwd\""))
         || (scan.started.is_none() && line.contains("\"timestamp\""));
     if !wanted {
@@ -1137,6 +1165,22 @@ mod tests {
         assert_eq!(found[0].2, "Please fix the FROBNICATOR now");
         assert_eq!(found[1].2, "I fixed the frobnicator today");
         assert_eq!(found[2].2, r#"say "hello" to the frobnicator"#);
+    }
+
+    #[test]
+    fn headless_sessions_started_by_agents_are_told_apart() {
+        let user = r#"{"type":"user","cwd":"C:\\proj","entrypoint":"sdk-cli","message":{"content":"Review the diff"}}"#;
+        let info = |name: &str, head: &[&str]| {
+            let lines: Vec<String> = head.iter().chain([&user]).map(|l| l.to_string()).collect();
+            let file = TempTranscript::new(name, &lines, true);
+            read_session_info(&file.0, SystemTime::now()).unwrap()
+        };
+        let enqueue = |content: &str| format!(r#"{{"type":"queue-operation","operation":"enqueue","content":{content}}}"#);
+        let bridge = r#"{"type":"bridge-session","bridgeSessionId":"cse_1"}"#;
+        assert!(info("agent-p", &[&enqueue(r#""Review the diff""#)]).agent);
+        assert!(!info("agent-hq", &[&enqueue("null")]).agent, "HQ sends its prompts as blocks");
+        assert!(!info("agent-bridged", &[bridge, &enqueue(r#""Fix it""#)]).agent, "Remote Control means a person");
+        assert!(!info("agent-slash", &[&enqueue(r#""/log-hours""#)]).agent);
     }
 
     #[test]

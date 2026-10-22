@@ -45,17 +45,29 @@ fn hermes_program() -> PathBuf {
         return p.into();
     }
     #[cfg(windows)]
-    if let Some(path) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path) {
-            for ext in ["exe", "cmd", "bat"] {
-                let p = dir.join("hermes").with_extension(ext);
-                if p.is_file() {
-                    return p;
-                }
-            }
-        }
+    if let Some(p) = find_on_path() {
+        return p;
     }
     "hermes".into()
+}
+
+/// The `hermes` executable on the PATH children are started with, if there is one.
+fn find_on_path() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    let path = Some(crate::macos::path());
+    #[cfg(not(target_os = "macos"))]
+    let path = std::env::var_os("PATH");
+    let names: &[&str] = if cfg!(windows) { &["hermes.exe", "hermes.cmd", "hermes.bat"] } else { &["hermes"] };
+    std::env::split_paths(&path?).flat_map(|dir| names.iter().map(move |n| dir.join(n))).find(|p| p.is_file())
+}
+
+/// Whether Hermes Agent is installed, so the UI offers it. Read once, when the UI loads: a Hermes
+/// installed later shows after HQ restarts (on Windows, it also needs the PATH HQ started with).
+pub fn installed() -> bool {
+    match std::env::var_os("HQ_HERMES").filter(|p| !p.is_empty()) {
+        Some(p) => Path::new(&p).is_file(),
+        None => find_on_path().is_some(),
+    }
 }
 
 /// Where HQ keeps its display copy of Hermes conversations, next to board.json.

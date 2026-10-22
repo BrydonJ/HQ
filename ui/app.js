@@ -201,7 +201,7 @@ class Cell {
     this.wmView = false;           // the waiting view is on screen now (the chat is display:none)
     this.wmTimer = 0;              // one timeout: finishes waiting mode once the cell has stayed idle
     this.wmStick = true;           // stickToBottom, kept while the chat is hidden
-    this.taskLine = '';            // "3/7 · Creating b.txt": the task list at a glance, in the header
+    this.taskLine = '';            // "3/7": the task list at a glance, in the header
     this.sideTaskLine = '';        // the same without the live tool name, for the sidebar (which a change rebuilds)
     this.askTasks = false;         // the composer's task-list toggle: asks for a list on the next prompt only
     this.collapsed = !!collapsed;  // only the header shows, in the dock under the grid
@@ -244,6 +244,8 @@ class Cell {
     this.ctx = { tokens: null, window: null, info: null, infoAt: 0, loading: null, model: null }; // context window use
     this.compacting = false;   // a compaction is running (the CLI's status 'compacting')
     this.wrapUp = null;        // the plan's limit was hit mid-turn and Claude is finishing on the wrap-up allowance: { credits }
+    this.limitResetAt = 0;     // when the limit that refused the last request resets (ms), from its rate_limit_event
+    this.limitResume = null;   // { resetsAt }: carry on by itself once the plan's usage is back (checkLimitResumes)
     this.cost = { usd: 0, tokens: 0, procUsd: 0, procTokens: 0 }; // this HQ run's spend; proc* = last total of the current process
     this.drafts = new Set();   // prompts submitted while claude was still starting, which Esc can take back
     this.openTools = new Set(); // tool_use ids of tool calls that have not reported a result yet
@@ -711,9 +713,10 @@ class Cell {
    */
   onRateLimit(info) {
     if (!info || typeof info !== 'object') return;
+    const resetsAt = Number(info.resetsAt) * (Number(info.resetsAt) < 1e12 ? 1000 : 1);
+    if (info.status === 'rejected' && Number.isFinite(resetsAt) && resetsAt > Date.now()) this.limitResetAt = resetsAt;
     // An event about another window (weekly, overage) says nothing about the 5-hour wrap-up; it must not end it.
     if (info.rateLimitGraceActive !== true && info.rateLimitType && info.rateLimitType !== 'five_hour') return;
-    const resetsAt = Number(info.resetsAt) * (Number(info.resetsAt) < 1e12 ? 1000 : 1);
     const grace = info.rateLimitGraceActive === true && info.status !== 'rejected'
       && !(Number.isFinite(resetsAt) && resetsAt > 0 && resetsAt < Date.now());
     this.setWrapUp(grace ? { credits: info.overageStatus === 'allowed' || info.overageStatus === 'allowed_warning' } : null);
@@ -991,22 +994,20 @@ class Cell {
     (asWaiting ? this.waitBody : this.progressEl).replaceChildren(...parts.filter(Boolean));
   }
 
-  /** "3/7 · Creating b.txt" for the header and the sessions list; touches the DOM only when it changes. */
+  /** "3/7" for the header, "3/7 · Creating b.txt" for the sessions list; touches the DOM only when it changes. */
   drawTaskLine(list, show, done) {
     let line = '';
     let side = '';
     if (show) {
       const cur = list.find(t => t.status === 'in_progress');
-      const t = this.currentTool;
       const task = cur ? cur.activeForm || cur.subject : '';
-      const what = task || (this.status === 'running' && t ? `${t.name} ${t.summary}` : '');
-      line = `${done}/${list.length}${what ? ` · ${firstLine(what, 140)}` : ''}`;
+      line = `${done}/${list.length}`; // the header keeps just the count; the task is in the panel
       side = `${done}/${list.length}${task ? ` · ${firstLine(task, 140)}` : ''}`;
     }
     if (line !== this.taskLine) {
       this.taskLine = line;
       this.taskEl.textContent = line;
-      this.taskEl.title = line ? `Tasks: ${line}` : '';
+      this.taskEl.title = line ? `Tasks done: ${line}` : '';
       this.taskEl.classList.toggle('hidden', !line);
     }
     if (side !== this.sideTaskLine) {
@@ -1474,6 +1475,7 @@ class Cell {
     const text = prompt ?? this.input.value.trim();
     const images = prompt == null ? this.attachments : [];
     if (!text && !images.length) return;
+    if (this.limitResume) this.setLimitResume(false); // sent now, by the user or by checkLimitResumes
     if (this.wmView && prompt == null) this.setWaitingMode(false); // sending is the user coming back (an armed idle cell keeps waiting for the work)
     // /clear (and its aliases) is answered here: Claude's own /clear would change the session
     // behind HQ's back. The cell starts a new session; the old one stays on disk for Resume.
@@ -1931,7 +1933,32 @@ class Cell {
     }
     card.querySelector('.limit-title').textContent = title || 'Usage limit reached';
     card.querySelector('.limit-reset').textContent = reset;
-    if (!replay && this.backend === 'claude') scheduleUsageRefresh(this);
+    if (!replay && this.backend === 'claude') {
+      if (!card.querySelector('.limit-resume')) {
+        card.querySelector('.limit-usage').before(h('button', { class: 'btn limit-resume', onclick: () => this.setLimitResume(!this.limitResume) }));
+      }
+      this.drawLimitResume();
+      scheduleUsageRefresh(this);
+    }
+  }
+
+  /** Arms or disarms carrying on by itself once the plan's usage is back (checkLimitResumes). */
+  setLimitResume(on) {
+    // With no reset known, the first look at usage waits a few minutes rather than sending at once.
+    this.limitResume = on ? { resetsAt: Math.max(this.limitResetAt, usageResetAt()) || Date.now() + LIMIT_RESUME_UNKNOWN_MS } : null;
+    this.drawLimitResume();
+    if (on) watchLimitResumes();
+  }
+
+  drawLimitResume() {
+    const at = this.limitResume && this.limitResume.resetsAt;
+    for (const btn of this.msgs.querySelectorAll('.limit-resume')) {
+      btn.classList.toggle('on', !!this.limitResume);
+      btn.textContent = !this.limitResume ? 'Continue when usage is back'
+        : at > Date.now() ? `Continuing at ${new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} · Cancel`
+          : 'Continuing when usage is back · Cancel';
+      btn.title = this.limitResume ? 'Cancel: stay stopped' : 'Send "continue" by itself once the usage limit resets';
+    }
   }
 
   /** Text followed by a tool call is Claude narrating its work, not its answer. */
@@ -3957,6 +3984,8 @@ const resumer = $('#resumer');
 const resumeList = $('#resume-list');
 const resumeSearch = $('#resume-search');
 const SOURCE_LABELS = { 'claude-vscode': 'VS Code', cli: 'Terminal', 'sdk-cli': 'HQ', 'claude-desktop': 'Desktop' };
+/** The resume filter for sessions other agents started headless (`claude -p`); kept out of the rest. */
+const AGENTS_SOURCE = 'agents';
 // A transcript written this recently may still be open somewhere else.
 const RECENTLY_ACTIVE_MS = 5 * 60 * 1000;
 const resumeProject = $('#resume-project');
@@ -3987,17 +4016,18 @@ async function loadResumeSessions() {
   renderResumeList();
   let sessions = null;
   let error = null;
-  const others = hermesSessions(cwd); // read alongside, added once Claude's are shown
+  const agents = resumeState.source === AGENTS_SOURCE;
+  const others = agents ? null : hermesSessions(cwd); // read alongside, added once Claude's are shown
   resumeState.othersLoading = !!others;
   try {
-    sessions = await invoke('list_sessions', { limit: 80, cwd });
+    sessions = await invoke('list_sessions', { limit: 80, cwd, agents });
   } catch (err) {
     error = String(err);
   }
   if (seq !== resumeState.seq) return;
   if (sessions) {
     resumeState.sessions = sessions;
-    if (!cwd) {
+    if (!cwd && !agents) {
       resumeState.all = sessions;
       renderProjectOptions();
     }
@@ -4130,7 +4160,7 @@ function renderResumeList() {
   const project = resumeState.project ? projectKey(resumeState.project) : null;
   const rows = [];
   for (const info of resumeState.sessions) {
-    if (resumeState.source && info.entrypoint !== resumeState.source) continue;
+    if (resumeState.source && resumeState.source !== AGENTS_SOURCE && info.entrypoint !== resumeState.source) continue;
     if (project && projectKey(info.cwd) !== project && !(info.lastCwd && projectKey(info.lastCwd) === project)) continue;
     const title = info.title || info.lastPrompt || '(no prompt)';
     const hay = [title, info.lastPrompt, info.cwd, info.lastCwd].join('\n').toLowerCase();
@@ -4138,7 +4168,7 @@ function renderResumeList() {
 
     const open = app.cells.find(c => c.sessionId === info.sessionId);
     const recent = Date.now() - info.modifiedMs < RECENTLY_ACTIVE_MS;
-    const source = SOURCE_LABELS[info.entrypoint] || info.entrypoint || '';
+    const source = info.agent ? 'Agent' : SOURCE_LABELS[info.entrypoint] || info.entrypoint || '';
     const badges = [
       source ? h('span', { class: 'badge', text: source }) : null,
       open ? h('span', { class: 'badge on', text: 'Open in HQ' }) : null,
@@ -4202,9 +4232,11 @@ $('#resume-deep').addEventListener('click', e => {
 $('#resume-filters').addEventListener('click', e => {
   const btn = e.target.closest('button');
   if (!btn || btn.id === 'resume-deep') return;
+  const reload = (resumeState.source === AGENTS_SOURCE) !== (btn.dataset.source === AGENTS_SOURCE);
   resumeState.source = btn.dataset.source;
   for (const b of $('#resume-filters').querySelectorAll('button')) b.classList.toggle('on', b === btn);
-  renderResumeList();
+  if (reload) loadResumeSessions(); // agents' sessions are listed apart, so the list is read again
+  else renderResumeList();
 });
 /** Shows only the sessions from one folder ('' for every folder). */
 function setResumeProject(path) {
@@ -4332,6 +4364,45 @@ function refreshUsage(preferred) {
   });
   renderUsage();
   return usage.loading;
+}
+
+/** The latest reset among the plan's limits that are used up (ms), or 0 when none is. */
+function usageResetAt() {
+  const rows = (usage.data && usage.data.rows) || [];
+  return Math.max(0, ...rows.filter(r => r.percent >= 100 && r.resetsAt > Date.now()).map(r => r.resetsAt));
+}
+
+const LIMIT_RESUME_PROMPT = 'The usage limit has reset. Continue where you left off.';
+const LIMIT_RESUME_CHECK_MS = 60 * 1000;
+const LIMIT_RESUME_UNKNOWN_MS = 5 * 60 * 1000;
+let limitResumeTimer = 0;
+
+function watchLimitResumes() {
+  if (!limitResumeTimer) limitResumeTimer = setInterval(checkLimitResumes, LIMIT_RESUME_CHECK_MS);
+}
+
+/**
+ * Sends "continue" to the cells waiting on the usage limit once it is back. Before the known reset
+ * nothing is asked; after it, usage is read again (at most every USAGE_EVERY_MS) and a limit that is
+ * still used up moves the wait on. The interval also catches up after the computer sleeps.
+ */
+async function checkLimitResumes() {
+  const now = Date.now();
+  const armed = app.cells.filter(c => c.limitResume);
+  if (!armed.length) { clearInterval(limitResumeTimer); limitResumeTimer = 0; return; }
+  const due = armed.filter(c => now >= c.limitResume.resetsAt);
+  if (!due.length) return;
+  const latest = Math.max(...due.map(c => c.limitResume.resetsAt));
+  if (usage.fetchedAt < latest || now - usage.fetchedAt > USAGE_EVERY_MS) await refreshUsage();
+  if (usage.fetchedAt < latest) return; // unread (an error): tried again on a later tick
+  const still = usageResetAt();
+  for (const cell of due) {
+    if (!cell.limitResume || !app.cells.includes(cell) || cell.closing) continue;
+    if (still) { cell.limitResume.resetsAt = still; cell.drawLimitResume(); continue; }
+    if (cell.status === 'running' || cell.pending.size || cell.spawning) continue; // busy; the next tick sends it
+    cell.notice('Usage is back: continuing.');
+    cell.submit(LIMIT_RESUME_PROMPT);
+  }
 }
 
 /** A finished turn changes usage; asks the session that just finished, a few seconds later. */
@@ -4644,6 +4715,7 @@ function renderAppearanceSettings(row, toggle, select) {
       h('div', { class: 'setting-colors-head' }, h('span', { text: `Colours for ${themeName}` }), resetAll),
       h('div', { class: 'color-grid' }, CUSTOM_COLORS.map(colorRow)),
       preview),
+    build.appIcon == null ? null : row('App icon', "A PNG or ICO shown on the window and taskbar instead of HQ's own.", appIconControl()),
     h('div', { class: 'settings-section', text: 'Top bar' }),
     row('Weekly usage bar', 'A thin bar along the bottom of the usage button showing the weekly limit.', toggle(app.settings.weeklyBar, v => changeSetting('weeklyBar', v))),
     h('div', { class: 'settings-section', text: 'Sessions' }),
@@ -4653,6 +4725,25 @@ function renderAppearanceSettings(row, toggle, select) {
     h('div', { class: 'setting column' }, h('div', { class: 'setting-main' }, h('span', { class: 'name', text: 'Header buttons' }),
       h('span', { class: 'desc', text: 'Unticked buttons are hidden; their shortcuts still work.' })), buttons),
   ];
+}
+
+let appIconError = ''; // why the last icon picked was refused, shown under the buttons
+
+/** Choose… and Reset for the custom app icon; build.appIcon says whether one is set. */
+function appIconControl() {
+  const run = async (cmd, set) => {
+    appIconError = '';
+    try {
+      if (await invoke(cmd) !== false) build.appIcon = set;
+    } catch (err) {
+      appIconError = String(err);
+    }
+    renderSettings();
+  };
+  return h('div', { class: 'setting-buttons' },
+    h('button', { class: 'btn', text: 'Choose…', onclick: () => run('pick_app_icon', true) }),
+    h('button', { class: 'btn', text: 'Reset', disabled: !build.appIcon, onclick: () => run('reset_app_icon', false) }),
+    appIconError ? h('span', { class: 'setting-error', text: appIconError }) : null);
 }
 
 // ---------- header buttons that fade in as the pointer comes near ----------
