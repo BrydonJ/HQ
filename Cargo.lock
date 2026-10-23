@@ -1498,6 +1498,8 @@ version = "0.17.0"
 dependencies = [
  "libc",
  "memchr",
+ "security-framework",
+ "security-framework-sys",
  "serde",
  "serde_json",
  "tauri",
