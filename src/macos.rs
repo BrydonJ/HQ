@@ -166,7 +166,7 @@ fn find_pwsh() -> Option<PathBuf> {
 }
 
 /// Single-quotes `s` for a POSIX shell.
-fn sh_quote(s: &str) -> String {
+pub(crate) fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 

@@ -1540,6 +1540,7 @@ class Cell {
             }
             this.notice(String(err), true);
             this.setStatus('exited');
+            if (this.backend === 'claude') checkClaudeSetup({ force: true });
             return false;
           }
         }
@@ -2369,6 +2370,7 @@ class Cell {
     if (m.is_error && m.subtype !== 'error_during_execution') {
       const detail = m.result || (m.errors && m.errors.join('\n')) || m.subtype;
       if (!this.limitHit && !LIMIT_TEXT.test(String(detail))) this.notice(`Error: ${detail}`, true);
+      if (this.backend === 'claude' && LOGIN_TEXT.test(String(detail))) checkClaudeSetup({ force: true });
     }
     this.noteResult(m);
     if (this.compacting) this.setCompacting(false);
@@ -5464,6 +5466,135 @@ function flushState() {
   return invoke('save_state', { json: JSON.stringify(state) }).catch(err => console.error('save failed', err));
 }
 
+// ======================================================================================
+// First-run setup: install Claude Code and sign it in, so nobody needs a terminal
+// ======================================================================================
+
+const SETUP_POLL_MS = 2500;
+const SETUP_GIVE_UP_MS = 15 * 60 * 1000; // stop waiting on a sign-in nobody finished
+const LOGIN_TEXT = /not logged in|please run \/login|login expired|invalid api key|oauth token has expired/i;
+const setupEl = $('#setup');
+// `step`: null (hidden), 'install', 'login' or 'waiting' (sign-in window open). `skipped`: "Not now" for this run.
+const setup = { step: null, busy: false, skipped: false, poll: 0, since: 0 };
+
+/** Shows the setup card when Claude Code is missing or signed out. `force` asks again after "Not now". */
+async function checkClaudeSetup({ force = false } = {}) {
+  if (setup.busy || setup.step === 'waiting' || (setup.skipped && !force)) return;
+  setup.skipped = false;
+  const status = await invoke('claude_status').catch(err => { console.warn('claude status failed:', err); return null; });
+  if (!status) return;
+  if (!status.installed) showSetup('install');
+  else if (status.loggedIn === false) showSetup('login');
+  else if (setup.step) closeSetup();
+}
+
+function showSetup(step, error = '') {
+  setup.step = step;
+  const missingPath = app.settings.claudePath && step === 'install';
+  const text = {
+    install: missingPath
+      ? `Claude Code was not found at ${app.settings.claudePath}. HQ can install it for you with Anthropic's installer and then sign you in. It takes a minute or two.`
+      : "HQ runs Claude Code in each session, and it isn't installed yet. HQ can install it for you with Anthropic's installer and then sign you in. It takes a minute or two.",
+    login: 'Claude Code needs you to sign in once. HQ opens the sign-in page in your browser; approve it there and HQ carries on by itself.',
+    waiting: 'Finish signing in in your browser (a Claude Code window opened for it). HQ carries on by itself once you are signed in.',
+  }[step];
+  const button = { install: 'Install Claude Code', login: 'Sign in', waiting: 'Open sign-in again' }[step];
+  $('#setup-text').textContent = text;
+  const go = $('#setup-go');
+  go.textContent = button;
+  go.disabled = setup.busy;
+  setSetupStatus(error || (step === 'waiting' ? 'Waiting for you to sign in…' : ''), !!error);
+  setupEl.classList.remove('hidden');
+}
+
+function setSetupStatus(text, isError = false) {
+  const el = $('#setup-status');
+  el.textContent = text;
+  el.classList.toggle('err', isError);
+}
+
+function closeSetup() {
+  clearInterval(setup.poll);
+  setup.poll = 0;
+  setup.step = null;
+  setupEl.classList.add('hidden');
+}
+
+async function installClaude() {
+  setup.busy = true;
+  $('#setup-go').disabled = true;
+  setSetupStatus('Installing Claude Code… this takes a minute or two.');
+  // A saved path that points nowhere would hide the new install.
+  if (app.settings.claudePath) changeSetting('claudePath', '');
+  try {
+    await invoke('install_claude');
+  } catch (err) {
+    setup.busy = false;
+    if (!setup.skipped) showSetup('install', String(err));
+    return;
+  }
+  setup.busy = false;
+  if (setup.skipped) return; // "Not now" while it installed: the install stays, the sign-in waits for the next ask
+  // A fresh install is current; `claude update` can wait for its usual turn.
+  app.claudeUpdateAt = Date.now();
+  saveState();
+  const status = await invoke('claude_status').catch(() => null);
+  if (status && status.loggedIn !== false) return finishSetup(); // signed in before (a reinstall), or it cannot tell
+  signInClaude();
+}
+
+async function signInClaude() {
+  setup.busy = true;
+  $('#setup-go').disabled = true;
+  try {
+    await invoke('login_claude');
+  } catch (err) {
+    setup.busy = false;
+    if (!setup.skipped) showSetup('login', String(err));
+    return;
+  }
+  setup.busy = false;
+  if (setup.skipped) return;
+  showSetup('waiting');
+  setup.since = Date.now();
+  clearInterval(setup.poll);
+  setup.poll = setInterval(pollSignIn, SETUP_POLL_MS);
+}
+
+let pollingSignIn = false;
+async function pollSignIn() {
+  if (pollingSignIn) return; // `claude auth status` can take longer than the interval
+  pollingSignIn = true;
+  try {
+    const status = await invoke('claude_status').catch(() => null);
+    if (setup.step !== 'waiting') return;
+    if (status && status.loggedIn !== false) return finishSetup();
+    if (Date.now() - setup.since > SETUP_GIVE_UP_MS) {
+      clearInterval(setup.poll);
+      showSetup('login', 'Still not signed in. Click Sign in to try again.');
+    }
+  } finally {
+    pollingSignIn = false;
+  }
+}
+
+function finishSetup() {
+  invoke('finish_login').catch(() => {});
+  closeSetup();
+  refreshUsage();
+}
+
+$('#setup-go').addEventListener('click', () => {
+  if (setup.busy) return;
+  if (setup.step === 'install') installClaude();
+  else signInClaude();
+});
+$('#setup-skip').addEventListener('click', () => {
+  setup.skipped = true;
+  setup.busy = false;
+  closeSetup();
+});
+
 async function restore() {
   await invoke('kill_all_sessions').catch(() => {});
   build = await invoke('build_info').catch(() => build);
@@ -5523,6 +5654,7 @@ async function restore() {
   // A second apart, so a board of working sessions does not start every agent at once.
   app.cells.filter(c => c.resumeAfterUpdate).forEach((c, i) => setTimeout(() => c.resumeAfterRestart(), i * 1000));
   updateClaude(); // after the cells are back: it saves the time of the run
+  checkClaudeSetup(); // a first run without Claude Code, or signed out: offer to fix it
   if (app.focused) focusCell(app.focused, true);
   setTimeout(() => refreshUsage(), 1500);
   setTimeout(autoCheckForUpdate, UPDATE_FIRST_CHECK_MS);

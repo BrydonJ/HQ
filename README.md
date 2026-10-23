@@ -18,7 +18,7 @@ styled like the VS Code extension instead of a terminal.
 
 ## Build and run
 
-Prerequisites: the Rust toolchain (MSVC), and `claude` on `PATH`.
+Prerequisites: the Rust toolchain (MSVC). HQ installs Claude Code itself on first run if it is missing.
 
 ```bat
 build.cmd            :: debug build   -> target\debug\hq.exe
@@ -139,6 +139,14 @@ the repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the contents of the updater 
 
 ## Using it
 
+- **First run:** if Claude Code is missing, HQ offers to install it. One click runs Anthropic's
+  own installer (`install.ps1` on Windows, `install.sh` on a Mac) in the background, then
+  opens Claude's sign-in (`claude auth login`) in a small window, which opens the browser.
+  Once you approve there, HQ notices (it polls `claude auth status`), closes that window and
+  carries on. No restart is needed: when `claude` is not on HQ's PATH, HQ uses the installer's
+  location (`~/.local/bin`) directly. HQ asks again when Claude is signed out, or when a
+  session reports it is not logged in; **Not now** hides it until then. HQ never sees the
+  credentials: Claude stores them itself.
 - **New session** (Ctrl+N) lists recent folders. You can also browse to any folder on any drive.
   A new cell starts `claude` only when you send its first message, so empty cells cost nothing.
   - Esc (or the stop button) while Claude is still starting takes the prompt back into the
