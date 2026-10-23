@@ -280,7 +280,9 @@ impl Sessions {
             cmd.env(var, value);
         }
         if opts.api_key {
-            let key = crate::store::api_key(app).ok_or("No API key is saved in HQ's settings.")?;
+            let key = crate::store::api_key(app)
+                .map_err(|e| format!("Could not read the API key from the keychain: {e}"))?
+                .ok_or("No API key is saved in HQ's settings.")?;
             use_api_key(&mut cmd, &key);
         }
         // A prefix the user set themselves wins.

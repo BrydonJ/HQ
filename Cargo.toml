@@ -33,10 +33,16 @@ tauri-plugin-single-instance = "2"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# The API key lives in the login Keychain (src/secret.rs). Already in the tree through native-tls.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+security-framework-sys = "2"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
   "Win32_Security",
+  "Win32_Security_Credentials",
   "Win32_System_JobObjects",
   "Win32_System_Threading",
 ] }

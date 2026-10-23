@@ -180,9 +180,13 @@ the repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the contents of the updater 
 - **API credits** let a session carry on past your plan's usage limit on a Claude Console API
   key. Max and Team plans include monthly API credits, which pay only for a key from the
   Console organization linked in claude.ai's billing settings; any other key is billed as usual.
-  - Save the key under Settings > API key for API credits. It is kept in a file beside the
-    board (readable by your user only), never in the board, and the UI only ever sees
-    `sk-ant-…` and its last four characters.
+  - Save the key under Settings > API key for API credits. It is kept in the system keychain
+    (Credential Manager on Windows, the login Keychain on macOS), never on disk in the clear or
+    in the board, and the UI only ever sees `sk-ant-…` and its last four characters. A key that
+    v0.17.0 left in the `api-key` file beside the board moves to the keychain on the next start.
+  - HQ reads the key from the keychain only when a session switches to it, once per run. On
+    macOS the ad hoc signature changes with every update, so the first switch after an update
+    asks to let HQ use the Keychain item: click **Always Allow** (Deny just fails that start).
   - Nothing switches by itself. A session that hits the limit shows **Continue on API credits**
     on its limit card. Clicking it sends nothing: from your next message, that session's `claude`
     restarts with `ANTHROPIC_API_KEY` (and without `ANTHROPIC_AUTH_TOKEN` or cloud provider
