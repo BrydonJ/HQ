@@ -92,12 +92,20 @@ pub fn set_claude_path(path: Option<String>) {
     *CLAUDE_PATH.lock().unwrap() = path;
 }
 
-fn claude_program() -> String {
+/// The `claude` executable: HQ's setting, else `HQ_CLAUDE`, else `claude` on PATH, else where the
+/// native installer puts it. The last one lets HQ use a Claude Code it has just installed (see
+/// setup.rs) without a restart: HQ's own PATH predates the install.
+pub(crate) fn claude_program() -> String {
     CLAUDE_PATH
         .lock()
         .unwrap()
         .clone()
         .or_else(|| std::env::var("HQ_CLAUDE").ok().filter(|p| !p.is_empty()))
+        .or_else(|| {
+            let on_path = crate::setup::on_path(crate::setup::CLAUDE_EXE).is_some();
+            let native = crate::setup::native_install().filter(|p| p.is_file());
+            if on_path { None } else { native.map(|p| p.to_string_lossy().into_owned()) }
+        })
         .unwrap_or_else(|| "claude".into())
 }
 
