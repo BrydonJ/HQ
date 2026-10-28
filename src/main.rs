@@ -15,6 +15,7 @@ mod session;
 mod setup;
 mod store;
 mod update;
+mod usage;
 
 use std::path::Path;
 
@@ -265,6 +266,15 @@ async fn search_sessions(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Token usage and estimated cost per session since `since_ms` (all of it when absent), read from
+/// Claude's transcripts on disk. Nothing is asked of Claude, so looking costs no tokens.
+#[tauri::command]
+async fn usage_report(app: AppHandle, since_ms: Option<i64>) -> Result<Vec<usage::SessionUsage>, String> {
+    tauri::async_runtime::spawn_blocking(move || usage::report(&app.state::<store::Index>(), &app.state::<usage::UsageIndex>(), since_ms))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -710,6 +720,7 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Sessions::default())
         .manage(store::Index::default())
+        .manage(usage::UsageIndex::default())
         .manage(update::PendingUpdate::default())
         .manage(Profile(profile))
         // A first start can ask for a session too; the UI takes it once the board is back.
@@ -745,6 +756,7 @@ fn main() {
             list_hermes_sessions,
             list_sessions,
             search_sessions,
+            usage_report,
             probe_usage,
             update_claude,
             claude_status,
