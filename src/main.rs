@@ -12,6 +12,7 @@ mod icon;
 mod macos;
 mod secret;
 mod session;
+mod setup;
 mod store;
 mod update;
 
@@ -274,6 +275,30 @@ async fn probe_usage() -> Result<String, String> {
 #[tauri::command]
 async fn update_claude() -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(session::update_claude).await.map_err(|e| e.to_string())?
+}
+
+/// Whether Claude Code is installed and signed in, for the first-run setup card.
+#[tauri::command]
+async fn claude_status() -> Result<setup::ClaudeStatus, String> {
+    tauri::async_runtime::spawn_blocking(setup::status).await.map_err(|e| e.to_string())
+}
+
+/// Installs Claude Code with Anthropic's installer. Takes a minute or more.
+#[tauri::command]
+async fn install_claude() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(setup::install).await.map_err(|e| e.to_string())?
+}
+
+/// Opens a window running `claude auth login`, which signs in through the browser.
+#[tauri::command]
+async fn login_claude() -> Result<(), String> {
+    blocking(setup::login).await
+}
+
+/// Closes the sign-in window once Claude reports a login.
+#[tauri::command]
+fn finish_login() {
+    setup::finish_login();
 }
 
 #[tauri::command]
@@ -722,6 +747,10 @@ fn main() {
             search_sessions,
             probe_usage,
             update_claude,
+            claude_status,
+            install_claude,
+            login_claude,
+            finish_login,
             open_url,
             reveal_folder,
             open_in_vscode,
@@ -748,6 +777,7 @@ fn main() {
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
                 app.state::<Sessions>().kill_all();
+                setup::finish_login();
                 #[cfg(feature = "codex")]
                 codex::stop_helper();
                 // The frontend's last save may still be waiting for the writer thread.
