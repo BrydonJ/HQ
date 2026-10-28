@@ -165,14 +165,19 @@ pub fn set_api_key(app: &AppHandle, key: Option<String>) -> Result<(), String> {
 }
 
 /// Checks a pasted key. Only a Console API key draws on API credits: a subscription token from
-/// `claude setup-token` bills the plan, and as an API key it fails.
+/// `claude setup-token` bills the plan, and as an API key it fails. Console keys come as
+/// `sk-ant-api…` (workspace) and `sk-ant-usr…` (personal), with more kinds to come, so anything
+/// else under `sk-ant-` that is not a token or an Admin key passes.
 pub fn clean_api_key(raw: &str) -> Result<String, String> {
     let key = raw.trim().trim_matches('"').trim();
     if key.starts_with("sk-ant-oat") {
         return Err("That is a Claude subscription token (from `claude setup-token`), not an API key. Create one at platform.claude.com.".into());
     }
-    if !key.starts_with("sk-ant-api") {
-        return Err("That is not a Claude API key: Console keys start with sk-ant-api.".into());
+    if key.starts_with("sk-ant-admin") {
+        return Err("That is an Admin API key, which cannot send messages. Use a regular key from Settings > API keys.".into());
+    }
+    if !key.starts_with("sk-ant-") {
+        return Err("That is not a Claude API key: Console keys start with sk-ant-.".into());
     }
     if key.len() > 300 || !key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
         return Err("The key has characters an API key never has. Copy it again.".into());
@@ -1074,7 +1079,9 @@ mod tests {
     fn only_a_console_api_key_is_accepted() {
         let key = "sk-ant-api03-AbC_def-123";
         assert_eq!(clean_api_key(&format!("  \"{key}\"\n")).unwrap(), key);
+        assert_eq!(clean_api_key("sk-ant-usr01-AbC_def-123").unwrap(), "sk-ant-usr01-AbC_def-123");
         assert!(clean_api_key("sk-ant-oat01-abc").unwrap_err().contains("subscription token"));
+        assert!(clean_api_key("sk-ant-admin01-abc").unwrap_err().contains("Admin API key"));
         assert!(clean_api_key("sk-proj-abc").is_err());
         assert!(clean_api_key("sk-ant-api03-a b").is_err());
         assert!(clean_api_key(&format!("sk-ant-api03-{}", "a".repeat(300))).is_err());
