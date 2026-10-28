@@ -1465,12 +1465,204 @@ fn now_iso() -> String {
     format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z", rem / 3_600, rem % 3_600 / 60, rem % 60, now.subsec_millis())
 }
 
+// ---------- self-improvement ----------
+//
+// Hermes learns as it works: it saves notes to its memory and writes skills, during a turn and in
+// a background review after one, and a curator tidies the skills now and then. The review and the
+// curator say nothing over ACP, so HQ reads what changed from Hermes' own files: the skill ledger
+// (one JSON line per skill change, with who made it) and the two memory files.
+
+/// What `learnings` has seen so far. The first call only takes note of what is there.
+#[derive(Default)]
+struct Learnings {
+    started: bool,
+    home: PathBuf,
+    ledger_len: u64,
+    memory: HashMap<&'static str, Vec<String>>,
+}
+
+/// The memory files, by the target Hermes' `memory` tool names them with.
+const MEMORY_FILES: [(&str, &str); 2] = [("memory", "MEMORY.md"), ("user", "USER.md")];
+/// Separates entries in a memory file (tools/memory_tool_store.py's ENTRY_DELIMITER).
+const MEMORY_DELIMITER: &str = "\n§\n";
+
+/// Hermes' home folder, as `hermes` itself picks it: `HERMES_HOME` when it names a profile,
+/// otherwise the root (`HERMES_HOME`, or the platform default) and the profile `hermes profile use`
+/// made sticky there.
+fn hermes_home() -> Option<PathBuf> {
+    let env = std::env::var_os("HERMES_HOME").map(PathBuf::from).filter(|p| !p.as_os_str().is_empty());
+    let suffix = std::env::var("HERMES_DATA_DIR_SUFFIX").unwrap_or_default();
+    #[cfg(windows)]
+    let default = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").map(|h| Path::new(&h).join("AppData").join("Local")))
+        .map(|base| base.join(format!("hermes{suffix}")));
+    #[cfg(not(windows))]
+    let default = std::env::var_os("HOME").map(|h| Path::new(&h).join(format!(".hermes{suffix}")));
+    let active = |root: &Path| fs::read_to_string(root.join("active_profile")).ok();
+    pick_home(env, default?, active)
+}
+
+fn pick_home(env: Option<PathBuf>, default: PathBuf, active: impl Fn(&Path) -> Option<String>) -> Option<PathBuf> {
+    if let Some(env) = &env {
+        if env.parent().and_then(Path::file_name).is_some_and(|n| n == "profiles") {
+            return Some(env.clone());
+        }
+    }
+    let root = env.unwrap_or(default);
+    let profile = active(&root).map(|s| s.trim_start_matches('\u{feff}').trim().to_owned()).unwrap_or_default();
+    if !profile.is_empty() && profile != "default" {
+        let dir = root.join("profiles").join(&profile);
+        if dir.is_dir() {
+            return Some(dir);
+        }
+    }
+    Some(root)
+}
+
+/// The entries of a memory file, trimmed, without empty ones.
+fn memory_entries(text: &str) -> Vec<String> {
+    text.replace("\r\n", "\n").split(MEMORY_DELIMITER).map(str::trim).filter(|e| !e.is_empty()).map(str::to_owned).collect()
+}
+
+/// One skill ledger line as a learning, or None for lines HQ does not show (the user's own changes,
+/// rollback bookkeeping, a line that is not JSON).
+fn ledger_learning(line: &str) -> Option<Value> {
+    let entry: Value = serde_json::from_str(line).ok()?;
+    let actor = entry["actor"].as_str().unwrap_or("agent");
+    let action = entry["action"].as_str()?;
+    if actor == "user" || action == "pre-rollback" {
+        return None;
+    }
+    Some(json!({
+        "kind": "skill", "actor": actor, "action": action, "skill": entry["skill"],
+        "sessionId": entry["evidence"]["session_id"], "at": entry["ts"],
+    }))
+}
+
+/// Skill changes and memory entries added or removed since the last call, oldest first. HQ has one
+/// window, so one reader: the frontend polls this while a Hermes cell is open.
+pub fn learnings() -> Vec<Value> {
+    static SEEN: std::sync::LazyLock<std::sync::Mutex<Learnings>> = std::sync::LazyLock::new(Default::default);
+    let Some(home) = hermes_home() else { return Vec::new() };
+    let mut state = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    learnings_in(&mut state, home)
+}
+
+fn learnings_in(state: &mut Learnings, home: PathBuf) -> Vec<Value> {
+    if home != state.home {
+        // First call, or another profile became active: start over from what is there now.
+        *state = Learnings { home, ..Learnings::default() };
+    }
+    let first = !state.started;
+    state.started = true;
+    let mut out = Vec::new();
+
+    let ledger = state.home.join("skills").join(".curator_ledger.jsonl");
+    let len = fs::metadata(&ledger).map(|m| m.len()).unwrap_or(0);
+    if len < state.ledger_len {
+        state.ledger_len = len; // Hermes trimmed the ledger: carry on from its new end
+    } else if len > state.ledger_len {
+        if !first {
+            if let Ok(mut file) = File::open(&ledger) {
+                use std::io::{Seek, SeekFrom};
+                let mut text = String::new();
+                if file.seek(SeekFrom::Start(state.ledger_len)).is_ok() && file.take(len - state.ledger_len).read_to_string(&mut text).is_ok() {
+                    // A line still being written waits for the next call.
+                    let complete = text.rfind('\n').map_or(0, |i| i + 1);
+                    out.extend(text[..complete].lines().filter_map(ledger_learning));
+                    state.ledger_len += complete as u64;
+                }
+            }
+        } else {
+            state.ledger_len = len;
+        }
+    }
+
+    for (target, name) in MEMORY_FILES {
+        let Ok(text) = fs::read_to_string(state.home.join("memories").join(name)) else { continue };
+        let now = memory_entries(&text);
+        // A file that appears later starts empty: everything in it is new.
+        if let Some(before) = (!first).then(|| state.memory.get(target).cloned().unwrap_or_default()) {
+            let added: Vec<&String> = now.iter().filter(|e| !before.contains(e)).collect();
+            let removed: Vec<&String> = before.iter().filter(|e| !now.contains(e)).collect();
+            if !added.is_empty() || !removed.is_empty() {
+                out.push(json!({ "kind": "memory", "target": target, "added": added, "removed": removed }));
+            }
+        }
+        state.memory.insert(target, now);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn options(ids: &[(&str, &str)]) -> Vec<(String, String)> {
         ids.iter().map(|(i, k)| (i.to_string(), k.to_string())).collect()
+    }
+
+    #[test]
+    fn picks_hermes_home_like_hermes() {
+        let none = |_: &Path| None;
+        let root = PathBuf::from("/h/.hermes");
+        assert_eq!(pick_home(None, root.clone(), none), Some(root.clone()));
+        // HERMES_HOME naming a profile is used as it is; naming a root, its sticky profile still counts.
+        let profile = PathBuf::from("/h/.hermes/profiles/work");
+        assert_eq!(pick_home(Some(profile.clone()), root.clone(), |_: &Path| Some("other".into())), Some(profile));
+        let env_root = PathBuf::from("/srv/hermes");
+        assert_eq!(pick_home(Some(env_root.clone()), root.clone(), none), Some(env_root));
+        // A sticky profile whose folder is gone falls back to the root, as does "default".
+        assert_eq!(pick_home(None, root.clone(), |_: &Path| Some("gone\n".into())), Some(root.clone()));
+        assert_eq!(pick_home(None, root.clone(), |_: &Path| Some("default".into())), Some(root));
+    }
+
+    #[test]
+    fn reads_skill_ledger_lines() {
+        let line = r#"{"id":"a1","ts":"2026-10-28T10:00:00+00:00","actor":"curator","action":"create","skill":"deploy-notes","evidence":{"session_id":"s1"},"before":[],"after":[]}"#;
+        let l = ledger_learning(line).unwrap();
+        assert_eq!((l["kind"].as_str(), l["actor"].as_str(), l["action"].as_str(), l["skill"].as_str(), l["sessionId"].as_str()),
+            (Some("skill"), Some("curator"), Some("create"), Some("deploy-notes"), Some("s1")));
+        assert!(ledger_learning(&line.replace("\"curator\"", "\"user\"")).is_none());
+        assert!(ledger_learning(&line.replace("\"create\"", "\"pre-rollback\"")).is_none());
+        assert!(ledger_learning("not json").is_none());
+    }
+
+    #[test]
+    fn reports_skill_and_memory_changes_after_the_first_look() {
+        let home = std::env::temp_dir().join(format!("hq-learn-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(home.join("skills")).unwrap();
+        fs::create_dir_all(home.join("memories")).unwrap();
+        let ledger = home.join("skills").join(".curator_ledger.jsonl");
+        let memory = home.join("memories").join("MEMORY.md");
+        fs::write(&ledger, "{\"actor\":\"agent\",\"action\":\"create\",\"skill\":\"old\"}\n").unwrap();
+        fs::write(&memory, "Uses pnpm\n§\nTests run with just test").unwrap();
+        let mut state = Learnings::default();
+        assert!(learnings_in(&mut state, home.clone()).is_empty(), "what was there before is not news");
+
+        let mut f = OpenOptions::new().append(true).open(&ledger).unwrap();
+        f.write_all(b"{\"actor\":\"curator\",\"action\":\"patch\",\"skill\":\"new\"}\n{\"actor\":\"agent\",\"act").unwrap();
+        fs::write(&memory, "Uses pnpm\n§\nPrefers small PRs\n").unwrap();
+        let got = learnings_in(&mut state, home.clone());
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!((got[0]["skill"].as_str(), got[0]["action"].as_str()), (Some("new"), Some("patch")));
+        assert_eq!(got[1]["target"], "memory");
+        assert_eq!(got[1]["added"], json!(["Prefers small PRs"]));
+        assert_eq!(got[1]["removed"], json!(["Tests run with just test"]));
+
+        // The half-written line is read once it is complete.
+        f.write_all(b"ion\":\"delete\",\"skill\":\"new\"}\n").unwrap();
+        let got = learnings_in(&mut state, home.clone());
+        assert_eq!((got.len(), got[0]["action"].as_str()), (1, Some("delete")));
+        assert!(learnings_in(&mut state, home.clone()).is_empty());
+
+        // USER.md did not exist at the first look.
+        fs::write(home.join("memories").join("USER.md"), "Name: Sam").unwrap();
+        let got = learnings_in(&mut state, home.clone());
+        assert_eq!((got.len(), &got[0]["target"], &got[0]["added"]), (1, &json!("user"), &json!(["Name: Sam"])));
+        let _ = fs::remove_dir_all(&home);
     }
 
     #[test]

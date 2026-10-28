@@ -343,6 +343,31 @@ the repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the contents of the updater 
 - Permission mode selector per cell: ask before edits, edit automatically, plan, auto, bypass.
   If Claude rejects a switch, the cell shows the reason and keeps the old mode. For example,
   bypass can't be turned on mid-session, and auto isn't available on every model.
+- **AFK:** going away for a while? The coffee button in the top bar tells every session you are
+  AFK for 30 minutes to 8 hours, until a time you pick, or until you are back. Sessions then carry
+  on with what they can do without you, instead of stopping at the first question.
+  - A session that is working is told at once, mid-turn: Claude reads it at its next tool call
+    and Codex is steered with it. Hermes can only read a message between turns, so it reads it
+    when its current turn ends.
+  - Questions are answered with "go with the option you would recommend and note the
+    assumption". Plans are held for you. Any other permission request is declined as
+    **deferred, not refused**: the agent is told not to look for another way to do the same thing,
+    to note it as pending and to carry on with the rest. Each card is left for a minute first,
+    in case you are still there.
+  - Only Claude reads the reason given with a declined request. Codex and Hermes learn from the
+    AFK message that a decline now means "later"; HQ sends it before their first decline.
+  - When a turn ends, the session is asked to carry on, or to list what is waiting for you if
+    nothing is left. A nudge answered without any tool call ends the nudging, a held plan stops
+    it, and it stops after 5 nudges per AFK period.
+  - A session that hits the plan's usage limit carries on by itself once usage is back.
+  - Each thing HQ did shows as an "AFK: …" line in the chat. Once you are back (**I'm back**, or
+    the time runs out), each session gets a **While you were away** card listing what was
+    deferred, answered and held. Tell the session to go ahead with the deferred steps if you agree
+    with them.
+  - The coffee button in a cell's header sets AFK for that session only, or **Never AFK** keeps
+    that session waiting for you even while the rest of HQ is AFK.
+  - AFK, and what was done while it lasted, is kept in the board, so a restart (or an update)
+    loses neither.
 - Keys:
   - Esc: stop the focused session. If Claude has not stopped 10 seconds later, the chat offers
     **Force stop**, which ends the process; the session resumes when you next send a message.
@@ -358,7 +383,7 @@ the repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the contents of the updater 
   another profile):
   - It stores each cell's folder, session, mode, model, effort, name, view (tool calls shown
     or hidden) and whether it is collapsed, plus the VS Code workspace picked for each
-    folder.
+    folder, and AFK (HQ's and each session's own) with what it did so far.
   - On restart, each cell shows its history from Claude's own transcript, newest part first
     (up to 1500 messages or about 4 MB). **Load earlier** at the top fetches more. Images in
     restored history are left out ("[image omitted]"). Collapsed cells draw their history
@@ -427,6 +452,19 @@ left it. A Hermes cell has a **Hermes** tag in its header.
 - It is the same Hermes agent as the CLI: its memory, skills, background self-improvement
   review, context compression and session store all work as configured in Hermes' own
   `config.yaml`. HQ changes none of Hermes' settings.
+- **What Hermes learns** shows in the chat, at every detail level: skills it creates, patches,
+  archives or deletes, and entries added to or removed from its memory and user profile.
+  - Changes made by Hermes' background review or its curator are titled **Self-improvement
+    review**. The rest are titled **Hermes learned**.
+  - Hermes reports none of this over ACP, so HQ reads it from Hermes' own files every 10 seconds
+    while a Hermes cell is open: `skills/.curator_ledger.jsonl` and `memories/MEMORY.md` and
+    `USER.md`, in Hermes' home folder. That folder is `HERMES_HOME`, or `%LOCALAPPDATA%\hermes` on
+    Windows and `~/.hermes` elsewhere, with the profile `hermes profile use` picked.
+  - Each change is shown in the cell whose session it names, else in the only Hermes cell
+    working, else in the one whose turn ended last. With several Hermes cells, a memory change
+    can land in the wrong one: memory files do not say which session wrote them.
+  - Your own edits (`hermes skills …`) are left out. Changes made while HQ was closed are not
+    shown, and the lines are not kept across a restart.
 - Approvals show as the usual permission cards. **Yes, and don't ask again** allows that kind
   of action for the rest of the session. When Hermes' own `approvals.timeout` runs out, Hermes
   denies the request and the card goes away.
@@ -467,7 +505,8 @@ src/codex.rs     Codex cells: runs `codex app-server` and translates it to and f
                  lines the UI speaks; a shared helper reads history, sessions and models; runs
                  `codex update`. Built with the `codex` Cargo feature (on by default)
 src/hermes.rs    Hermes cells: runs `hermes acp` and translates ACP to and from the stream-json
-                 lines the UI speaks; HQ's copy of each Hermes conversation. Built with the
+                 lines the UI speaks; HQ's copy of each Hermes conversation; reads what Hermes
+                 learns from its skill ledger and memory files. Built with the
                  `hermes` Cargo feature (on by default; `--no-default-features` leaves it out)
 src/update.rs    self-update: checks and downloads signed releases; installs when told to
 src/main.rs      Tauri commands, profiles, single-instance lock
@@ -477,7 +516,10 @@ ui/app.js        cells, protocol handling, prompts, menus, sessions list, grid l
                  context indicator, Remote Control, settings
 ui/codex.js      what Codex cells do differently: their model list, commands, defaults, modes,
                  keeping Codex up to date
-ui/hermes.js     what Hermes cells do differently: their model list, commands, defaults, modes
+ui/hermes.js     what Hermes cells do differently: their model list, commands, defaults, modes,
+                 and what Hermes learns
+ui/afk.js        AFK mode: tells sessions you are away, answers or defers their prompts, nudges
+                 them on and lists what it did once you are back
 ui/render.js     markdown (raw HTML escaped, http(s) links only; incremental while streaming),
                  tool rows, line diffs, images, project colors
 ui/style.css     slate and pastel look, and a light theme

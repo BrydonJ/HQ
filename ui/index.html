@@ -12,6 +12,7 @@
   <script src="codex.js" defer></script>
   <script src="hermes.js" defer></script>
   <script src="loaders.js" defer></script>
+  <script src="afk.js" defer></script>
   <script src="app.js" defer></script>
 </head>
 <body>
@@ -23,6 +24,7 @@
     <button id="update" class="update-pill hidden">
       <span class="codicon codicon-cloud-download"></span><span class="update-text"></span>
     </button>
+    <button id="afk" class="afk-pill"><span class="codicon codicon-coffee"></span><span class="afk-text">AFK</span></button>
     <button id="usage" class="usage empty" title="Plan usage">
       <span class="codicon codicon-dashboard"></span><span class="usage-text">&hellip;</span>
       <span class="usage-week" aria-hidden="true"><span></span></span>
@@ -118,6 +120,7 @@
         <span class="cell-tasks hidden"></span>
         <span class="cell-path"></span>
         <span class="bg-tasks hidden"><span class="codicon codicon-loading codicon-modifier-spin"></span><span class="bg-count"></span></span>
+        <button class="icon-btn act-afk"><span class="codicon codicon-coffee"></span></button>
         <button class="icon-btn act-handoff" title="Handoff: Claude writes a Markdown summary another session can continue from"><span class="codicon codicon-note"></span></button>
         <button class="icon-btn act-detail"><span class="codicon codicon-eye-closed"></span></button>
         <button class="icon-btn act-progress"><span class="codicon codicon-checklist"></span></button>

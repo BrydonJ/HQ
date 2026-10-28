@@ -179,6 +179,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
   background: var(--input-bg); border: 1px solid var(--accent); border-radius: 3px; outline: none;
 }
 .act-detail.on, .act-progress.on, .act-waiting.on, .act-tasklist.on { color: var(--link); }
+.act-afk.on { color: var(--waiting); }
+.act-afk.never { color: var(--fg-faint); text-decoration: line-through; }
 /* The task list at a glance ("3/7"); redrawn only when the list changes. */
 .cell-tasks {
   flex: 0 1 auto; min-width: 0; max-width: 42%; color: var(--link); font-size: 11px; white-space: nowrap;
@@ -1109,3 +1111,50 @@ input[type=color]::-webkit-color-swatch { border: 0; border-radius: 2px; }
 .hover-buttons .cell-head > .icon-btn { opacity: 0; transition: opacity 0.12s; }
 .hover-buttons .cell-head:hover > .icon-btn, .hover-buttons .cell-head:focus-within > .icon-btn,
 .hover-buttons .cell-head > .act-close.confirm { opacity: 1; }
+
+/* ---------- AFK (afk.js) ---------- */
+.afk-pill {
+  display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px;
+  border: 1px solid transparent; border-radius: 3px; cursor: pointer; font-size: 12px; white-space: nowrap;
+  background: var(--input-bg); color: var(--fg-muted);
+}
+.afk-pill .codicon { font-size: 13px; }
+.afk-pill:hover { color: var(--fg); }
+.afk-pill.some .codicon { color: var(--waiting); }
+.afk-pill.on {
+  border-color: var(--waiting); color: var(--fg-strong); font-weight: 600;
+  background: color-mix(in srgb, var(--waiting) 18%, transparent);
+}
+.afk-pill.on .codicon { color: var(--waiting); }
+.menu-item.afk-at { align-items: center; cursor: default; }
+.afk-time-input { flex: none; height: 22px; padding: 0 4px; border: 1px solid var(--border-strong); border-radius: 3px; background: var(--input-bg); color: var(--fg); }
+.item.afk-digest {
+  padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--waiting) 45%, var(--border)); border-radius: 6px;
+  background: color-mix(in srgb, var(--waiting) 7%, var(--bg));
+}
+.item.afk-digest::before { display: none; }
+.afk-head { display: flex; align-items: center; gap: 6px; color: var(--fg-strong); font-weight: 600; }
+.afk-head .codicon { color: var(--waiting); }
+.afk-summary { color: var(--fg-muted); font-size: 12px; margin: 2px 0 6px; }
+.afk-row { display: flex; align-items: baseline; gap: 6px; font-size: 12.5px; min-width: 0; }
+.afk-row .codicon { flex: none; font-size: 12px; color: var(--fg-muted); position: relative; top: 1px; }
+.afk-row.afk-permission .codicon { color: var(--waiting); }
+.afk-kind { flex: none; color: var(--fg-muted); }
+.afk-text { flex: 1; min-width: 0; color: var(--fg); overflow-wrap: anywhere; }
+.afk-time { flex: none; color: var(--fg-faint); font-size: 11px; }
+.afk-hint { color: var(--fg-faint); font-size: 11.5px; margin-top: 6px; }
+
+/* ---------- Hermes learnings (hermes.js) ---------- */
+.item.learn::before { display: none; }
+.learn > summary { display: flex; align-items: baseline; gap: 6px; cursor: pointer; list-style: none; font-size: 12.5px; }
+.learn > summary::-webkit-details-marker { display: none; }
+.learn > summary > .codicon { font-size: 12px; color: var(--waiting); position: relative; top: 1px; }
+.learn-title { color: var(--fg); }
+.learn-count { color: var(--fg-faint); font-size: 11.5px; }
+.learn-body { margin: 4px 0 0 18px; }
+.learn-row { display: flex; align-items: baseline; gap: 6px; font-size: 12.5px; color: var(--fg-muted); min-width: 0; }
+.learn-row .codicon { flex: none; font-size: 11px; position: relative; top: 1px; color: var(--link); }
+.learn-row.removed .codicon, .learn-row.removed .learn-text { color: var(--fg-faint); }
+.learn-row.removed .learn-text { text-decoration: line-through; }
+.learn-label { flex: none; color: var(--fg-faint); }
+.learn-text { flex: 1; min-width: 0; color: var(--fg); overflow-wrap: anywhere; }
