@@ -21,6 +21,15 @@ on:
         description: Commit SHA to build, the one release.ps1 will release (defaults to the branch the run starts from)
         required: false
         type: string
+  # The "Release HQ" workflow runs this build as one of its jobs.
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      ref:
+        required: false
+        type: string
 
 permissions:
   contents: read

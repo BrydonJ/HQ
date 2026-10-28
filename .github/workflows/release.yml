@@ -1,0 +1,176 @@
+name: Release HQ
+
+# Does what release.ps1 does, on GitHub: builds the signed Windows installer and the Mac app, then
+# commits the version, tags it, pushes, and publishes the release that installed copies update
+# to. Run it from main (Actions > Release HQ > Run workflow). Nothing is pushed or published
+# unless both builds succeed.
+#
+# Repository secrets (Settings > Secrets and variables > Actions):
+#   TAURI_SIGNING_PRIVATE_KEY           the contents of the updater key
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  its password (leave empty if it has none)
+#   RELEASES_TOKEN                      a fine-grained token with Contents read and write on
+#                                       BrydonJ/HQ-releases (GITHUB_TOKEN can only write to this repo)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release (for example 0.18.0)
+        required: true
+        type: string
+      notes:
+        description: Release notes in Markdown (defaults to the commit subjects since the last tag)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  RELEASES_REPO: BrydonJ/HQ-releases
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      # The checks release.ps1 makes, before anything is built.
+      - name: Check the version, the branch and the secrets
+        env:
+          VERSION: ${{ inputs.version }}
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Version must look like 1.2.3"; exit 1; }
+          [[ "$GITHUB_REF" == refs/heads/main ]] || { echo "Run it from main"; exit 1; }
+          ! git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null || { echo "Tag v$VERSION already exists"; exit 1; }
+          [[ -n "$KEY" ]] || { echo "Secret TAURI_SIGNING_PRIVATE_KEY is not set"; exit 1; }
+          [[ -n "$TOKEN" ]] || { echo "Secret RELEASES_TOKEN is not set"; exit 1; }
+          endpoint="https://github.com/$RELEASES_REPO/releases/latest/download/latest.json"
+          grep -qF "$endpoint" tauri.conf.json || { echo "tauri.conf.json does not use $endpoint"; exit 1; }
+
+  mac:
+    needs: check
+    uses: ./.github/workflows/release-mac.yml
+    with:
+      version: ${{ inputs.version }}
+      ref: ${{ needs.check.outputs.sha }}
+    secrets: inherit
+
+  windows:
+    needs: check
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.check.outputs.sha }}
+
+      - name: Set the version
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          perl -pi -e 'if (!$done && s/^version = "[^"]+"/version = "$ENV{VERSION}"/) { $done = 1 }' Cargo.toml
+          perl -pi -e 'if (!$done && s/"version": "[^"]+"/"version": "$ENV{VERSION}"/) { $done = 1 }' tauri.conf.json
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: Build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npx --yes @tauri-apps/cli@2.12.3 build
+
+      - name: Gather the files
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          mkdir out
+          cp target/release/bundle/nsis/HQ_"$VERSION"_x64-setup.exe target/release/bundle/nsis/HQ_"$VERSION"_x64-setup.exe.sig out/
+          ls -l out
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: hq-windows
+          path: out/*
+          if-no-files-found: error
+
+  publish:
+    needs: [check, mac, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.check.outputs.sha }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: hq-windows
+          path: dist
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: hq-macos
+          path: dist
+
+      - name: Write the notes and latest.json
+        env:
+          VERSION: ${{ inputs.version }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          if [[ -z "${NOTES//[[:space:]]/}" ]]; then
+            previous=$(git tag --sort=-creatordate --list 'v*' | head -n1)
+            NOTES=$(git log ${previous:+"$previous..HEAD"} --no-merges --pretty='- %s')
+          fi
+          printf '%s\n' "$NOTES" > notes.md
+          base="https://github.com/$RELEASES_REPO/releases/download/v$VERSION"
+          win="HQ_${VERSION}_x64-setup.exe"
+          # Both Mac architectures update from the one universal tarball.
+          jq -n --arg version "$VERSION" --rawfile notes notes.md --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg winsig "$(tr -d '\r\n' < "dist/$win.sig")" --arg winurl "$base/$win" \
+            --arg macsig "$(tr -d '\r\n' < dist/HQ.app.tar.gz.sig)" --arg macurl "$base/HQ.app.tar.gz" \
+            '{version: $version, notes: ($notes | rtrimstr("\n")), pub_date: $date, platforms: {
+               "windows-x86_64": {signature: $winsig, url: $winurl},
+               "darwin-aarch64": {signature: $macsig, url: $macurl},
+               "darwin-x86_64": {signature: $macsig, url: $macurl}}}' > dist/latest.json
+          cat notes.md dist/latest.json
+
+      - name: Commit, tag and push the version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          perl -pi -e 'if (!$done && s/^version = "[^"]+"/version = "$ENV{VERSION}"/) { $done = 1 }' Cargo.toml
+          perl -pi -e 'if (!$done && s/"version": "[^"]+"/"version": "$ENV{VERSION}"/) { $done = 1 }' tauri.conf.json
+          perl -0pi -e 's/(name = "hq"\nversion = ")[^"]+/${1}$ENV{VERSION}/' Cargo.lock
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -q -am "Release v$VERSION"
+          git tag -a "v$VERSION" -m "HQ v$VERSION"
+          git push --atomic origin HEAD:main "v$VERSION"
+
+      - name: Publish the release
+        env:
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          gh release create "v$VERSION" --repo "$RELEASES_REPO" --title "HQ v$VERSION" --notes-file notes.md \
+            dist/HQ_"$VERSION"_x64-setup.exe dist/HQ_"$VERSION"_x64-setup.exe.sig \
+            dist/HQ_"$VERSION"_universal.dmg dist/HQ.app.tar.gz dist/HQ.app.tar.gz.sig dist/latest.json
+          echo "Published HQ v$VERSION to https://github.com/$RELEASES_REPO/releases/tag/v$VERSION"

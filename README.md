@@ -91,6 +91,13 @@ The script does these steps:
 4. Commits, tags and pushes.
 5. Publishes the installer, its signature and `latest.json` as a GitHub release.
 
+Or release from GitHub without a Windows PC: **Actions > Release HQ > Run workflow** on `main`,
+with the version and, optionally, release notes in Markdown (they default to the commit subjects
+since the last tag, as above). It builds Windows and the Mac app, and only once both succeed
+commits the version, tags, pushes and publishes the same files and `latest.json` as
+`release.ps1 -MacArtifacts`. Besides the two signing-key secrets below it needs
+`RELEASES_TOKEN`, a fine-grained token with Contents read and write on `HQ-releases`.
+
 Installed copies read `latest.json` from the newest release at the endpoint in
 `tauri.conf.json`. **Back up the private key.** Without it, no new release can be signed, and
 every installed copy must be reinstalled by hand.
@@ -494,6 +501,7 @@ ui/render.js     markdown (raw HTML escaped, http(s) links only; incremental whi
                  tool rows, line diffs, images, project colors
 ui/style.css     slate and pastel look, and a light theme
 release.ps1      builds, signs and publishes a release
+.github/workflows/release.yml  the same release, built and published on GitHub
 dev.cmd          rebuilds and restarts the dev copy
 ```
 
