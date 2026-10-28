@@ -17,8 +17,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::store;
 
-const HOUR_MS: i64 = 3_600_000;
-
 /// What the usage dashboard has read, kept in managed state. An entry holds only while the
 /// file's length and modified time are unchanged, so a second look costs one stat per file.
 #[derive(Default)]
@@ -39,13 +37,13 @@ struct FileUsage {
     buckets: Vec<Bucket>,
 }
 
-/// One session's usage in one hour on one model, split between the main thread and subagents.
-/// Hours rather than days, so the UI can sort them into days in the user's own time zone.
+/// Usage at one request timestamp on one model, split between the main thread and subagents.
+/// Keep timestamps intact: even UTC hours can straddle midnight in the user's time zone.
 #[derive(Serialize, Clone, Default, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Bucket {
-    /// Start of the hour, in ms since the Unix epoch (UTC).
-    hour: i64,
+    /// Request time, in ms since the Unix epoch (UTC).
+    at: i64,
     model: String,
     /// Spent by subagents (Task/Agent tool calls) rather than the main conversation.
     sub: bool,
@@ -85,7 +83,7 @@ pub fn report(sessions: &store::Index, index: &UsageIndex, since_ms: Option<i64>
             continue;
         }
         let usage = index.usage(file);
-        let rows: Vec<Bucket> = usage.buckets.into_iter().filter(|b| b.hour + HOUR_MS > since).collect();
+        let rows = usage.rows_since(since);
         let entry = by_session.entry(file.session_id.clone()).or_insert_with(|| SessionUsage {
             session_id: file.session_id.clone(),
             cwd: None,
@@ -117,6 +115,12 @@ struct UsageFile {
     sub: bool,
     len: u64,
     modified: SystemTime,
+}
+
+impl FileUsage {
+    fn rows_since(&self, since: i64) -> Vec<Bucket> {
+        self.buckets.iter().filter(|b| b.at >= since).cloned().collect()
+    }
 }
 
 impl UsageIndex {
@@ -258,8 +262,8 @@ fn read_usage(path: &Path, sub: bool) -> io::Result<FileUsage> {
         }
         let Some(at) = line.timestamp.as_deref().and_then(parse_time_ms) else { continue };
         let request = Request::from(&usage);
-        let bucket = buckets.entry((at.div_euclid(HOUR_MS), model.clone())).or_insert_with(|| Bucket {
-            hour: at.div_euclid(HOUR_MS) * HOUR_MS,
+        let bucket = buckets.entry((at, model.clone())).or_insert_with(|| Bucket {
+            at,
             model: model.clone(),
             sub,
             cost: Some(0.0),
@@ -276,7 +280,7 @@ fn read_usage(path: &Path, sub: bool) -> io::Result<FileUsage> {
         };
     }
     let mut buckets: Vec<Bucket> = buckets.into_values().collect();
-    buckets.sort_by(|a, b| a.hour.cmp(&b.hour).then_with(|| a.model.cmp(&b.model)));
+    buckets.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.model.cmp(&b.model)));
     Ok(FileUsage { cwd, buckets })
 }
 
@@ -467,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn counts_each_reply_once_and_buckets_by_hour() {
+    fn counts_each_reply_once_and_preserves_timestamps() {
         let u = r#"{"input_tokens":10,"output_tokens":20,"cache_creation_input_tokens":0,"cache_read_input_tokens":1000}"#;
         let lines = [
             r#"{"type":"user","cwd":"/work/app","message":{"role":"user","content":"go"}}"#.to_owned(),
@@ -487,13 +491,41 @@ mod tests {
         assert_eq!(usage.cwd.as_deref(), Some("/work/app"));
         let hour = parse_time_ms("2026-10-28T14:00:00Z").unwrap();
         let summary: Vec<(i64, &str, u32, u64, u64)> =
-            usage.buckets.iter().map(|b| (b.hour - hour, b.model.as_str(), b.requests, b.output, b.cache_read)).collect();
+            usage.buckets.iter().map(|b| (b.at - hour, b.model.as_str(), b.requests, b.output, b.cache_read)).collect();
         assert_eq!(
             summary,
-            vec![(0, "claude-opus-5-5", 2, 40, 2000), (HOUR_MS, "claude-haiku-5-5", 1, 20, 1000), (HOUR_MS, "claude-opus-5-5", 1, 20, 1000)]
+            vec![(300_000, "claude-opus-5-5", 1, 20, 1000), (3_540_000, "claude-opus-5-5", 1, 20, 1000),
+                 (3_600_000, "claude-opus-5-5", 1, 20, 1000), (4_200_000, "claude-haiku-5-5", 1, 20, 1000)]
         );
         let first = &usage.buckets[0];
-        assert!((first.cost.unwrap() - (20.0 * 4.0 + 40.0 * 20.0 + 2000.0 * 0.2) / 1_000_000.0).abs() < 1e-12);
+        assert!((first.cost.unwrap() - (10.0 * 4.0 + 20.0 * 20.0 + 1000.0 * 0.2) / 1_000_000.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn cached_usage_filters_exactly_at_fractional_offset_midnight() {
+        let path = std::env::temp_dir().join(format!("hq-usage-range-{}.jsonl", std::process::id()));
+        let u = r#"{"input_tokens":10,"output_tokens":20}"#;
+        let lines = [
+            assistant("before", "2026-10-27T18:29:59.999Z", "claude-opus-5-5", u),
+            assistant("boundary", "2026-10-27T18:30:00.000Z", "claude-opus-5-5", u),
+            assistant("after", "2026-10-27T18:40:00.000Z", "claude-opus-5-5", u),
+        ];
+        fs::write(&path, lines.join("\n")).unwrap();
+        let meta = fs::metadata(&path).unwrap();
+        let file = UsageFile { path: path.clone(), session_id: "session".into(), sub: true,
+            len: meta.len(), modified: meta.modified().unwrap() };
+        let index = UsageIndex::default();
+        assert_eq!(index.usage(&file).rows_since(i64::MIN).len(), 3);
+        // A warm cache must support changing ranges without retaining the previous day's usage.
+        let since = parse_time_ms("2026-10-28T00:00:00+05:30").unwrap();
+        let rows = index.usage(&file).rows_since(since);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].at, since);
+        assert!(rows.iter().all(|b| b.sub));
+        assert_eq!(rows.iter().map(|b| b.output).sum::<u64>(), 40);
+        assert_eq!(index.usage(&file).rows_since(i64::MIN).len(), 3);
+        assert!(index.usage(&file).rows_since(since + 3_600_000).is_empty());
+        let _ = fs::remove_file(path);
     }
 
     #[test]

@@ -4985,7 +4985,8 @@ function tokenChart(sessions, byCost) {
   if (!rows.length) return null;
   const now = new Date();
   // All time starts at the first usage anywhere, so picking a folder keeps the same bars.
-  const first = new Date(tokensSince(tokens.range) ?? Math.min(...(tokens.sessions || sessions).flatMap(s => s.rows.map(r => r.hour))));
+  const firstAt = (tokens.sessions || sessions).reduce((min, s) => s.rows.reduce((at, r) => Math.min(at, r.at), min), Infinity);
+  const first = new Date(tokensSince(tokens.range) ?? firstAt);
   let unit = tokens.range === 'today' ? 'hour' : 'day';
   if (unit === 'day' && now - first > 62 * 24 * HOUR_MS) unit = 'month';
   const start = d => {
@@ -5009,7 +5010,7 @@ function tokenChart(sessions, byCost) {
     bars.push({ at: d, cost: 0, tokens: 0 });
   }
   for (const r of rows) {
-    const bar = bars[index.get(start(r.hour).getTime())];
+    const bar = bars[index.get(start(r.at).getTime())];
     if (!bar) continue;
     bar.cost += r.cost || 0;
     bar.tokens += r.input + r.output + r.cacheWrite + r.cacheRead;
@@ -5789,7 +5790,7 @@ async function installClaude() {
   app.claudeUpdateAt = Date.now();
   saveState();
   const status = await invoke('claude_status').catch(() => null);
-  if (status && status.loggedIn !== false) return finishSetup(); // signed in before (a reinstall), or it cannot tell
+  if (status && status.loggedIn === true) return finishSetup(); // a reinstall may already be signed in
   signInClaude();
 }
 
@@ -5818,7 +5819,10 @@ async function pollSignIn() {
   try {
     const status = await invoke('claude_status').catch(() => null);
     if (setup.step !== 'waiting') return;
-    if (status && status.loggedIn !== false) return finishSetup();
+    if (status && status.loggedIn === true) return finishSetup();
+    setSetupStatus(status && status.loggedIn === false
+      ? 'Waiting for you to sign in…'
+      : 'Could not confirm sign-in yet; HQ will keep checking.');
     if (Date.now() - setup.since > SETUP_GIVE_UP_MS) {
       clearInterval(setup.poll);
       showSetup('login', 'Still not signed in. Click Sign in to try again.');

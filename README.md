@@ -56,7 +56,9 @@ The dev copy runs next to the installed HQ. A debug build also:
   DevTools MCP server. Right-click > Inspect works too.
 
 `cargo test` runs the backend's unit tests (stream filtering, batching, transcript reading,
-session search, token usage and prices). The UI has none; check it in the dev copy. With `codex` on PATH,
+session search, token usage and prices). `node --test tests/*.test.cjs` runs the setup and usage-chart
+regressions; both suites and a build run on Windows and macOS for each PR. On Windows, use the
+Build Tools environment selected by `build.cmd` for Cargo commands. With `codex` on PATH,
 `cargo test codex::live -- --ignored --test-threads=1` drives a real Codex through HQ's bridge
 against a fake model server, so it needs no account.
 
