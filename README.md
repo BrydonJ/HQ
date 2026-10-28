@@ -187,6 +187,9 @@ the repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the contents of the updater 
     HQ asks a running session when there is one. Otherwise it starts a short-lived `claude`
     that skips MCP servers and hooks and saves no transcript.
   - It refreshes after each finished turn, and every 5 minutes (15 when no session is running).
+  - Claude chats that hit the plan's usage limit continue automatically when usage returns.
+    Uncheck **Continue when usage is back** on that chat's usage error to keep it stopped;
+    the choice lasts only while that chat is open and does not affect other chats.
 - **Token usage** (the graph button in the top bar, or Ctrl+U) shows where the tokens went:
   - Today, the last 7 or 30 days, or all time: the total, a bar per hour, day or month, and the
     split between input, output, cache writes, cache reads and subagents.

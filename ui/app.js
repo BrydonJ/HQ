@@ -272,6 +272,7 @@ class Cell {
     this.wrapUp = null;        // the plan's limit was hit mid-turn and Claude is finishing on the wrap-up allowance: { credits }
     this.limitResetAt = 0;     // when the limit that refused the last request resets (ms), from its rate_limit_event
     this.limitResume = null;   // { resetsAt }: carry on by itself once the plan's usage is back (checkLimitResumes)
+    this.limitAutoContinue = true; // only this open chat; uncheck on its usage error to keep it stopped
     this.cost = { usd: 0, tokens: 0, procUsd: 0, procTokens: 0, apiUsd: 0 }; // this HQ run's spend; proc* = last total of the current process; apiUsd = on HQ's API key
     this.apiMode = !!api && this.backend === 'claude'; // the user switched this session to HQ's API key until the plan's usage is back
     this.procOnApi = false;    // the running claude was started with HQ's API key
@@ -2125,13 +2126,22 @@ class Cell {
     api.classList.toggle('hidden', replay || this.backend !== 'claude' || this.apiMode || this.procOnApi);
     card.querySelector('.limit-title').textContent = title || 'Usage limit reached';
     card.querySelector('.limit-reset').textContent = reset;
-    if (!replay && this.backend === 'claude') {
+    if (!replay && this.backend === 'claude' && !this.apiMode && !this.procOnApi && this.apiSource !== 'ANTHROPIC_API_KEY') {
       if (!card.querySelector('.limit-resume')) {
-        card.querySelector('.limit-usage').before(h('button', { class: 'btn limit-resume', onclick: () => this.setLimitResume(!this.limitResume) }));
+        card.querySelector('.limit-main').append(h('label', { class: 'limit-resume' },
+          h('input', { type: 'checkbox', onchange: e => this.setLimitAutoContinue(e.target.checked) }),
+          h('span', {}, 'Continue when usage is back', h('span', { class: 'limit-resume-at' }))));
       }
-      this.drawLimitResume();
+      card.querySelector('.limit-resume').classList.remove('hidden');
+      this.setLimitResume(this.limitAutoContinue);
       scheduleUsageRefresh(this);
     }
+  }
+
+  /** A user's opt-out lasts for this open chat, across further usage errors; it is never saved. */
+  setLimitAutoContinue(on) {
+    this.limitAutoContinue = on;
+    this.setLimitResume(on);
   }
 
   /** Arms or disarms carrying on by itself once the plan's usage is back (checkLimitResumes). */
@@ -2145,18 +2155,19 @@ class Cell {
 
   drawLimitResume() {
     const at = this.limitResume && this.limitResume.resetsAt;
-    for (const btn of this.msgs.querySelectorAll('.limit-resume')) {
-      btn.classList.toggle('on', !!this.limitResume);
-      btn.textContent = !this.limitResume ? 'Continue when usage is back'
-        : at > Date.now() ? `Continuing at ${new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} · Cancel`
-          : 'Continuing when usage is back · Cancel';
-      btn.title = this.limitResume ? 'Cancel: stay stopped' : 'Send "continue" by itself once the usage limit resets';
+    for (const label of this.msgs.querySelectorAll('.limit-resume')) {
+      label.querySelector('input').checked = this.limitAutoContinue;
+      label.querySelector('.limit-resume-at').textContent = at > Date.now()
+        ? `Continuing at ${new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : '';
+      label.title = this.limitAutoContinue ? 'Uncheck to keep this chat stopped when usage returns' : 'Check to continue this chat when usage returns';
     }
   }
 
   retireLimitCard(card) {
     delete card.dataset.live;
     card.querySelector('.limit-api').classList.add('hidden');
+    const resume = card.querySelector('.limit-resume');
+    if (resume) resume.classList.add('hidden');
   }
 
   /** Text followed by a tool call is Claude narrating its work, not its answer. */
@@ -4732,7 +4743,7 @@ async function checkLimitResumes() {
   if (usage.fetchedAt < latest && now - latest < LIMIT_RESUME_BLIND_MS) return;
   const still = usage.fetchedAt < latest ? 0 : usageResetAt();
   for (const cell of due) {
-    if (!cell.limitResume || !app.cells.includes(cell) || cell.closing) continue;
+    if (!cell.limitResume || !app.cells.includes(cell) || cell.closing || Date.now() < cell.limitResume.resetsAt) continue;
     if (still) { cell.limitResume.resetsAt = still; cell.drawLimitResume(); continue; }
     if (cell.status === 'running' || cell.pending.size || cell.spawning) continue; // busy; the next tick sends it
     cell.setLimitResume(false); // before submit, which can wait: an overlapping tick must not send it twice

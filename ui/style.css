@@ -1098,8 +1098,11 @@ input[type=color]::-webkit-color-swatch { border: 0; border-radius: 2px; }
 .limit-reset { color: var(--fg-muted); font-size: 12px; }
 .limit-reset:empty { display: none; }
 .limit-count { color: var(--fg-faint); font-size: 11px; }
-.limit-usage, .limit-resume, .limit-api { flex: none; }
-.limit-resume.on { color: var(--link); border-color: var(--link); }
+.limit-usage, .limit-api { flex: none; }
+.limit-resume { display: flex; align-items: flex-start; gap: 6px; margin-top: 6px; color: var(--fg); font-size: 12px; cursor: pointer; }
+.limit-resume input { flex: none; margin: 2px 0 0; accent-color: var(--link); }
+.limit-resume-at { display: block; color: var(--fg-muted); font-size: 11px; }
+.limit-resume-at:empty { display: none; }
 
 /* ---------- code blocks: Markdown preview and Run ---------- */
 .code-act { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 20px; padding: 0; border: 0; border-radius: 3px; background: transparent; color: var(--fg-muted); cursor: pointer; }
