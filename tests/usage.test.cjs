@@ -10,6 +10,7 @@ function functionSource(name, next) {
 }
 const code = [functionSource('tokensSince', 'async function loadTokens'),
   functionSource('tokenTotals', '/** The sessions shown'),
+  functionSource('tokenGroups', '/** 12%'),
   functionSource('tokenChart', 'function renderTokens')].join('\n');
 
 for (const zone of ['Asia/Kolkata', 'Asia/Kathmandu', 'Africa/Johannesburg', 'America/New_York']) {
@@ -45,3 +46,17 @@ for (const zone of ['Asia/Kolkata', 'Asia/Kathmandu', 'Africa/Johannesburg', 'Am
     });
   }
 }
+
+test('all-time chart and grouping handle large request histories', () => {
+  const at = Date.now();
+  const rows = Array.from({ length: 150_000 }, () => ({
+    at, requests: 1, input: 1, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0,
+  }));
+  const sessions = [{ sessionId: 'large', rows }];
+  const context = vm.createContext({ Date, tokens: { range: 'all', view: 'sessions', sessions }, HOUR_MS: 3_600_000,
+    formatCost: String, formatTokens: String, h: (tag, attrs, children) => ({ tag, attrs, children }), sessions });
+  vm.runInContext(code, context);
+  assert.equal(vm.runInContext('tokenGroups(sessions)[0].totals.tokens', context), rows.length);
+  const chart = vm.runInContext('tokenChart(sessions, false)', context);
+  assert.ok(chart.children.some(b => b.attrs.title.endsWith('150000 tokens')));
+});

@@ -4958,7 +4958,7 @@ function tokenGroups(sessions) {
       ? { name: baseName(s.cwd || '') || s.cwd || '(unknown folder)', title: s.cwd || '', cwd: s.cwd, open: s.cwd ? () => setTokensFolder(s.cwd) : null }
       : { name: s.title || '(no title)', title: `${s.cwd || ''}\n${s.sessionId}`, cwd: s.cwd, modifiedMs: s.modifiedMs,
           open: s.cwd ? () => { closeTokens(); resumeSession({ sessionId: s.sessionId, cwd: s.cwd, title: s.title, modifiedMs: s.modifiedMs }); } : null });
-    g.rows.push(...s.rows);
+    for (const row of s.rows) g.rows.push(row);
     g.sessions.add(s.sessionId);
   }
   const list = [...groups.values()].map(g => ({ ...g, totals: tokenTotals(g.rows) }));
