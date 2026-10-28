@@ -10,6 +10,7 @@ mod hermes;
 mod icon;
 #[cfg(target_os = "macos")]
 mod macos;
+mod secret;
 mod session;
 mod store;
 mod update;
@@ -116,15 +117,15 @@ fn set_claude_path(path: Option<String>) {
 }
 
 /// What the saved API key looks like (its last characters), or None when there is none. The key
-/// itself never goes to the webview.
+/// itself never goes to the webview, and this never reads it from the keychain.
 #[tauri::command]
-fn api_key_hint(app: AppHandle) -> Option<String> {
-    store::api_key(&app).as_deref().map(store::api_key_hint)
+async fn api_key_hint(app: AppHandle) -> Option<String> {
+    store::saved_api_key_hint(&app)
 }
 
 /// Saves the API key that sessions switched to API credits run on (blank removes it) and returns its hint.
 #[tauri::command]
-fn set_api_key(app: AppHandle, key: Option<String>) -> Result<Option<String>, String> {
+async fn set_api_key(app: AppHandle, key: Option<String>) -> Result<Option<String>, String> {
     let key = key.filter(|k| !k.trim().is_empty()).map(|k| store::clean_api_key(&k)).transpose()?;
     let hint = key.as_deref().map(store::api_key_hint);
     store::set_api_key(&app, key)?;

@@ -119,46 +119,86 @@ fn write_state(app: &AppHandle, json: &str) -> Result<(), String> {
     fs::rename(&tmp, &path).map_err(|e| e.to_string())
 }
 
-/// The Claude Console API key from HQ's settings, beside board.json but never in it: the board
-/// is a snapshot the webview sends on every save. Outer None: not read from disk yet.
+/// The Claude Console API key from HQ's settings, in the system keychain (src/secret.rs): never on
+/// disk in the clear, and never in the board, which is a snapshot the webview sends on every save.
+/// Outer None: not read from the keychain yet.
 static API_KEY: Mutex<Option<Option<String>>> = Mutex::new(None);
 
-fn api_key_path(app: &AppHandle) -> Result<PathBuf, String> {
+/// Where v0.17.0 kept the key, in the clear. It moves to the keychain the next time HQ starts.
+fn legacy_api_key_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(state_path(app)?.with_file_name("api-key"))
 }
 
-/// The saved API key, read from disk the first time it is asked for.
-pub fn api_key(app: &AppHandle) -> Option<String> {
-    let mut key = API_KEY.lock().unwrap();
-    key.get_or_insert_with(|| {
-        let text = fs::read_to_string(api_key_path(app).ok()?).ok()?;
-        clean_api_key(&text).ok()
-    })
-    .clone()
+/// The key's account name in the keychain. A copy with its own board (HQ_STATE_DIR) keeps its own key.
+fn api_key_account() -> String {
+    match std::env::var_os("HQ_STATE_DIR") {
+        Some(dir) => format!("anthropic-api-key:{}", dir.to_string_lossy()),
+        None => "anthropic-api-key".into(),
+    }
 }
 
-/// Saves the key, or with None deletes it. Unix: readable by the user only. Windows: the folder
-/// is in the user's profile, which only that user can read (as with Claude's own credentials).
+/// The saved key's hint, beside the board, so showing it never touches the keychain.
+fn api_key_hint_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(state_path(app)?.with_file_name("api-key-hint"))
+}
+
+/// The saved key's hint, or None when there is none. Moves a key left in the clear by v0.17.0
+/// into the keychain first.
+pub fn saved_api_key_hint(app: &AppHandle) -> Option<String> {
+    move_legacy_api_key(app);
+    let hint = fs::read_to_string(api_key_hint_path(app).ok()?).ok()?;
+    Some(hint.trim().to_owned()).filter(|h| !h.is_empty())
+}
+
+fn move_legacy_api_key(app: &AppHandle) {
+    let Ok(path) = legacy_api_key_path(app) else { return };
+    let Ok(text) = fs::read_to_string(&path) else { return };
+    // The file stays until the key is safely in the keychain; a key that no longer passes is dropped.
+    if let Ok(key) = clean_api_key(&text) {
+        if set_api_key(app, Some(key)).is_err() {
+            return;
+        }
+    }
+    let _ = fs::remove_file(&path);
+}
+
+/// The saved API key, read from the keychain the first time a session needs it (on macOS that
+/// can ask the user to allow it). A failed read is not remembered, so a denied prompt can be retried.
+pub fn api_key(app: &AppHandle) -> Result<Option<String>, String> {
+    let mut cached = API_KEY.lock().unwrap();
+    if let Some(key) = cached.as_ref() {
+        return Ok(key.clone());
+    }
+    let key = crate::secret::read(&api_key_account())?.and_then(|k| clean_api_key(&k).ok());
+    if key.is_none() {
+        // Removed from the keychain by hand: stop showing a hint for it.
+        if let Ok(path) = api_key_hint_path(app) {
+            let _ = fs::remove_file(path);
+        }
+    }
+    *cached = Some(key.clone());
+    Ok(key)
+}
+
+/// Saves the key in the keychain, or with None deletes it.
 pub fn set_api_key(app: &AppHandle, key: Option<String>) -> Result<(), String> {
-    let path = api_key_path(app)?;
+    let hint_path = api_key_hint_path(app)?;
     match &key {
         Some(k) => {
-            let tmp = path.with_extension("tmp");
-            let _ = fs::remove_file(&tmp); // a leftover keeps its old mode; a new file gets 0600
-            let mut options = fs::OpenOptions::new();
-            options.write(true).create(true).truncate(true);
-            #[cfg(unix)]
-            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-            let written = options.open(&tmp).and_then(|mut f| io::Write::write_all(&mut f, k.as_bytes()));
-            if let Err(e) = written.and_then(|_| fs::rename(&tmp, &path)) {
-                let _ = fs::remove_file(&tmp);
-                return Err(format!("could not save the API key: {e}"));
+            crate::secret::write(&api_key_account(), k).map_err(|e| format!("could not save the API key in the keychain: {e}"))?;
+            fs::write(&hint_path, api_key_hint(k)).map_err(|e| format!("could not save the API key's hint: {e}"))?;
+        }
+        None => {
+            crate::secret::delete(&api_key_account()).map_err(|e| format!("could not remove the API key from the keychain: {e}"))?;
+            match fs::remove_file(&hint_path) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(format!("could not remove the API key's hint: {e}")),
+                _ => {}
             }
         }
-        None => match fs::remove_file(&path) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(format!("could not remove the API key: {e}")),
-            _ => {}
-        },
+    }
+    if let Ok(path) = legacy_api_key_path(app) {
+        let _ = fs::remove_file(path.with_extension("tmp"));
+        let _ = fs::remove_file(path);
     }
     *API_KEY.lock().unwrap() = Some(key);
     Ok(())
