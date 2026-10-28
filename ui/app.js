@@ -4979,7 +4979,7 @@ function apiKeyControl() {
   if (app.apiKeyHint) {
     return h('div', { class: 'api-key' }, h('span', { class: 'api-key-hint', text: app.apiKeyHint }), h('button', { class: 'btn', text: 'Remove', onclick: () => saveApiKey(null) }), error);
   }
-  const input = h('input', { type: 'password', placeholder: 'sk-ant-api03-…', spellcheck: 'false', autocomplete: 'off' });
+  const input = h('input', { type: 'password', placeholder: 'sk-ant-…', spellcheck: 'false', autocomplete: 'off' });
   input.addEventListener('change', () => { if (input.value.trim()) saveApiKey(input.value); });
   return h('div', { class: 'api-key' }, input, error);
 }
