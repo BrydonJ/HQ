@@ -452,19 +452,6 @@ left it. A Hermes cell has a **Hermes** tag in its header.
 - It is the same Hermes agent as the CLI: its memory, skills, background self-improvement
   review, context compression and session store all work as configured in Hermes' own
   `config.yaml`. HQ changes none of Hermes' settings.
-- **What Hermes learns** shows in the chat, at every detail level: skills it creates, patches,
-  archives or deletes, and entries added to or removed from its memory and user profile.
-  - Changes made by Hermes' background review or its curator are titled **Self-improvement
-    review**. The rest are titled **Hermes learned**.
-  - Hermes reports none of this over ACP, so HQ reads it from Hermes' own files every 10 seconds
-    while a Hermes cell is open: `skills/.curator_ledger.jsonl` and `memories/MEMORY.md` and
-    `USER.md`, in Hermes' home folder. That folder is `HERMES_HOME`, or `%LOCALAPPDATA%\hermes` on
-    Windows and `~/.hermes` elsewhere, with the profile `hermes profile use` picked.
-  - Each change is shown in the cell whose session it names, else in the only Hermes cell
-    working, else in the one whose turn ended last. With several Hermes cells, a memory change
-    can land in the wrong one: memory files do not say which session wrote them.
-  - Your own edits (`hermes skills …`) are left out. Changes made while HQ was closed are not
-    shown, and the lines are not kept across a restart.
 - Approvals show as the usual permission cards. **Yes, and don't ask again** allows that kind
   of action for the rest of the session. When Hermes' own `approvals.timeout` runs out, Hermes
   denies the request and the card goes away.
@@ -505,8 +492,7 @@ src/codex.rs     Codex cells: runs `codex app-server` and translates it to and f
                  lines the UI speaks; a shared helper reads history, sessions and models; runs
                  `codex update`. Built with the `codex` Cargo feature (on by default)
 src/hermes.rs    Hermes cells: runs `hermes acp` and translates ACP to and from the stream-json
-                 lines the UI speaks; HQ's copy of each Hermes conversation; reads what Hermes
-                 learns from its skill ledger and memory files. Built with the
+                 lines the UI speaks; HQ's copy of each Hermes conversation. Built with the
                  `hermes` Cargo feature (on by default; `--no-default-features` leaves it out)
 src/update.rs    self-update: checks and downloads signed releases; installs when told to
 src/main.rs      Tauri commands, profiles, single-instance lock
@@ -516,8 +502,7 @@ ui/app.js        cells, protocol handling, prompts, menus, sessions list, grid l
                  context indicator, Remote Control, settings
 ui/codex.js      what Codex cells do differently: their model list, commands, defaults, modes,
                  keeping Codex up to date
-ui/hermes.js     what Hermes cells do differently: their model list, commands, defaults, modes,
-                 and what Hermes learns
+ui/hermes.js     what Hermes cells do differently: their model list, commands, defaults, modes
 ui/afk.js        AFK mode: tells sessions you are away, answers or defers their prompts, nudges
                  them on and lists what it did once you are back
 ui/render.js     markdown (raw HTML escaped, http(s) links only; incremental while streaming),

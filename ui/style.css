@@ -1144,17 +1144,3 @@ input[type=color]::-webkit-color-swatch { border: 0; border-radius: 2px; }
 .afk-time { flex: none; color: var(--fg-faint); font-size: 11px; }
 .afk-hint { color: var(--fg-faint); font-size: 11.5px; margin-top: 6px; }
 
-/* ---------- Hermes learnings (hermes.js) ---------- */
-.item.learn::before { display: none; }
-.learn > summary { display: flex; align-items: baseline; gap: 6px; cursor: pointer; list-style: none; font-size: 12.5px; }
-.learn > summary::-webkit-details-marker { display: none; }
-.learn > summary > .codicon { font-size: 12px; color: var(--waiting); position: relative; top: 1px; }
-.learn-title { color: var(--fg); }
-.learn-count { color: var(--fg-faint); font-size: 11.5px; }
-.learn-body { margin: 4px 0 0 18px; }
-.learn-row { display: flex; align-items: baseline; gap: 6px; font-size: 12.5px; color: var(--fg-muted); min-width: 0; }
-.learn-row .codicon { flex: none; font-size: 11px; position: relative; top: 1px; color: var(--link); }
-.learn-row.removed .codicon, .learn-row.removed .learn-text { color: var(--fg-faint); }
-.learn-row.removed .learn-text { text-decoration: line-through; }
-.learn-label { flex: none; color: var(--fg-faint); }
-.learn-text { flex: 1; min-width: 0; color: var(--fg); overflow-wrap: anywhere; }

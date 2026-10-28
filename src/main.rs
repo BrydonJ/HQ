@@ -227,13 +227,6 @@ async fn load_hermes_transcript(app: AppHandle, session_id: String, cwd: Option<
         .map_err(|e| e.to_string())?
 }
 
-/// What Hermes learned (skills and memory) since the last call; see hermes::learnings.
-#[cfg(feature = "hermes")]
-#[tauri::command]
-async fn hermes_learnings() -> Vec<serde_json::Value> {
-    tauri::async_runtime::spawn_blocking(hermes::learnings).await.unwrap_or_default()
-}
-
 #[cfg(feature = "hermes")]
 #[tauri::command]
 async fn list_hermes_sessions(limit: Option<usize>, cwd: Option<String>) -> Result<Vec<serde_json::Value>, String> {
@@ -724,8 +717,6 @@ fn main() {
             load_hermes_transcript,
             #[cfg(feature = "hermes")]
             list_hermes_sessions,
-            #[cfg(feature = "hermes")]
-            hermes_learnings,
             list_sessions,
             search_sessions,
             probe_usage,

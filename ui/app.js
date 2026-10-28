@@ -276,7 +276,6 @@ class Cell {
     this.afk = sanitizeCellAfk(afk); // AFK for this session (afk.js): null follows HQ, false never, else { until, since }
     this.afkLog = sanitizeAfkLog(afkLog); // what HQ did while the user was away, listed once they are back
     this.afkOn = false;        // AFK is in force here now (syncAfk)
-    this.lastTurnEnd = 0;      // when the last turn ended (ms)
     this.cost = { usd: 0, tokens: 0, procUsd: 0, procTokens: 0, apiUsd: 0 }; // this HQ run's spend; proc* = last total of the current process; apiUsd = on HQ's API key
     this.apiMode = !!api && this.backend === 'claude'; // the user switched this session to HQ's API key until the plan's usage is back
     this.procOnApi = false;    // the running claude was started with HQ's API key
@@ -2390,7 +2389,6 @@ class Cell {
     this.renderMeta();
     this.setStatus('idle');
     if (!local) {
-      this.lastTurnEnd = Date.now();
       this.markUnread();
       notifyTurnDone(this, m);
     }
