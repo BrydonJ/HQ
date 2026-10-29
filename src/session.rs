@@ -79,6 +79,8 @@ pub struct SpawnOptions {
     pub max_agents: Option<u32>,
     /// Runs on the API key saved in HQ's settings instead of Claude's own login.
     pub api_key: bool,
+    /// Gives the session HQ's own MCP server (mcp.rs), with a token of its own.
+    pub mcp: bool,
 }
 
 /// The `claude` executable chosen in HQ's own settings, which beats `HQ_CLAUDE`.
@@ -293,6 +295,17 @@ impl Sessions {
                 .ok_or("No API key is saved in HQ's settings.")?;
             use_api_key(&mut cmd, &key);
         }
+        // HQ's own MCP server (mcp.rs). A config file that cannot be written only costs the tools.
+        let mut grant = if opts.mcp { crate::mcp::Grant::issue() } else { None };
+        let mut config_file = None;
+        match grant.as_ref().map(|g| g.claude_args()) {
+            Some(Ok((args, file))) => {
+                cmd.args(args);
+                config_file = Some(file);
+            }
+            Some(Err(_)) => grant = None,
+            None => {}
+        }
         // A prefix the user set themselves wins.
         if std::env::var_os(REMOTE_PREFIX_VAR).is_none_or(|v| v.is_empty()) {
             cmd.env(REMOTE_PREFIX_VAR, remote_name_prefix(&opts.cwd));
@@ -304,7 +317,13 @@ impl Sessions {
             .stderr(Stdio::piped());
         hide_console(&mut cmd);
 
+        let remove_config = || {
+            if let Some(file) = &config_file {
+                let _ = std::fs::remove_file(file);
+            }
+        };
         let mut child = cmd.spawn().map_err(|e| {
+            remove_config();
             let hint = if cfg!(target_os = "macos") {
                 "Is Claude Code installed? Install it with `curl -fsSL https://claude.ai/install.sh | bash`, or pick its location in HQ's settings."
             } else {
@@ -317,9 +336,17 @@ impl Sessions {
         let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
             kill_group(child.id());
             let _ = child.kill();
+            remove_config();
             return Err("claude pipes unavailable".into());
         };
-        Ok(self.register(app, child, stdin.map(spawn_stdin_writer), stdout, stderr, events))
+        let id = self.register(app, child, stdin.map(spawn_stdin_writer), stdout, stderr, events);
+        if let Some(grant) = grant {
+            grant.bind(id);
+        }
+        if let Some(file) = config_file {
+            crate::mcp::keep_config_file(id, file);
+        }
+        Ok(id)
     }
 
     /// Tracks a started child as a session: lines queued with `send` go to `input`, and `stdout`'s
@@ -517,6 +544,7 @@ fn spawn_stdout_reader(
         let stderr: Vec<String> = tail.lock().unwrap().iter().cloned().collect();
         let _ = tx.send(Outgoing::Exit(json!({ "type": "hq_exit", "code": code, "stderr": stderr }).to_string()));
         app.state::<Sessions>().map.lock().unwrap().remove(&id);
+        crate::mcp::release(id);
     });
 }
 

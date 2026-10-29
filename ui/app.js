@@ -198,8 +198,15 @@ const nextRequestId = () => `hq-${Date.now().toString(36)}-${++reqSeq}`;
 class Cell {
   constructor({ cwd, sessionId = null, permissionMode = 'default', model = null, effort = null, title = '', aiTitle = false,
     customTitle = null, renamePending = false, detail, clean, progress = false, fork = false, collapsed = false,
-    missing = false, remote = null, bridgeSessionId = null, draft = '', backend = 'claude', resumeAfterUpdate = false, resumeQueued = null, api = false, afk = null, afkLog = null }) {
+    missing = false, remote = null, bridgeSessionId = null, draft = '', backend = 'claude', resumeAfterUpdate = false, resumeQueued = null, api = false, afk = null, afkLog = null,
+    hqId = null, spawnedBy = null, depth = 0 }) {
     this.cwd = cwd;
+    // HQ's MCP tools (mcp.js): the id they know this session by, the session that started it, and how deep that goes.
+    this.hqId = typeof hqId === 'string' && /^s[0-9a-z]{4}$/.test(hqId) && !app.cells.some(c => c.hqId === hqId) ? hqId : newHqId();
+    this.spawnedBy = typeof spawnedBy === 'string' ? spawnedBy : null;
+    this.depth = Number.isInteger(depth) && depth > 0 ? depth : 0;
+    this.mcpExpect = false;        // HQ's tools sent it a prompt that its turn has not answered yet
+    this.replyLog = [];            // the full text of its latest replies, for read_session
     this.backend = AGENT_NAMES[backend] ? backend : 'claude'; // the agent: Claude Code, Codex (codex.js) or Hermes (hermes.js)
     this.agent = AGENT_NAMES[this.backend];
     this.sessionId = sessionId;
@@ -359,6 +366,10 @@ class Cell {
     this.renderRemote();
     this.renderApi();
     this.renderAfk();
+    if (this.spawnedBy) {
+      el.classList.add('spawned');
+      this.titleEl.title = `Started by another session (${this.spawnedBy}) through HQ's tools`;
+    }
     if (this.initialDraft) {
       this.input.value = this.initialDraft;
       autoGrow(this.input);
@@ -1584,6 +1595,7 @@ class Cell {
       autoTasks: app.settings.autoTasks !== false,
       maxAgents: app.settings.maxAgents, // 0 is no limit
       apiKey,
+      mcp: app.settings.mcp !== false,
       onEvent: channel,
     });
   }
@@ -1856,7 +1868,7 @@ class Cell {
     for (const id of [...this.pending.keys()]) this.dropPrompt(id);
     Object.assign(this, {
       sessionId: null, fork: false, bridgeSessionId: null, aiTitle: false, renamePending: false, titleTries: 0,
-      titleAsked: '', promptText: '', sentPrompts: [], lastReply: '', turnTexts: [], tasksStale: false, lastDuration: '',
+      titleAsked: '', promptText: '', sentPrompts: [], lastReply: '', replyLog: [], mcpExpect: false, turnTexts: [], tasksStale: false, lastDuration: '',
       historyStart: 0, historyPending: false, statusAnswer: null, live: null, promptWritten: false, lastSent: null,
       remoteAsked: false, currentTool: null, turnStart: null, turnTools: 0, resumeWarning: null,
     });
@@ -2200,6 +2212,7 @@ class Cell {
     if (time) items[0].prepend(time);
     const last = items[items.length - 1].querySelector('.md');
     const text = last ? last.textContent.trim() : '';
+    mcpNoteReply(this, items.map(i => (i.querySelector('.md') || {})._src || '').filter(Boolean).join('\n\n') || text);
     if (text) {
       this.lastReply = firstLine(text, 140);
       renderSidebar();
@@ -2408,6 +2421,7 @@ class Cell {
     // Claude's plan usage; Hermes turns and turns on an API key do not touch it.
     if (this.backend === 'claude' && !this.procOnApi) scheduleUsageRefresh(this);
     this.syncTitle();
+    if (!local) mcpTurnEnded(this);
     afkTurnEnded(this, m, local);
   }
 
@@ -2446,6 +2460,7 @@ class Cell {
     this.remoteUrl = null;
     this.renderRemote();
     this.renderContext();
+    mcpTurnEnded(this);
     if (this.quietExit) { // /clear ended it: the cell starts over, so nothing is said
       this.quietExit = false;
       this.setStatus('idle');
@@ -2527,6 +2542,12 @@ class Cell {
     this.pending.delete(requestId);
     this.syncPromptsBar();
     this.refreshState();
+    // A question from HQ's tools (mcp.js) learns it was withdrawn.
+    if (card && card.onDrop) {
+      const onDrop = card.onDrop;
+      card.onDrop = null;
+      onDrop();
+    }
   }
 
   answer(requestId, response) {
@@ -3835,17 +3856,18 @@ const projectKey = path => normPath(path).toLowerCase();
  * Adds a cell right after the last open cell of its project, so the grid, the sessions list
  * and the Ctrl+1..9 keys show sessions grouped by project, projects in the order first opened.
  */
-function addCell(opts, { restore = false, batch = false } = {}) {
+function addCell(opts, { restore = false, batch = false, background = false } = {}) {
   const cell = new Cell(opts);
   placeCell(cell);
   // A batch (the restore at startup) lays the board out once, when it is done.
   if (!batch) layout();
-  focusCell(cell, !batch);
+  // `background`: a session an agent started (mcp.js) must not take the user's keyboard.
+  if (!background) focusCell(cell, !batch);
   // Claude starts on the first message, so an empty cell costs no claude process.
   if (restore) {
     if (cell.collapsed) cell.historyPending = true; // drawn when the cell is first opened
     else cell.loadHistory();
-  } else {
+  } else if (!background) {
     rememberFolder(cell.cwd);
   }
   if (!batch) {
@@ -3949,6 +3971,7 @@ function setProjectColor(path, color) {
 function closeCell(cell) {
   clearTimeout(cell.afkNudgeTimer);
   cell.dispose();
+  mcpCellClosed(cell);
   if (peeked === cell) peeked = null;
   const i = app.cells.indexOf(cell);
   if (i >= 0) app.cells.splice(i, 1);
@@ -5192,6 +5215,11 @@ function sanitizeSettings(x) {
     buttonReveal: ['always', 'near', 'hover'].includes(v.buttonReveal) ? v.buttonReveal : v.fadeButtons === true ? 'near' : 'always',
     hiddenButtons: Array.isArray(v.hiddenButtons) ? HEAD_BUTTONS.map(([b]) => b).filter(b => v.hiddenButtons.includes(b)) : [],
     colors,
+    mcp: v.mcp !== false, // HQ's MCP server for new sessions (mcp.js)
+    mcpSpawn: v.mcpSpawn !== false, // agents may start sessions
+    mcpExternal: v.mcpExternal === true, // installed machine-wide: agents outside HQ may call the tools too
+    // The most sessions started by agents that are open at once.
+    mcpMaxSpawned: Number.isInteger(v.mcpMaxSpawned) && v.mcpMaxSpawned >= 0 && v.mcpMaxSpawned <= MCP_MAX_SPAWNED_CAP ? v.mcpMaxSpawned : MCP_DEFAULT_MAX_SPAWNED,
   };
 }
 app.settings = sanitizeSettings(null);
@@ -5325,6 +5353,14 @@ function renderSettings() {
     maxAgents.value = String(v);
     changeSetting('maxAgents', v);
   });
+  const mcpMax = h('input', { type: 'number', min: '0', max: String(MCP_MAX_SPAWNED_CAP), step: '1', value: String(app.settings.mcpMaxSpawned) });
+  mcpMax.addEventListener('change', () => {
+    const raw = mcpMax.value.trim();
+    const n = raw === '' ? NaN : Math.round(Number(raw));
+    const v = Number.isFinite(n) ? Math.min(MCP_MAX_SPAWNED_CAP, Math.max(0, n)) : MCP_DEFAULT_MAX_SPAWNED;
+    mcpMax.value = String(v);
+    changeSetting('mcpMaxSpawned', v);
+  });
   const models = modelList().map(m => [m.value, m.displayName || m.value]);
   body.replaceChildren(...[
     row('Notifications', 'A notification when a turn finishes, or Claude needs you, while HQ is in the background.', toggle(app.settings.notify, v => changeSetting('notify', v))),
@@ -5333,11 +5369,40 @@ function renderSettings() {
       select(app.defaults.model || 'default', models, v => rememberChoice({ model: v }))),
     row('Automatic task lists', 'Ask Claude and Hermes to keep a task list on multi-step work. Off saves a few tokens per long job.', toggle(app.settings.autoTasks, v => changeSetting('autoTasks', v))),
     row('Agents per session', 'The most subagents one Claude session runs at once, workflows included; more are refused until one finishes. For sessions started from now on. 0 is no limit.', maxAgents),
+    row('HQ tools for sessions', 'Gives every session HQ\'s own MCP server (mcp__hq__*): it can list, start, message and wait for other sessions, share notes, claim files and schedule messages. Starting, messaging and stopping sessions still asks for permission like any other tool. For sessions started from now on.', toggle(app.settings.mcp, v => changeSetting('mcp', v))),
+    app.settings.mcp ? row('Let agents start sessions', `A session can open new sessions (Claude, Codex or Hermes) as cells, up to ${MCP_MAX_DEPTH} levels deep. They never bypass permissions.`, toggle(app.settings.mcpSpawn, v => changeSetting('mcpSpawn', v))) : null,
+    app.settings.mcp && app.settings.mcpSpawn ? row('Sessions agents can open', 'The most sessions started by agents that can be open at once. Closing one makes room.', mcpMax) : null,
+    app.settings.mcp ? row('HQ tools everywhere', 'Adds HQ\'s tools to every Claude Code, Codex and Hermes on this computer, so agents started in a terminal or an editor can see and start HQ sessions too while HQ is open. Agents pick it up the next time they start.', mcpInstallControl()) : null,
     row('API key for API credits', "A session that hits your plan's usage limit can carry on with this Claude Console key, from its limit card, until the plan's usage is back. Max and Team plans' monthly API credits pay only for a key from the Console organization linked in claude.ai's billing settings; any other key is billed as usual. Kept in the system keychain (Credential Manager on Windows, Keychain on macOS), never in the board.", apiKeyControl()),
     row('Check for HQ updates automatically', 'The Check for updates button in the sessions list always works.', toggle(app.settings.autoUpdate, v => changeSetting('autoUpdate', v))),
     row('Claude command', 'Path to the claude program, for sessions started from now on. Empty uses HQ_CLAUDE, else claude on PATH.', path),
     codexAvailable() ? row('Codex command', 'Path to the codex program, for Codex sessions started from now on. Empty uses HQ_CODEX, else codex on PATH. HQ keeps Codex up to date while no Codex session runs.', codexPath) : null,
   ].filter(Boolean));
+}
+
+let mcpInstallReport = null; // what the last install or removal did, per agent
+let mcpInstalling = false;
+
+function mcpInstallControl() {
+  const run = async install => {
+    mcpInstalling = true;
+    renderSettings();
+    try {
+      mcpInstallReport = await invoke('install_mcp_everywhere', { install });
+      const done = mcpInstallReport.some(r => r.status === 'done');
+      if (install && done) changeSetting('mcpExternal', true);
+      if (!install) changeSetting('mcpExternal', false);
+    } catch (err) {
+      mcpInstallReport = [{ agent: 'HQ', status: 'failed', detail: String(err) }];
+    }
+    mcpInstalling = false;
+    if (!settingsPanel.classList.contains('hidden')) renderSettings();
+  };
+  const buttons = h('div', { class: 'api-key' },
+    h('button', { class: 'btn', disabled: mcpInstalling || undefined, text: mcpInstalling ? 'Working…' : app.settings.mcpExternal ? 'Reinstall' : 'Install', onclick: () => run(true) }),
+    app.settings.mcpExternal ? h('button', { class: 'btn', disabled: mcpInstalling || undefined, text: 'Remove', onclick: () => run(false) }) : null);
+  const report = (mcpInstallReport || []).map(r => h('div', { class: r.status === 'failed' ? 'api-key-error' : 'desc', text: `${r.agent}: ${r.status === 'done' ? '' : r.status + ' — '}${r.detail}` }));
+  return h('div', null, buttons, ...report);
 }
 
 function renderAppearanceSettings(row, toggle, select) {
@@ -5740,6 +5805,9 @@ function flushState() {
       // Only in the save just before an update restarts HQ; the first save after it drops the mark.
       resumeAfterUpdate: c.resumeMark ? true : undefined,
       resumeQueued: c.resumeMark && c.resumeMark.queued.length ? c.resumeMark.queued : undefined,
+      hqId: c.hqId,
+      spawnedBy: c.spawnedBy || undefined,
+      depth: c.depth || undefined,
     })),
     recent: app.recent,
     models: app.models,
@@ -5754,6 +5822,7 @@ function flushState() {
     remoteDefault: app.remoteDefault == null ? undefined : app.remoteDefault,
     planLimitedUntil: app.planLimitedUntil > Date.now() ? app.planLimitedUntil : undefined,
     afk: app.afk || undefined,
+    mcp: mcpSaved(),
     settings: app.settings,
     sidebarOpen: app.sidebarOpen,
   };
@@ -5923,6 +5992,7 @@ async function restore() {
   app.defaults = sanitizeDefaults(state && (state.defaults || (state.cells || []).at(-1)));
   hermesRestore(state && state.hermes);
   codexRestore(state && state.codex);
+  mcpRestore(state && state.mcp);
   // Boards saved before Codex kept the picker's choice as a Hermes flag.
   app.nextBackend = state && typeof state.nextBackend === 'string' ? state.nextBackend : state && state.hermes && state.hermes.next === true ? 'hermes' : 'claude';
   app.workspaces = sanitizeWorkspaces(state && state.workspaces);

@@ -12,9 +12,10 @@ styled like the VS Code extension instead of a terminal.
   protocol. The Agent SDKs and the VS Code extension use the same protocol. The Rust side
   forwards raw JSON lines and never interprets them. The UI ignores message types it does not
   know, so a Claude Code update hides a new feature instead of breaking the app. HQ adds no
-  hooks and never writes Claude's settings files itself. The one exception is the MCP
-  menu: turning a server on or off asks Claude to do it, and Claude saves the choice for that
-  folder, just as `/mcp` does in the CLI.
+  hooks and never writes Claude's settings files itself. The exceptions are the MCP
+  menu (turning a server on or off asks Claude to do it, and Claude saves the choice for that
+  folder, just as `/mcp` does in the CLI) and [HQ tools everywhere](#hq-tools-mcp), which runs
+  `claude mcp add` when you ask it to.
 
 ## Build and run
 
@@ -516,6 +517,55 @@ Environment overrides:
 - `HQ_PROFILE`: run as a named profile (see [One copy per profile](#one-copy-per-profile)).
 - `HQ_DEBUG_PORT`: DevTools port for a debug build (default 9223).
 - `HQ_STATE_DIR`: folder for `board.json`, overriding the profile's own.
+
+### HQ tools (MCP)
+
+Every session HQ starts gets HQ's own MCP server, `hq`, so an agent can work with the rest of
+the board: start a Codex session for one part of a job, wait for it, read its answer.
+
+- **Sessions:** `list_sessions`, `spawn_session` (Claude, Codex or Hermes, in any folder,
+  optionally in a new git worktree beside the repository), `send_message`, `read_session` (the
+  full text of its latest replies and its task list), `wait_for_sessions`, `interrupt_session`,
+  `close_session`, `set_session_model` and `collapse_session`.
+- **Coordination:** shared notes (`note_set`, `note_get`, `note_delete`) kept across restarts;
+  advisory file claims (`claim_files`, `release_files`, `list_claims`) held until released or
+  the session's cell closes; `schedule_message` (after a delay, at a time, or once the plan's
+  usage limit resets), `list_scheduled` and `cancel_scheduled`.
+- **The user:** `notify_user` (a desktop notification), `ask_user` (a question card in the
+  asking session's cell; answered at once while AFK), and `get_usage` (the plan's limits).
+- A session started by an agent opens as a cell marked ↳, without taking the keyboard, and gets a
+  first line saying who started it.
+
+Guard rails:
+
+- Read-only tools, notes, claims and notifications are allowed up front. Starting, messaging,
+  stopping and closing sessions ask for permission in Claude sessions like any other tool, unless
+  the session's permission mode or rules already allow them.
+- A session can start sessions, and those one more level, but no deeper. At most 6 sessions
+  started by agents are open at once (Settings > **Sessions agents can open**).
+- A session started by an agent never bypasses permissions: it gets the starter's mode, or
+  default when that is Bypass permissions.
+- An agent may only interrupt, close or reconfigure sessions it started, directly or through
+  sessions it started.
+- Settings > **HQ tools for sessions** turns the server off for sessions started from then on;
+  **Let agents start sessions** turns off only `spawn_session`.
+
+How it connects: HQ listens on 127.0.0.1 at a port the system picks, and refuses requests that
+come from a browser page or carry no session token. Claude gets the server (and its token)
+through `--mcp-config` with a file only you can read. Codex (`-c mcp_servers.hq...`) and Hermes
+(ACP `mcpServers`) run `hq --mcp-stdio`, a small bridge that forwards to the same server, with
+the token in its environment. Waiting tools stream keep-alives, so a long wait does not time out.
+
+**HQ tools everywhere** (Settings) installs the bridge as `hq` for every Claude Code (user
+scope, through `claude mcp add`), Codex (`~/.codex/config.toml`) and Hermes
+(`~/.hermes/config.yaml`) on this computer, so agents started in a terminal or an editor can use
+the tools too while HQ is open. They act as "outside" (`ask_user` is not available to them). The
+bridge finds the running HQ through `~/.hq/mcp.json`, which HQ writes while it runs (readable
+only by you). Each config file edited gets a `.hq-backup` copy first. **Remove** takes it out
+again. Inside HQ, each session's own `hq` takes the place of the machine-wide one.
+
+Not yet tested: Hermes with the `mcpServers` HQ passes over ACP, and whether Hermes shows two
+`hq` servers when the machine-wide one is installed too.
 
 ## Layout
 

@@ -120,7 +120,12 @@ pub fn spawn(app: &AppHandle, opts: SpawnOptions, events: Channel<InvokeResponse
     if !Path::new(&opts.cwd).is_dir() {
         return Err(format!("Folder does not exist: {}", opts.cwd));
     }
+    let grant = if opts.mcp { crate::mcp::Grant::issue() } else { None };
     let mut cmd = app_server();
+    if let Some(grant) = &grant {
+        let (args, env) = grant.codex_args();
+        cmd.args(args).envs(env);
+    }
     cmd.current_dir(&opts.cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd
         .spawn()
@@ -132,7 +137,13 @@ pub fn spawn(app: &AppHandle, opts: SpawnOptions, events: Channel<InvokeResponse
         return Err("codex pipes unavailable".into());
     };
     match translate(stdin, stdout, opts) {
-        Ok((input, lines)) => Ok(app.state::<Sessions>().register(app, child, Some(input), lines, stderr, events)),
+        Ok((input, lines)) => {
+            let id = app.state::<Sessions>().register(app, child, Some(input), lines, stderr, events);
+            if let Some(grant) = grant {
+                grant.bind(id);
+            }
+            Ok(id)
+        }
         Err(e) => {
             kill_group(child.id());
             let _ = child.kill();
@@ -2113,6 +2124,7 @@ mod live {
             auto_tasks: false,
             max_agents: None,
             api_key: false,
+            mcp: false,
         };
         let mut cmd = app_server();
         cmd.current_dir(&work).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());

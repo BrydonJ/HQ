@@ -102,8 +102,17 @@ pub fn spawn(app: &AppHandle, opts: SpawnOptions, events: Channel<InvokeResponse
         let _ = child.kill();
         return Err("hermes pipes unavailable".into());
     };
-    match translate(stdin, stdout, mirror, opts) {
-        Ok((input, lines)) => Ok(app.state::<Sessions>().register(app, child, Some(input), lines, stderr, events)),
+    // HQ's MCP server, through the stdio bridge: ACP agents must take a command, HTTP is optional.
+    let grant = if opts.mcp { crate::mcp::Grant::issue() } else { None };
+    let mcp_servers = Value::Array(grant.iter().map(|g| g.acp_server()).collect());
+    match translate(stdin, stdout, mirror, opts, mcp_servers) {
+        Ok((input, lines)) => {
+            let id = app.state::<Sessions>().register(app, child, Some(input), lines, stderr, events);
+            if let Some(grant) = grant {
+                grant.bind(id);
+            }
+            Ok(id)
+        }
         Err(e) => {
             crate::session::kill_group(child.id());
             let _ = child.kill();
@@ -114,7 +123,7 @@ pub fn spawn(app: &AppHandle, opts: SpawnOptions, events: Channel<InvokeResponse
 
 /// Starts the translator between Hermes' pipes and the frontend. Returns where the frontend's
 /// lines go in, and the pipe its Claude-shaped lines come out of.
-fn translate(stdin: ChildStdin, stdout: impl Read + Send + 'static, mirror: PathBuf, opts: SpawnOptions) -> Result<(mpsc::Sender<String>, PipeReader), String> {
+fn translate(stdin: ChildStdin, stdout: impl Read + Send + 'static, mirror: PathBuf, opts: SpawnOptions, mcp_servers: Value) -> Result<(mpsc::Sender<String>, PipeReader), String> {
     let (lines, writer) = std::io::pipe().map_err(|e| e.to_string())?;
     let (events_tx, events_rx) = mpsc::channel::<Event>();
     let (input_tx, input_rx) = mpsc::channel::<String>();
@@ -147,7 +156,7 @@ fn translate(stdin: ChildStdin, stdout: impl Read + Send + 'static, mirror: Path
         }
         let _ = events_tx.send(Event::HermesClosed);
     });
-    let bridge = Bridge::new(stdin, writer, mirror, opts);
+    let bridge = Bridge::new(stdin, writer, mirror, opts, mcp_servers);
     std::thread::spawn(move || bridge.run(events_rx));
     Ok((input_tx, lines))
 }
@@ -449,6 +458,8 @@ struct Bridge {
     mirror_dir: PathBuf,
     mirror: Option<File>,
     opts: SpawnOptions,
+    /// ACP `mcpServers` for the sessions this process opens: HQ's own server, or none.
+    mcp_servers: Value,
     next_rpc: u64,
     calls: HashMap<u64, Call>,
     session: Option<String>,
@@ -496,7 +507,7 @@ struct Bridge {
 }
 
 impl Bridge {
-    fn new(hermes: ChildStdin, out: PipeWriter, mirror_dir: PathBuf, opts: SpawnOptions) -> Bridge {
+    fn new(hermes: ChildStdin, out: PipeWriter, mirror_dir: PathBuf, opts: SpawnOptions, mcp_servers: Value) -> Bridge {
         let task_prompt_due = opts.auto_tasks;
         Bridge {
             hermes: Some(hermes),
@@ -504,6 +515,7 @@ impl Bridge {
             mirror_dir,
             mirror: None,
             opts,
+            mcp_servers,
             next_rpc: 0,
             calls: HashMap::new(),
             session: None,
@@ -708,7 +720,7 @@ impl Bridge {
         let cwd = self.opts.cwd.clone();
         match self.opts.resume.clone().filter(|id| !id.is_empty()) {
             Some(id) if self.opts.fork => {
-                let params = json!({ "sessionId": id, "cwd": cwd, "mcpServers": [] });
+                let params = json!({ "sessionId": id, "cwd": cwd, "mcpServers": self.mcp_servers });
                 self.call("session/fork", params, Call::Open { loaded: None, fork_of: Some(id) });
             }
             // `session/load`, not `session/resume`: Hermes answers an unknown id for resume
@@ -716,10 +728,10 @@ impl Bridge {
             Some(id) => {
                 self.loading = true;
                 self.todos_known = false; // until the replay brings a full write
-                let params = json!({ "sessionId": id, "cwd": cwd, "mcpServers": [] });
+                let params = json!({ "sessionId": id, "cwd": cwd, "mcpServers": self.mcp_servers });
                 self.call("session/load", params, Call::Open { loaded: Some(id), fork_of: None });
             }
-            None => self.call("session/new", json!({ "cwd": cwd, "mcpServers": [] }), Call::Open { loaded: None, fork_of: None }),
+            None => self.call("session/new", json!({ "cwd": cwd, "mcpServers": self.mcp_servers }), Call::Open { loaded: None, fork_of: None }),
         }
     }
 
@@ -1698,12 +1710,13 @@ mod live {
             auto_tasks: false,
             max_agents: None,
             api_key: false,
+            mcp: false,
         };
         let mut cmd = Command::new(hermes_program());
         cmd.arg("acp").current_dir(&dir).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
         hide_console(&mut cmd);
         let mut child = cmd.spawn().unwrap();
-        let (input, lines) = translate(child.stdin.take().unwrap(), child.stdout.take().unwrap(), dir.join("mirror"), opts).unwrap();
+        let (input, lines) = translate(child.stdin.take().unwrap(), child.stdout.take().unwrap(), dir.join("mirror"), opts, json!([])).unwrap();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             for line in BufReader::new(lines).lines() {
