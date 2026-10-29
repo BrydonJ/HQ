@@ -159,6 +159,7 @@ async function mcpConfirmMessage(caller, cell, text, callId) {
     const card = h('div', { class: 'prompt' },
       h('div', { class: 'prompt-title', text: `${from} wants to send ${caller.external ? 'this session' : `session "${mcpName(cell)}" (${cell.hqId})`} a message:` }),
       h('pre', { text }),
+      h('div', { class: 'desc', text: `${text.length} characters, ${text.split('\n').length} lines: scroll to read it all before you say yes.` }),
       h('div', { class: 'actions' },
         h('button', { class: 'btn primary', onclick: () => finish(true) }, 'Send it'),
         h('button', { class: 'btn', onclick: () => finish(false) }, 'Refuse')));
@@ -270,6 +271,12 @@ const MCP_TOOLS = {
     const prompt = mcpString(a.prompt, 'prompt');
     const agent = a.agent == null ? 'claude' : String(a.agent);
     if (!availableBackends().includes(agent)) fail(`${AGENT_NAMES[agent] || agent} is not available in this HQ. Available: ${availableBackends().join(', ')}.`);
+    if (a.effort != null && !ALL_EFFORTS.includes(a.effort)) fail(`effort must be one of ${ALL_EFFORTS.join(', ')}.`);
+    // Never bypassPermissions, and never freer than the caller: an agent must not lift the prompts for another.
+    // Not covered: a caller that may edit files unprompted can first write the folder's
+    // .claude/settings.local.json (allow rules) and then start a Claude there. Closing that needs
+    // children started without project settings, which would also drop the user's own rules.
+    const mode = mcpSpawnMode(caller, agent, a.permission_mode == null || a.permission_mode === '' ? null : a.permission_mode);
     let folder = a.folder == null ? caller.cwd : String(a.folder).trim();
     if (!folder) fail('folder is required for an agent outside HQ.');
     if (!(await invoke('folder_exists', { path: folder }).catch(() => false))) fail(`Folder does not exist: ${folder}`);
@@ -280,17 +287,15 @@ const MCP_TOOLS = {
         fail(String(err));
       }
     }
-    if (a.effort != null && !ALL_EFFORTS.includes(a.effort)) fail(`effort must be one of ${ALL_EFFORTS.join(', ')}.`);
     const opts = { cwd: folder, backend: agent, spawnedBy: caller.hqId, depth, collapsed: a.collapsed === true };
     if (typeof a.model === 'string' && a.model.trim()) opts.model = a.model.trim();
     if (a.effort) opts.effort = a.effort;
-    // Never bypassPermissions, and never freer than the caller: an agent must not lift the prompts for another.
-    opts.permissionMode = mcpSpawnMode(caller, agent, a.permission_mode == null || a.permission_mode === '' ? null : a.permission_mode);
+    opts.permissionMode = mode;
     if (typeof a.name === 'string' && a.name.trim()) opts.customTitle = a.name.trim().slice(0, 80);
     const cell = addNewCell(opts, { background: true });
     const from = caller.external ? 'an agent outside HQ' : `session "${mcpName(caller)}" (${caller.hqId})`;
     mcpSend(cell, `${MCP_PREFIX} you were started by ${from}, which reads your final reply. You are session ${cell.hqId}; HQ's tools (mcp__hq__*) let you coordinate with other sessions.)\n\n${prompt}`);
-    return { session: cell.hqId, agent, folder, note: 'Started. Call wait_for_sessions, then read_session, to get its result.' };
+    return { session: cell.hqId, agent, folder, permissionMode: mode, note: 'Started. Call wait_for_sessions, then read_session, to get its result.' };
   },
 
   async send_message(caller, a, callId) {
@@ -448,7 +453,7 @@ const MCP_TOOLS = {
     if (caller.afkOn) return 'The user is away (AFK) and cannot answer now. Go with what you would recommend, and say so in your reply.';
     const options = (Array.isArray(a.options) ? a.options : []).filter(o => typeof o === 'string' && o.trim()).slice(0, 9);
     const timeout = Math.min(3600, Math.max(10, Number(a.timeout_seconds) || MCP_ASK_TIMEOUT_MS / 1000)) * 1000;
-    const asked = mcpCard(caller, callId, 'ask', timeout, 'The user did not answer in time.',
+    const asked = mcpCard(caller, callId, 'ask', timeout, 'The user did not answer (the question timed out, or your turn ended).',
       'The user went away (AFK) and cannot answer now. Go with what you would recommend, and say so in your reply.', finish => {
         const other = h('input', { type: 'text', placeholder: options.length ? 'Other…' : 'Your answer, then Enter' });
         other.addEventListener('keydown', e => {
@@ -522,7 +527,9 @@ const MCP_TOOLS = {
     const key = mcpString(a.key, 'key', 100).trim();
     const value = typeof a.value === 'string' ? a.value : fail('value is required.');
     if (value.length > MCP_NOTE_MAX) fail(`value is too long (at most ${MCP_NOTE_MAX} characters).`);
-    if (!Object.hasOwn(mcp.notes, key) && Object.keys(mcp.notes).length >= MCP_NOTES_MAX) fail(`There are already ${MCP_NOTES_MAX} notes. Delete some first.`);
+    const old = Object.hasOwn(mcp.notes, key) ? mcp.notes[key] : null;
+    if (old && old.by !== caller.hqId && mcpCell(old.by)) fail(`Note "${key}" belongs to ${old.by}, which is still open, so only it can change it.`);
+    if (!old && Object.keys(mcp.notes).length >= MCP_NOTES_MAX) fail(`There are already ${MCP_NOTES_MAX} notes. Delete some first.`);
     mcp.notes[key] = { value, by: caller.hqId, at: Date.now() };
     saveState();
     return `Saved "${key}".`;
