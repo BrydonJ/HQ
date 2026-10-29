@@ -252,3 +252,50 @@ pub fn is_installed() -> bool {
         app.extension().is_some_and(|e| e == "app") && app.parent().is_some_and(|dir| roots.iter().any(|r| r == dir))
     })
 }
+
+// ---------- prompts ----------
+
+/// The sound HQ plays when a session asks a question or wants approval.
+const CUE: &str = "/System/Library/Sounds/Glass.aiff";
+
+/// Plays the prompt cue through `afplay`, which returns once the sound has finished.
+pub fn play_cue() {
+    if let Ok(mut child) = Command::new("/usr/bin/afplay").arg(CUE).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+        std::thread::spawn(move || {
+            let _ = child.wait(); // reaped, so it does not linger as a zombie
+        });
+    }
+}
+
+/// What the user did with a notification from `notify_actions`, sent to the UI as `notification-action`.
+#[derive(serde::Serialize, Clone)]
+struct NotificationAction {
+    id: String,
+    action: &'static str,
+}
+
+/// A notification with Approve and Deny buttons (NSUserNotification, the API the notification
+/// plugin uses too). The buttons stay on screen only when HQ's style is Alerts in System Settings;
+/// a banner shows them on hover. The answer waits on a thread of its own, so each open
+/// notification holds one parked thread until it is answered, clicked or cleared.
+pub fn notify_actions(app: tauri::AppHandle, id: String, title: String, body: String) {
+    use mac_notification_sys::{MainButton, Notification, NotificationResponse};
+    use tauri::Emitter;
+    // Only the first call counts, whichever of this and the plugin comes first; same choice as the plugin.
+    let _ = mac_notification_sys::set_application(if tauri::is_dev() { "com.apple.Terminal" } else { &app.config().identifier });
+    std::thread::spawn(move || {
+        let response = Notification::new()
+            .title(&title)
+            .message(&body)
+            .main_button(MainButton::SingleAction("Approve"))
+            .close_button("Deny")
+            .send();
+        let action = match response {
+            Ok(NotificationResponse::ActionButton(_)) => "approve",
+            Ok(NotificationResponse::CloseButton(_)) => "deny",
+            Ok(NotificationResponse::Click) => "click",
+            _ => return, // cleared without an answer, or not shown
+        };
+        let _ = app.emit("notification-action", NotificationAction { id, action });
+    });
+}

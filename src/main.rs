@@ -544,6 +544,35 @@ fn request_attention(window: WebviewWindow) {
     }
 }
 
+/// The sound for a question or an approval request. Only macOS plays it here; elsewhere the UI
+/// makes its own, so this says whether it played.
+#[tauri::command]
+fn play_cue() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        macos::play_cue();
+        true
+    }
+    #[cfg(not(target_os = "macos"))]
+    false
+}
+
+/// A notification with Approve and Deny buttons; the choice comes back as a `notification-action`
+/// event. Only macOS has them: elsewhere this fails, and the UI shows a plain notification.
+#[tauri::command]
+fn notify_actions(app: AppHandle, id: String, title: String, body: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::notify_actions(app, id, title, body);
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, id, title, body);
+        Err("notification buttons are macOS-only".into())
+    }
+}
+
 /// A freshly loaded page owns no cells, so any `claude` still running belonged to a page that
 /// was reloaded (F5 in a dev build, or WebView2 recovering from a crash) and nobody can reach it.
 #[tauri::command]
@@ -801,6 +830,8 @@ fn main() {
             open_terminal,
             run_in_terminal,
             request_attention,
+            play_cue,
+            notify_actions,
             check_update,
             install_update,
             kill_all_sessions,

@@ -37,6 +37,8 @@ libc = "0.2"
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
 security-framework-sys = "2"
+# Approve and Deny buttons on prompt notifications (src/macos.rs). Already in the tree through the notification plugin.
+mac-notification-sys = "0.6"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
