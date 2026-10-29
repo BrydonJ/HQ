@@ -3705,42 +3705,20 @@ window.__TAURI__.event.listen('notification-action', ({ payload }) => {
 let cueAt = 0;
 let cueAudio = null;
 
-/** A soft two-note chime for a question or an approval request; several at once sound once. */
+/** A soft two-note chime (ui/cue.wav) for a question or an approval request; several at once sound once. */
 function playCue() {
   if (!app.settings.sound || Date.now() - cueAt < 1500) return;
   cueAt = Date.now();
   invoke('play_cue').then(played => { if (!played) chime(); }, chime);
 }
 
-/** The chime made in the page, where HQ has no system sound to play (Windows). */
+/** The chime played by the page, where HQ has no player of its own (Windows). macOS uses afplay,
+ * which still sounds while HQ's window is hidden. */
 function chime() {
-  try {
-    cueAudio ||= new AudioContext();
-    if (cueAudio.state === 'suspended') cueAudio.resume().catch(() => {});
-    const now = cueAudio.currentTime;
-    for (const [freq, at] of [[880, 0], [1318.5, 0.12]]) {
-      const osc = cueAudio.createOscillator();
-      const gain = cueAudio.createGain();
-      osc.type = 'sine';
-      osc.frequency.value = freq;
-      gain.gain.setValueAtTime(0, now + at);
-      gain.gain.linearRampToValueAtTime(0.18, now + at + 0.015);
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + at + 0.6);
-      osc.connect(gain).connect(cueAudio.destination);
-      osc.start(now + at);
-      osc.stop(now + at + 0.65);
-    }
-  } catch (err) {
-    console.warn('chime failed', err);
-  }
+  cueAudio ||= new Audio('cue.wav');
+  cueAudio.currentTime = 0;
+  cueAudio.play().catch(err => console.warn('chime failed', err));
 }
-
-// A notification click only brings the window forward, so coming back to HQ soon after one opens its cell.
-window.addEventListener('focus', () => {
-  const { cell, at } = notified;
-  notified.cell = null;
-  if (cell && Date.now() - at < 60 * 1000 && app.cells.includes(cell)) revealCell(cell);
-});
 
 // ---------- slash commands ----------
 

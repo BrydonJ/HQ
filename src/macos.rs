@@ -255,12 +255,18 @@ pub fn is_installed() -> bool {
 
 // ---------- prompts ----------
 
-/// The sound HQ plays when a session asks a question or wants approval.
-const CUE: &str = "/System/Library/Sounds/Glass.aiff";
+/// The sound HQ plays when a session asks a question or wants approval; Windows plays the same
+/// file from the page.
+const CUE: &[u8] = include_bytes!("../ui/cue.wav");
 
-/// Plays the prompt cue through `afplay`, which returns once the sound has finished.
+/// Plays the prompt cue through `afplay` (which returns once the sound has finished), from a copy
+/// in the temp folder, written when it is missing or differs.
 pub fn play_cue() {
-    if let Ok(mut child) = Command::new("/usr/bin/afplay").arg(CUE).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+    let file = std::env::temp_dir().join("hq-cue.wav");
+    if std::fs::read(&file).map_or(true, |have| have != CUE) && std::fs::write(&file, CUE).is_err() {
+        return;
+    }
+    if let Ok(mut child) = Command::new("/usr/bin/afplay").arg(&file).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
         std::thread::spawn(move || {
             let _ = child.wait(); // reaped, so it does not linger as a zombie
         });
