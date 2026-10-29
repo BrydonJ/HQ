@@ -10,6 +10,7 @@ mod hermes;
 mod icon;
 #[cfg(target_os = "macos")]
 mod macos;
+mod mcp;
 mod secret;
 mod session;
 mod setup;
@@ -42,12 +43,14 @@ async fn spawn_session(
     max_agents: Option<u32>,
     api_key: Option<bool>,
     backend: Option<String>,
+    mcp: Option<bool>,
     on_event: Channel<InvokeResponseBody>,
 ) -> Result<u64, String> {
     let fork = fork.unwrap_or(false);
     let auto_tasks = auto_tasks.unwrap_or(true);
     let api_key = api_key.unwrap_or(false);
-    let opts = SpawnOptions { cwd, resume, permission_mode, model, effort, fork, auto_tasks, max_agents, api_key };
+    let mcp = mcp.unwrap_or(false);
+    let opts = SpawnOptions { cwd, resume, permission_mode, model, effort, fork, auto_tasks, max_agents, api_key, mcp };
     tauri::async_runtime::spawn_blocking(move || match backend.as_deref() {
         None | Some("claude") => app.state::<Sessions>().spawn(&app, opts, on_event),
         #[cfg(feature = "codex")]
@@ -70,6 +73,26 @@ fn send_line(sessions: State<'_, Sessions>, id: u64, line: String) -> Result<(),
 #[tauri::command]
 fn kill_session(sessions: State<'_, Sessions>, id: u64) {
     sessions.kill(id);
+}
+
+/// The frontend's answer to an HQ MCP tool call (see mcp.rs).
+#[tauri::command]
+fn mcp_reply(id: u64, text: String, is_error: Option<bool>) {
+    mcp::reply(id, text, is_error.unwrap_or(false));
+}
+
+/// Registers HQ's tools for every Claude Code, Codex and Hermes on this machine, or removes them.
+#[tauri::command]
+async fn install_mcp_everywhere(profile: State<'_, Profile>, install: bool) -> Result<Vec<mcp::InstallResult>, String> {
+    let profile = profile.0.clone();
+    tauri::async_runtime::spawn_blocking(move || mcp::install_everywhere(profile.as_deref(), install)).await.map_err(|e| e.to_string())
+}
+
+/// Makes a git worktree on `branch` beside the repository holding `folder`, for a session an
+/// agent starts through HQ's MCP server. Returns the worktree's path.
+#[tauri::command]
+async fn create_worktree(folder: String, branch: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || mcp::create_worktree(&folder, &branch)).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -673,6 +696,12 @@ fn mac_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
 }
 
 fn main() {
+    // A session's agent runs `hq --mcp-stdio` to reach HQ's MCP server; it is not a second HQ.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--mcp-stdio") {
+        let profile = args.iter().position(|a| a == "--profile").and_then(|i| args.get(i + 1)).cloned();
+        std::process::exit(mcp::run_stdio_bridge(profile));
+    }
     let profile = profile();
     let mut context = tauri::generate_context!();
     if let Some(name) = &profile {
@@ -729,6 +758,9 @@ fn main() {
             spawn_session,
             send_line,
             kill_session,
+            mcp_reply,
+            create_worktree,
+            install_mcp_everywhere,
             pick_folder,
             save_text_file,
             set_claude_path,
@@ -779,9 +811,10 @@ fn main() {
             #[cfg(not(target_os = "macos"))]
             icon::reset_app_icon,
         ])
-        .setup(|_app| {
+        .setup(|app| {
             #[cfg(not(target_os = "macos"))]
-            icon::apply(_app.handle());
+            icon::apply(app.handle());
+            mcp::start(app.handle(), app.state::<Profile>().0.as_deref());
             Ok(())
         })
         .build(context)
@@ -789,6 +822,7 @@ fn main() {
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
                 app.state::<Sessions>().kill_all();
+                mcp::cleanup();
                 setup::finish_login();
                 #[cfg(feature = "codex")]
                 codex::stop_helper();

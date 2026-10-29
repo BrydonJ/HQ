@@ -173,6 +173,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
   color: var(--fg); cursor: text; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .cell-title.placeholder { color: var(--fg-faint); font-style: italic; }
+/* A session another session started through HQ's tools (mcp.js). */
+.cell.spawned .cell-title::before { content: "\21B3  "; color: var(--fg-faint); }
 .cell-title:hover { background: rgba(90, 93, 94, 0.31); }
 .cell-rename {
   flex: 0 1 260px; min-width: 60px; padding: 1px 4px; font: inherit; color: var(--fg-strong);
