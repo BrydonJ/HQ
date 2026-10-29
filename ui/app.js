@@ -28,6 +28,7 @@ const app = {
   settings: null,      // the Settings screen; see sanitizeSettings for the keys
   apiKeyHint: null,    // "sk-ant-…abcd" while an API key is saved (the key itself stays in the backend)
   planLimitedUntil: 0, // when the plan's usage comes back (ms), from a plan session's refused request
+  afk: null,           // AFK for every session (afk.js): { until (ms, or null for no set time), since }
   sidebarOpen: false,
   query: '',
 };
@@ -197,7 +198,7 @@ const nextRequestId = () => `hq-${Date.now().toString(36)}-${++reqSeq}`;
 class Cell {
   constructor({ cwd, sessionId = null, permissionMode = 'default', model = null, effort = null, title = '', aiTitle = false,
     customTitle = null, renamePending = false, detail, clean, progress = false, fork = false, collapsed = false,
-    missing = false, remote = null, bridgeSessionId = null, draft = '', backend = 'claude', resumeAfterUpdate = false, resumeQueued = null, api = false }) {
+    missing = false, remote = null, bridgeSessionId = null, draft = '', backend = 'claude', resumeAfterUpdate = false, resumeQueued = null, api = false, afk = null, afkLog = null }) {
     this.cwd = cwd;
     this.backend = AGENT_NAMES[backend] ? backend : 'claude'; // the agent: Claude Code, Codex (codex.js) or Hermes (hermes.js)
     this.agent = AGENT_NAMES[this.backend];
@@ -273,6 +274,9 @@ class Cell {
     this.limitResetAt = 0;     // when the limit that refused the last request resets (ms), from its rate_limit_event
     this.limitResume = null;   // { resetsAt }: carry on by itself once the plan's usage is back (checkLimitResumes)
     this.limitAutoContinue = true; // only this open chat; uncheck on its usage error to keep it stopped
+    this.afk = sanitizeCellAfk(afk); // AFK for this session (afk.js): null follows HQ, false never, else { until, since }
+    this.afkLog = sanitizeAfkLog(afkLog); // what HQ did while the user was away, listed once they are back
+    this.afkOn = false;        // AFK is in force here now (syncAfk)
     this.cost = { usd: 0, tokens: 0, procUsd: 0, procTokens: 0, apiUsd: 0 }; // this HQ run's spend; proc* = last total of the current process; apiUsd = on HQ's API key
     this.apiMode = !!api && this.backend === 'claude'; // the user switched this session to HQ's API key until the plan's usage is back
     this.procOnApi = false;    // the running claude was started with HQ's API key
@@ -333,6 +337,7 @@ class Cell {
     this.cacheEl = el.querySelector('.cache-age');
     this.remoteBtn = el.querySelector('.act-remote');
     this.missingBar = el.querySelector('.missing-bar');
+    this.afkBtn = el.querySelector('.act-afk');
 
     el.style.setProperty('--proj', this.color);
     for (const name of el.querySelectorAll('.proj-name, .cell-project .sweep-name')) name.textContent = baseName(this.cwd) || this.cwd;
@@ -353,6 +358,7 @@ class Cell {
     this.renderContext();
     this.renderRemote();
     this.renderApi();
+    this.renderAfk();
     if (this.initialDraft) {
       this.input.value = this.initialDraft;
       autoGrow(this.input);
@@ -395,6 +401,7 @@ class Cell {
     this.remoteBtn.addEventListener('click', () => openMenu(this.remoteBtn, this, menuEl => this.buildRemoteMenu(menuEl)));
     this.handoffBtn = el.querySelector('.act-handoff');
     this.handoffBtn.addEventListener('click', () => this.writeHandoff());
+    this.afkBtn.addEventListener('click', () => openMenu(this.afkBtn, this, menuEl => buildAfkMenu(menuEl, this)));
     el.querySelector('.act-locate').addEventListener('click', () => this.locateFolder());
     el.querySelector('.act-drop').addEventListener('click', () => closeCell(this));
     el.querySelector('.act-send').addEventListener('click', () => this.submit());
@@ -1678,7 +1685,10 @@ class Cell {
       draft.titled = true;
       saveState();
     }
-    if (prompt == null) this.unread = false;
+    if (prompt == null) {
+      this.unread = false;
+      afkUserSent(this);
+    }
     const idle = this.status !== 'running'; // between turns: syncApi checks the rest
     if (this.status !== 'running') this.queuedTexts = []; // a new turn: the agent has read everything sent before it
     else if (prompt == null) this.queuedTexts.push({ text, images: images.length, results: 0 });
@@ -2133,7 +2143,7 @@ class Cell {
           h('span', {}, 'Continue when usage is back', h('span', { class: 'limit-resume-at' }))));
       }
       card.querySelector('.limit-resume').classList.remove('hidden');
-      this.setLimitResume(this.limitAutoContinue);
+      this.setLimitResume(this.limitAutoContinue); // on by default, so AFK sessions carry on too; a chat the user unchecked stays stopped
       scheduleUsageRefresh(this);
     }
   }
@@ -2339,6 +2349,7 @@ class Cell {
         if (text.startsWith('[Request interrupted')) this.notice('Interrupted');
         else if (/^\s*<(command-|local-command-|system-reminder|task-notification|ide_)/.test(text) || text.startsWith(TASK_HINT_PREFIX)) continue;
         else if (text.startsWith(RESUME_PROMPT)) { if (this.replaying) this.notice(RESUME_NOTICE); } // live, resumeAfterRestart said so
+        else if (text.startsWith(AFK_PREFIX)) { if (this.replaying) this.notice('AFK: HQ messaged the session while you were away.'); }
         else texts.push(text);
       } else if (block.type === 'image') {
         const url = imageBlockUrl(block.source);
@@ -2397,6 +2408,7 @@ class Cell {
     // Claude's plan usage; Hermes turns and turns on an API key do not touch it.
     if (this.backend === 'claude' && !this.procOnApi) scheduleUsageRefresh(this);
     this.syncTitle();
+    afkTurnEnded(this, m, local);
   }
 
   onControlResponse(m) {
@@ -2466,7 +2478,9 @@ class Cell {
     else if (req.tool_name === 'ExitPlanMode') card = this.planCard(m.request_id, req);
     else card = this.permissionCard(m.request_id, req);
     card.dataset.kind = req.tool_name === 'AskUserQuestion' ? 'question' : req.tool_name === 'ExitPlanMode' ? 'plan' : 'permission';
+    card.afkReq = req;
     this.pending.set(m.request_id, card);
+    afkWatch(this, m.request_id, card);
     this.prompts.append(card);
     this.syncPromptsBar(); // a card arriving while minimized only updates the count; it does not reopen the area
     this.unread = false;
@@ -2506,7 +2520,10 @@ class Cell {
 
   dropPrompt(requestId) {
     const card = this.pending.get(requestId);
-    if (card) card.remove();
+    if (card) {
+      clearTimeout(card.afkTimer);
+      card.remove();
+    }
     this.pending.delete(requestId);
     this.syncPromptsBar();
     this.refreshState();
@@ -3163,6 +3180,16 @@ class Cell {
     } finally {
       this.setHandoffBusy(false);
     }
+  }
+
+  /** The header's AFK button: lit while this session is AFK, struck through when it never is. */
+  renderAfk() {
+    const until = afkUntil(this);
+    this.afkBtn.classList.toggle('on', until > 0);
+    this.afkBtn.classList.toggle('never', this.afk === false);
+    this.afkBtn.title = this.afk === false ? 'AFK: never for this session'
+      : until ? `AFK ${until === Infinity ? 'until you are back' : `until ${afkClock(until)}`}${this.afk ? '' : ' (all of HQ)'}`
+        : 'AFK for this session';
   }
 
   setHandoffBusy(on) {
@@ -3822,6 +3849,7 @@ function addCell(opts, { restore = false, batch = false } = {}) {
     rememberFolder(cell.cwd);
   }
   if (!batch) {
+    syncAfk(); // a new session joins HQ's AFK
     saveState();
     renderSidebar();
   }
@@ -3919,6 +3947,7 @@ function setProjectColor(path, color) {
 }
 
 function closeCell(cell) {
+  clearTimeout(cell.afkNudgeTimer);
   cell.dispose();
   if (peeked === cell) peeked = null;
   const i = app.cells.indexOf(cell);
@@ -5132,7 +5161,7 @@ const CUSTOM_COLORS = [['--accent', 'Accent'], ['--link', 'Links'], ['--claude',
   ['--md-em', 'Italic'], ['--md-code', 'Inline code'], ['--md-h1', 'Heading 1'], ['--md-h2', 'Headings 2+'], ['--md-marker', 'List markers'],
   ['--hl-keyword', 'Code: keywords'], ['--hl-string', 'Code: strings'], ['--hl-function', 'Code: functions'], ['--hl-comment', 'Code: comments']];
 // The cell header's buttons that can be hidden: [class, label].
-const HEAD_BUTTONS = [['act-handoff', 'Handoff'], ['act-detail', 'Detail level'], ['act-progress', 'Progress'], ['act-waiting', 'Waiting mode'], ['act-code', 'VS Code'],
+const HEAD_BUTTONS = [['act-afk', 'AFK'], ['act-handoff', 'Handoff'], ['act-detail', 'Detail level'], ['act-progress', 'Progress'], ['act-waiting', 'Waiting mode'], ['act-code', 'VS Code'],
   ['act-terminal', 'Terminal'], ['act-reveal', FILE_MANAGER], ['act-collapse', 'Collapse'], ['act-max', 'Maximize'], ['act-close', 'Close']];
 const HEX = /^#[0-9a-f]{6}$/i;
 const DEFAULT_MAX_AGENTS = 2;
@@ -5706,6 +5735,8 @@ function flushState() {
       draft: c.input.value.trim() ? c.input.value : undefined,
       backend: c.backend === 'claude' ? undefined : c.backend,
       api: c.apiMode || undefined,
+      afk: c.afk ?? undefined,
+      afkLog: c.afkLog.length ? c.afkLog : undefined,
       // Only in the save just before an update restarts HQ; the first save after it drops the mark.
       resumeAfterUpdate: c.resumeMark ? true : undefined,
       resumeQueued: c.resumeMark && c.resumeMark.queued.length ? c.resumeMark.queued : undefined,
@@ -5722,6 +5753,7 @@ function flushState() {
     claudeUpdateAt: app.claudeUpdateAt || undefined,
     remoteDefault: app.remoteDefault == null ? undefined : app.remoteDefault,
     planLimitedUntil: app.planLimitedUntil > Date.now() ? app.planLimitedUntil : undefined,
+    afk: app.afk || undefined,
     settings: app.settings,
     sidebarOpen: app.sidebarOpen,
   };
@@ -5883,6 +5915,7 @@ async function restore() {
   app.claudeUpdateAt = state && Number.isFinite(state.claudeUpdateAt) ? state.claudeUpdateAt : 0;
   app.remoteDefault = state && typeof state.remoteDefault === 'boolean' ? state.remoteDefault : null;
   app.planLimitedUntil = state && Number.isFinite(state.planLimitedUntil) ? state.planLimitedUntil : 0;
+  app.afk = sanitizeAfk(state && state.afk);
   app.apiKeyHint = await invoke('api_key_hint').catch(() => null);
   app.settings = sanitizeSettings(state && state.settings);
   applySettings();
@@ -5915,6 +5948,7 @@ async function restore() {
   renderSidebar();
   for (const c of app.cells) if (!c.collapsed) autoGrow(c.input); // restored drafts, now that the cells are laid out
   restoring = false;
+  syncAfk(); // an AFK that ended while HQ was closed lists what it did
   saveState(); // anything saved while the board was coming back (and drops the resume marks)
   // A second apart, so a board of working sessions does not start every agent at once.
   app.cells.filter(c => c.resumeAfterUpdate).forEach((c, i) => setTimeout(() => c.resumeAfterRestart(), i * 1000));
