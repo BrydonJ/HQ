@@ -1819,7 +1819,12 @@ class Cell {
       return;
     }
     if (this.proc == null) return;
-    this.control({ subtype: 'interrupt' });
+    this.control({ subtype: 'interrupt' }).then(reply => {
+      // Hermes refuses to stop a turn it started itself, and Force stop would not end it either.
+      if (this.backend !== 'hermes' || !reply || reply.subtype !== 'error') return;
+      this.clearForceNote();
+      this.notice(reply.error, true);
+    });
     if (!this.interruptTimer) this.interruptTimer = setTimeout(() => this.offerForceStop(), FORCE_STOP_AFTER_MS);
   }
 

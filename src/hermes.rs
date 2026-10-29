@@ -124,6 +124,15 @@ pub fn spawn(app: &AppHandle, opts: SpawnOptions, events: Channel<InvokeResponse
 /// How long `hermes sessions discard` may take; it waits on Hermes' gateway.
 const DISCARD_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// How long a turn Hermes started itself must go without news, with no tool or question open,
+/// before HQ takes it as over: Hermes reports no end for a turn HQ did not send.
+const OWN_TURN_QUIET: Duration = if cfg!(test) { Duration::from_millis(300) } else { Duration::from_secs(30) };
+
+/// Stop's answer during a turn Hermes started itself. Hermes' gateway cancels only the prompts
+/// this connection sent (`acp_adapter/gateway_server.py`, `cancel`) and refuses `/stop`, and the
+/// turn runs in the gateway, so ending `hermes acp` (Force stop) leaves it running too.
+const OWN_TURN_STOP: &str = "Hermes started this turn itself, to act on a background task or watch notice, and Hermes lets HQ stop only the turns HQ sent. It runs on in Hermes, and this cell shows it until it ends; denying its next approval ends it sooner.";
+
 /// Why a session will not open while Hermes holds a turn it lost, and what clears it by hand.
 fn lost_turn_message(session: &str, why: &str) -> String {
     format!(
@@ -532,6 +541,9 @@ struct Bridge {
     /// without a reply of their own, so they wait here and each gets its own turn and result.
     prompts: VecDeque<(Value, Value)>, // (ACP prompt, the frontend's content for HQ's copy)
     in_turn: bool,
+    /// A turn Hermes started itself, such as on a background process's notice: when it began and
+    /// when Hermes last reported on it. Its updates stream in like a turn's, but no reply ends it.
+    own_turn: Option<(Instant, Instant)>,
     models: Vec<Value>,
     model: String,
     default_model: String,
@@ -585,6 +597,7 @@ impl Bridge {
             setup: 0,
             prompts: VecDeque::new(),
             in_turn: false,
+            own_turn: None,
             models: Vec::new(),
             model: String::new(),
             default_model: String::new(),
@@ -620,7 +633,22 @@ impl Bridge {
             }),
             Call::Initialize,
         );
-        for event in events {
+        loop {
+            let event = match self.own_turn {
+                // Only a turn Hermes started itself needs the clock: nothing else ends it.
+                Some(_) => match events.recv_timeout(Duration::from_millis(250)) {
+                    Ok(event) => event,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        self.own_turn_quiet();
+                        continue;
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                },
+                None => match events.recv() {
+                    Ok(event) => event,
+                    Err(_) => break,
+                },
+            };
             match event {
                 Event::Frontend(line) => {
                     if self.session.is_none() || self.setup > 0 {
@@ -931,6 +959,11 @@ impl Bridge {
         if self.session.as_deref() != Some(session) {
             return;
         }
+        // Work while no prompt of HQ's runs is a turn Hermes started itself. Usage, title and
+        // command updates also follow HQ's own turns, so they do not count.
+        if !self.in_turn && matches!(kind, "agent_message_chunk" | "agent_thought_chunk" | "tool_call" | "tool_call_update" | "plan") {
+            self.note_own_turn();
+        }
         match kind {
             "agent_message_chunk" => {
                 let Some(text) = u["content"]["text"].as_str().filter(|t| !t.is_empty()) else { return };
@@ -1111,9 +1144,36 @@ impl Bridge {
         self.emit(msg);
     }
 
+    /// Hermes reported on a turn it started itself; the first report shows the cell working.
+    fn note_own_turn(&mut self) {
+        let now = Instant::now();
+        match &mut self.own_turn {
+            Some((_, last)) => *last = now,
+            None => {
+                self.own_turn = Some((now, now));
+                self.emit(json!({
+                    "type": "system", "subtype": "init", "session_id": self.session, "model": self.model,
+                    "permissionMode": claude_mode(&self.mode), "cwd": self.opts.cwd,
+                }));
+            }
+        }
+    }
+
+    /// Ends a turn Hermes started itself once it has gone quiet. A tool still running or a
+    /// question still open is not quiet, however long it takes.
+    fn own_turn_quiet(&mut self) {
+        let Some((started, last)) = self.own_turn else { return };
+        if !self.tools.is_empty() || !self.permissions.is_empty() {
+            self.own_turn = Some((started, Instant::now()));
+        } else if last.elapsed() >= OWN_TURN_QUIET {
+            self.turn_ended(started, "end_turn", &Value::Null, None);
+        }
+    }
+
     fn turn_ended(&mut self, started: Instant, stop: &str, usage: &Value, error: Option<&str>) {
         self.flush();
         self.in_turn = false;
+        self.own_turn = None;
         let tokens = |k: &str| usage[k].as_u64().unwrap_or(0);
         self.totals.0 += tokens("inputTokens");
         self.totals.1 += tokens("outputTokens");
@@ -1213,6 +1273,8 @@ impl Bridge {
         }));
         self.record(json!({ "type": "user", "message": { "role": "user", "content": content } }));
         self.in_turn = true;
+        // A turn Hermes started itself runs ahead of this prompt; this prompt's reply ends both.
+        self.own_turn = None;
         self.turn_prompt = prompt_text(&content);
         self.turn_tools.clear();
         self.call("session/prompt", prompt, Call::Prompt { started: Instant::now() });
@@ -1250,6 +1312,10 @@ impl Bridge {
                 self.reply_ok(request_id, response);
             }
             "interrupt" => {
+                // Its approval cards stay: denying one is the way left to end it.
+                if self.own_turn.is_some() {
+                    return self.reply_err(request_id, OWN_TURN_STOP);
+                }
                 self.prompts.clear();
                 self.dismiss(|_| true); // as ACP asks: open permission requests end with the turn
                 if self.in_turn {
@@ -1563,6 +1629,92 @@ fn now_iso() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A translator on a scripted Hermes: what the test writes is Hermes' output, and what the
+    /// translator sends Hermes goes to a process that only reads it.
+    fn scripted() -> (Child, PipeWriter, mpsc::Sender<String>, mpsc::Receiver<Value>) {
+        let dir = std::env::temp_dir().join("hq-hermes-scripted");
+        fs::create_dir_all(&dir).unwrap();
+        let opts = SpawnOptions {
+            cwd: dir.to_string_lossy().into_owned(),
+            resume: None,
+            permission_mode: None,
+            model: None,
+            effort: None,
+            fork: false,
+            auto_tasks: false,
+            max_agents: None,
+            api_key: false,
+            mcp: false,
+        };
+        let mut sink = if cfg!(windows) { Command::new("findstr") } else { Command::new("cat") };
+        if cfg!(windows) {
+            sink.arg("^");
+        }
+        sink.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+        hide_console(&mut sink);
+        let mut child = sink.spawn().unwrap();
+        let (hermes_out, hermes_in) = std::io::pipe().unwrap();
+        let (input, lines) = translate(child.stdin.take().unwrap(), hermes_out, dir, opts, json!([])).unwrap();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(lines).lines() {
+                let Ok(line) = line else { break };
+                if tx.send(serde_json::from_str(&line).expect("translator wrote invalid JSON")).is_err() {
+                    break;
+                }
+            }
+        });
+        (child, hermes_in, input, rx)
+    }
+
+    fn hermes_says(out: &mut PipeWriter, v: Value) {
+        writeln!(out, "{v}").unwrap();
+    }
+
+    fn next_matching(rx: &mpsc::Receiver<Value>, what: &str, pred: impl Fn(&Value) -> bool) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let v = rx.recv_timeout(left).unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+            if pred(&v) {
+                return v;
+            }
+        }
+    }
+
+    #[test]
+    fn a_turn_hermes_started_itself_refuses_stop_and_ends_when_quiet() {
+        let (mut child, mut hermes, input, rx) = scripted();
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": 0, "result": {} }));
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": 1, "result": { "sessionId": "s1" } }));
+        let update = |u: Value| json!({ "jsonrpc": "2.0", "method": "session/update", "params": { "sessionId": "s1", "update": u } });
+        // A background process's notice starts a turn HQ never sent.
+        hermes_says(&mut hermes, update(json!({ "sessionUpdate": "tool_call", "toolCallId": "t1", "kind": "execute", "title": "terminal: ping", "rawInput": { "command": "ping" } })));
+        let init = next_matching(&rx, "system/init", |v| v["type"] == "system");
+        assert_eq!(init["session_id"], "s1");
+
+        input.send(json!({ "type": "control_request", "request_id": "stop", "request": { "subtype": "interrupt" } }).to_string()).unwrap();
+        let reply = next_matching(&rx, "the interrupt's reply", |v| v["type"] == "control_response");
+        assert_eq!(reply["response"]["subtype"], "error", "{reply}");
+        assert_eq!(reply["response"]["error"], OWN_TURN_STOP);
+
+        // While its tool runs, the turn is not over, however quiet.
+        std::thread::sleep(OWN_TURN_QUIET * 3);
+        assert!(rx.try_iter().all(|v| v["type"] != "result"), "ended while a tool still ran");
+        hermes_says(&mut hermes, update(json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed", "content": [] })));
+        hermes_says(&mut hermes, update(json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "Done." } })));
+        let result = next_matching(&rx, "result", |v| v["type"] == "result");
+        assert_eq!(result["subtype"], "success", "{result}");
+
+        // With no turn of its own left, Stop goes to Hermes as before.
+        input.send(json!({ "type": "control_request", "request_id": "stop2", "request": { "subtype": "interrupt" } }).to_string()).unwrap();
+        let reply = next_matching(&rx, "the second interrupt's reply", |v| v["type"] == "control_response");
+        assert_eq!(reply["response"]["subtype"], "success", "{reply}");
+        drop(input);
+        drop(hermes);
+        let _ = child.kill();
+    }
 
     fn options(ids: &[(&str, &str)]) -> Vec<(String, String)> {
         ids.iter().map(|(i, k)| (i.to_string(), k.to_string())).collect()
