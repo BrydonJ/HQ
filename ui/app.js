@@ -61,8 +61,8 @@ const BUSY_VERBS = ['Cooking', 'Locking in', 'Vibe coding', 'Aura farming', 'Man
   'Appeasing the type system', 'Reticulating splines', 'Herding cats', 'Wrangling semicolons', 'Untangling spaghetti',
   'Polishing pixels', 'Counting brackets', 'Balancing parentheses', 'Chasing a null', 'Hunting heisenbugs',
   'Interrogating the stack trace', 'Reading the fine print', 'Grepping the universe', 'Spelunking the call graph',
-  'Defragmenting thoughts', 'Compiling vibes', 'Refactoring reality', 'Bikeshedding (efficiently)', 'Yak shaving',
-  'Shaving the yak closer', 'Summoning the daemon', 'Feeding the hamsters', 'Spinning up the hamster wheel',
+  'Defragmenting thoughts', 'Compiling vibes', 'Refactoring reality', 'Bikeshedding (efficiently)',
+  'Summoning the daemon', 'Feeding the hamsters', 'Spinning up the hamster wheel',
   'Warming up the GPUs', 'Cranking the flux capacitor', 'Calibrating the vibes', 'Aligning the chakras of the repo',
   'Channeling the senior dev', 'Doing the thing', 'Thinking really hard', 'Thinking even harder', 'Galaxy braining',
   'Connecting the dots', 'Following the white rabbit', 'Taking the red pill', 'Entering the matrix', 'Hacking the mainframe',
@@ -102,7 +102,85 @@ const BUSY_VERBS = ['Cooking', 'Locking in', 'Vibe coding', 'Aura farming', 'Man
   'Squinting at the logs', 'Tracing the breadcrumbs', 'Following the money', 'Sniffing out bugs', 'Squashing bugs',
   'Swatting flies', 'Debugging with print', 'Adding console.log', 'Removing console.log', 'Committing to the bit',
   'Rebasing feelings', 'Cherry-picking ideas', 'Merging thoughts', 'Resolving conflicts', 'Stashing worries',
-  'Pushing through', 'Pulling it together', 'Forking the timeline', 'Branching out', 'Tagging the release (mentally)'];
+  'Pushing through', 'Pulling it together', 'Forking the timeline', 'Branching out', 'Tagging the release (mentally)',
+  'Cooking (allegedly)', 'Grinding in silence', 'Moving in silence', 'Going feral', 'Being him', 'In my coding era',
+  'In its debugging era', 'Rotting productively', 'Brain rotting (responsibly)', 'Skibidi-ing the bugs away',
+  'Ohio-proofing the code', 'Ate and left no bugs',
+  'Mogging the competition', 'Looksmaxxing the UI', 'Codemaxxing', 'Sleepmaxxing (not really)', 'Tokenmaxxing',
+  'Contextmaxxing', 'Aura maxxing', 'Losing aura points (temporarily)', 'Gaining aura', '+1000 aura',
+  'Fanum taxing your tokens', 'Sigma grinding', 'On that grindset', 'Rizzing up the API', 'Bussin through the backlog',
+  'Ratio-ing the bugs', 'Ghosting the errors', 'Soft launching a fix', 'Hard launching a fix', 'Lowkey cooking',
+  'Lowkey panicking (jk)', 'Not panicking', 'Deep in the sauce', 'Getting the sauce', 'Drip-checking the code',
+  'Fit-checking the functions', 'Stan-ing your codebase', 'Feeling the vibes', 'Vibe-shifting', 'Big vibe energy',
+  'Delulu but productive', 'It is what it is-ing', 'Bet', 'Say less', 'On god', 'Fr fr', 'No cap, working', 'Periodt',
+  'Valid-ating', 'Gaslighting the compiler', 'Gatekeeping, girlbossing, coding', 'Pick-me-ing the right function',
+  'Living in the terminal', 'Touching zero grass', 'Not touching grass today', 'Copium huffing', 'Hopium loading',
+  'Big W incoming', 'Avoiding the L', 'Taking the W', "Farming W's", 'Clutching up', 'Going sweaty mode', 'Tryharding',
+  'Speedrunning the backlog', 'Speedrunning a bug fix', 'No-scoping the bug', '360 no-scoping', 'Camping the error',
+  'Respawning with full health', 'Pressing F for the old code', 'GG-ing the tests', 'Gitting gud', 'Diffing hard',
+  'Merge-conflict therapy', 'Rage-quitting (not really)', 'Touching the stack', 'Main quest only, no side quests',
+  'Doing a side quest', 'Skipping the cutscene', 'Reading the patch notes', 'Nerfing the bugs', 'Buffing the code',
+  'Min-maxing', 'Cheese-ing the boss fight', 'Unlocking the hidden ending', 'Grabbing the loot', 'Opening a loot box',
+  'Rolling a nat 20', 'Rolling a nat 1 (rerolling)', 'Checking the leaderboard', 'Going AFK (but working)',
+  'Being a 10x dev (for 10 seconds)', 'Pretending to be a senior', 'Impostor syndrome-ing',
+  'Copy-pasting from the future', 'Writing code that slaps', 'Making it make sense', 'Making it pop',
+  'Adding the drip', 'Putting respect on its name', 'Not the vibe, retrying', 'Running on vibes and caffeine',
+  'Running on three energy drinks', 'Chugging a Monster', 'Pulling a Red Bull all-nighter', 'Ordering takeaways',
+  'Waiting for the Uber Eats', 'Doing a TikTok dance', 'Watching one more YouTube tutorial',
+  'Doomscrolling Stack Overflow', 'Liking its own commits', 'Posting a story about it', 'Going viral (internally)',
+  'Making the reel', 'Editing the vlog', 'Recording a podcast about it', 'Subscribing to the bug',
+  'Hitting the bell icon', 'Smashing that like button', 'Unboxing the codebase', 'Reacting to the code',
+  'Duetting the diff', 'Getting ratioed by the linter', 'Arguing with the linter', 'Winning the argument',
+  'Losing the argument', 'Filing a complaint with the compiler', 'Speaking to the manager (the compiler)',
+  'Writing a strongly worded comment', 'Leaving a passive-aggressive TODO', 'Deleting the TODO',
+  'Pretending the TODO never existed', 'Blaming the intern', 'Blaming DNS', 'It was DNS', 'Blaming cosmic rays',
+  'Blaming Mercury retrograde', 'Checking the horoscope', 'Consulting the group chat', 'Leaving the group chat',
+  'Muting the group chat', 'Sliding into the DMs (of the API)', 'Left on read by the API', 'Double texting the server',
+  'Waiting for the server to text back', 'Situationship with the database', 'Breaking up with the bug',
+  'Moving on from the bug', 'Not over the bug yet', 'Therapy session with the stack trace',
+  'Setting boundaries with the codebase', 'Protecting its peace', 'Romanticising the refactor',
+  'Main character refactor', 'Hot girl walking (around the repo)', 'Taking a hot lap', 'Victory lap pending',
+  'Warming up', 'Stretching first', 'Hydrating', 'Doing a lil dance', 'Doing a lil treat', 'Treating itself',
+  'Feral coding', 'Unhinged coding', 'Chaotic good coding', 'Lawful neutral coding', 'Big brain time',
+  'Smol brain moment (recovering)', 'Thinking in 4K', 'Thinking in 8K', 'Rendering thoughts in HD', 'Loading the lore',
+  'Reading the lore', 'Building lore', 'Adding to the lore', 'Plot twisting', 'Character developing',
+  'Arc in progress', 'Redemption arc', 'Villain arc (for bugs)', 'Training montage', 'Cue the montage music',
+  'Entering the chat', 'Leaving the chat (briefly)', 'Logging on', 'Popping off', 'Going crazy, going stupid',
+  'Built like a compiler', 'Built different (again)', 'Sending it (again)', 'Locked in (deeper)', 'Fully locked in',
+  'Ultra locked in', 'Ascending', 'Transcending', 'Achieving enlightenment', 'Reaching nirvana',
+  'Becoming one with the code', 'Communing with the codebase', 'Whispering to the server', 'Sweet-talking the API',
+  'Flirting with the database', 'Charming the CI pipeline', 'Bribing CI with cookies', 'Praying to the CI gods',
+  'Lighting a candle for the build', 'Knocking on wood', 'Crossing fingers', 'Manifesting green checks',
+  'Manifesting zero warnings', 'Vision-boarding the fix', 'Journaling about the bug', 'Meditating on the problem',
+  'Box breathing', 'Doing yoga with the code', 'Downward-dogging the stack', 'Pumping iron (and code)',
+  'Skipping leg day', 'Hitting a PR (personal record)', 'Spotting the bug', 'Bulking the feature', 'Cutting the bloat',
+  'Shredding the dead code', 'Gains loading', 'Carbo-loading', 'Making a smoothie', 'Ordering a flat white',
+  'Oat-milking it', 'Avocado toasting', 'Matcha-ing', 'Boba-ing', 'Air-frying the build', 'Instant-potting',
+  'Sous-viding the logic', 'Deep-frying the bugs', 'Roasting the code (lovingly)', 'Seasoning the code',
+  'Letting it rest', 'Taste-testing', 'Gordon Ramsay-ing the code', 'Calling the code an idiot sandwich',
+  'Masterchef-ing', 'Bake-off-ing', 'Doing a wheelie', 'Kickflipping', 'Ollie-ing over the bug',
+  'Parkouring through the code', 'Wall-running', 'Dabbing (ironically)', 'Flossing (the dance)', 'Hitting the woah',
+  'Shmoney dancing', 'Renegade-ing', 'Rickrolling the bugs', 'Never gonna give you up', 'Vibing to lo-fi beats',
+  'Lo-fi coding to study to', 'Queueing the playlist', 'Skipping the ad', 'Buffering (affectionately)',
+  'Plugging in the aux', 'Turning up the bass', 'Dropping the beat', 'Bringing the beat back', 'Spinning the decks',
+  'Raving in the RAM', 'Moshing with the modules', 'Crowd-surfing the call stack', 'Encore incoming',
+  'Making a braai plan', 'Lekker-ing it up', 'Shot-ing (thanks, bru)', 'Howzit-ing the server',
+  'Robot-ing (traffic lights)', 'Load-shedding proofing', 'Running on the backup inverter', 'Checking EskomSePush',
+  'Sharp-fiving the fix', 'Doing a mission, bru', 'Taking the gap', 'Graft mode on', 'Hustling like a taxi driver',
+  'Ja-nee-ing', 'Ag shame-ing the bug', 'Yoh-ing at the code', 'Hayibo-ing', 'Gooi-ing some code',
+  'Skrik-ing at the errors', 'Vasbyt-ing', 'Bakkie-loading the files', 'Chilling like a villain', 'Lekker lekker',
+  'Making a potjie', 'Stirring the potjie', 'Ordering a Steers burger', "Grabbing a Nando's", 'Biltong snacking',
+  'Rusk dunking', 'Koeksister breaking', 'Bunny chow-ing', 'Vetkoek-ing', 'Asking ChatGPT (jk)', 'Not asking ChatGPT',
+  'Being better than autocomplete', 'Out-thinking autocomplete', 'Tab-tab-tabbing', 'Ctrl+S-ing compulsively',
+  'Ctrl+Z-ing the past', 'Alt-tabbing to the docs', 'Closing 47 tabs', 'Opening 48 tabs',
+  'Clearing the cache (and the mind)', 'rm -rf-ing doubts', 'sudo-ing with confidence', 'npm install-ing patience',
+  'Waiting for node_modules to finish', 'Downloading the internet (node_modules)', 'Hello world-ing', 'Fizzbuzzing',
+  'Leetcode grinding', 'Whiteboarding', 'Drawing boxes and arrows', 'Architecting', 'Over-engineering (then not)',
+  'Under-engineering (then fixing)', 'DRY-ing off', 'YAGNI-ing', 'SOLID-ifying',
+  'Making it idempotent', 'Making it async', 'Awaiting greatness', 'Promise-ing it resolves', 'Unwrapping carefully',
+  'Avoiding unwrap()', 'Handling the edge case', 'Living on the edge (case)', 'Off-by-one-ing (fixed)',
+  'Naming things (hardest part)', 'Renaming things again', 'Choosing a variable name', 'Calling it temp2',
+  'Regretting temp2'];
 const BUSY_ROTATE_MS = 9000;
 const busyDeck = [];
 
@@ -233,6 +311,7 @@ class Cell {
     this.wmWorked = false;         // work has been seen since arming (an idle cell arms and waits for it)
     this.wmView = false;           // the waiting view is on screen now (the chat is display:none)
     this.wmTimer = 0;              // one timeout: finishes waiting mode once the cell has stayed idle
+    this.wmDoneOpen = false;       // the waiting view shows its completed tasks (folded away by default)
     this.wmStick = true;           // stickToBottom, kept while the chat is hidden
     this.taskLine = '';            // "3/7": the task list at a glance, in the header
     this.sideTaskLine = '';        // the same without the live tool name, for the sidebar (which a change rebuilds)
@@ -991,9 +1070,7 @@ class Cell {
       turnActive && this.turnTools ? h('span', { text: `${this.turnTools} tool call${this.turnTools === 1 ? '' : 's'}` }) : null,
       h('span', { class: 'spacer' }),
       ask,
-      asWaiting
-        ? h('button', { class: 'icon-btn pv-close', title: 'Show the chat (turns waiting mode off)', onclick: () => this.setWaitingMode(false) }, icon('comment'))
-        : h('button', { class: 'icon-btn pv-close', title: 'Close', onclick: () => this.setProgressView(false) }, icon('close')));
+      asWaiting ? null : h('button', { class: 'icon-btn pv-close', title: 'Close', onclick: () => this.setProgressView(false) }, icon('close')));
 
     let bar = null;
     if (pct != null || (running && !asWaiting)) { // the waiting view's loader stands in for the indeterminate bar
@@ -1014,29 +1091,43 @@ class Cell {
     let tasks = null;
     if (list.length) {
       const iconFor = { completed: 'pass-filled', in_progress: 'loading codicon-modifier-spin', pending: 'circle-large-outline' };
-      tasks = h('div', { class: 'pv-section' },
-        h('div', { class: 'pv-title', text: this.tasksStale ? 'Previous task list' : 'Tasks' }),
-        h('ul', { class: `pv-tasks${this.tasksStale ? ' stale' : ''}` }, list.map(t => h('li', { class: t.status },
-          icon(iconFor[t.status] || 'circle-large-outline'),
-          h('span', { text: t.status === 'in_progress' && t.activeForm ? t.activeForm : t.subject }),
-        ))));
+      const item = t => h('li', { class: t.status },
+        icon(iconFor[t.status] || 'circle-large-outline'),
+        h('span', { text: t.status === 'in_progress' && t.activeForm ? t.activeForm : t.subject }));
+      const stale = this.tasksStale ? ' stale' : '';
+      const title = h('div', { class: 'pv-title', text: this.tasksStale ? 'Previous task list' : 'Tasks' });
+      // The waiting view lists what is left first and folds the finished ones away under it: long lists bury the live task.
+      const finished = asWaiting ? list.filter(t => t.status === 'completed') : [];
+      if (!finished.length) tasks = h('div', { class: 'pv-section' }, title, h('ul', { class: `pv-tasks${stale}` }, list.map(item)));
+      else {
+        const left = list.filter(t => t.status !== 'completed');
+        const open = this.wmDoneOpen;
+        tasks = h('div', { class: 'pv-section' }, title,
+          left.length ? h('ul', { class: `pv-tasks${stale}` }, left.map(item)) : null,
+          h('button', { class: `pv-fold${open ? ' open' : ''}`, title: open ? 'Hide the completed tasks' : 'Show the completed tasks',
+            onclick: () => { this.wmDoneOpen = !open; this.renderProgress(); } },
+          icon('chevron-right'), `Completed (${finished.length})`),
+          open ? h('ul', { class: `pv-tasks done${stale}` }, finished.map(item)) : null);
+      }
     }
 
-    const agents = this.bgTasks.map(t => ({ id: t.id, label: `${BG_LABELS[t.type] || 'Task'}: ${t.description}`, p: this.taskProgress.get(t.id) }));
+    const agents = this.bgTasks.map(t => ({ id: t.id, kind: BG_LABELS[t.type] || 'Task', label: t.description, p: this.taskProgress.get(t.id) }));
     for (const [id, p] of this.taskProgress) {
-      if (!this.bgTasks.some(t => t.id === id)) agents.push({ id, label: `Agent: ${p.description}`, p });
+      if (!this.bgTasks.some(t => t.id === id)) agents.push({ id, kind: 'Agent', label: p.description, p });
     }
     const agentsEl = agents.length ? h('div', { class: 'pv-section' },
       h('div', { class: 'pv-title', text: 'Agents and shells' }),
-      h('ul', { class: 'pv-agents' }, agents.map(({ id, label, p }) => {
+      h('ul', { class: 'pv-agents' }, agents.map(({ id, kind, label, p }) => {
         const detail = p ? [p.lastTool && `last: ${p.lastTool}`, p.toolUses != null && `${p.toolUses} tool uses`,
           p.durationMs != null && formatDuration(p.durationMs)].filter(Boolean).join('  ·  ') : '';
         const stopping = this.stoppingTasks.has(String(id));
         const stop = h('button', { class: 'icon-btn pv-stop', disabled: stopping || this.proc == null,
-          title: stopping ? 'Stopping…' : 'Stop this agent or shell', onclick: () => this.stopTask(id) }, icon(stopping ? 'loading codicon-modifier-spin' : 'debug-stop'));
-        return h('li', null, h('span', { class: 'codicon codicon-loading codicon-modifier-spin' }),
-          h('div', { class: 'pv-agent-main' }, h('div', { text: label }), detail ? h('div', { class: 'desc', text: detail }) : null,
-            p && p.summary ? h('div', { class: 'desc', text: p.summary }) : null), stop);
+          title: stopping ? 'Stopping…' : `Stop this ${kind.toLowerCase()}`, onclick: () => this.stopTask(id) }, icon(stopping ? 'loading codicon-modifier-spin' : 'debug-stop'));
+        return h('li', { class: `kind-${kind.toLowerCase()}` }, icon(kind === 'Shell' ? 'terminal' : kind === 'Monitor' ? 'eye' : 'hubot'),
+          h('div', { class: 'pv-agent-main' },
+            h('div', { class: 'pv-agent-name', title: label }, h('span', { class: 'pv-kind', text: kind }), h('span', { class: 'pv-agent-label', text: label })),
+            detail ? h('div', { class: 'desc', text: detail }) : null,
+            p && p.summary ? h('div', { class: 'desc summary', text: p.summary }) : null), stop);
       }))) : null;
 
     const answerEl = answer && answer.at ? h('div', { class: 'pv-section' },
