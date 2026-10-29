@@ -13,7 +13,7 @@ function harness() {
   const usage = { fetchedAt: now };
   class Clock extends Date { static now() { return now; } }
   const context = vm.createContext({ app, usage, Date: Clock, USAGE_EVERY_MS: 300_000,
-    setInterval: () => 1, clearInterval() {}, labelLimitApi() {}, scheduleUsageRefresh() {},
+    setInterval: () => 1, clearInterval() {}, labelLimitApi() {}, apiAlways: () => false, scheduleUsageRefresh() {},
     usageResetAt: () => reset > now ? reset : 0,
     refreshUsage: async () => { refreshes++; usage.fetchedAt = now; },
   });

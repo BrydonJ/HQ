@@ -194,6 +194,10 @@ the repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the contents of the updater 
   - The numbers come from Claude's own `get_usage` request, the same data `/usage` shows.
     HQ asks a running session when there is one. Otherwise it starts a short-lived `claude`
     that skips MCP servers and hooks and saves no transcript.
+  - Below the limits, **Credits** lists what has money left: dollar allowances such as cloud
+    credits (amount left, of how much, and when they reset), a prepaid usage-credit balance,
+    and what sessions spent on HQ's API key in this run. Each shows only when above zero. A
+    Console key's own balance is not readable from HQ; the Console shows it.
   - It refreshes after each finished turn, and every 5 minutes (15 when no session is running).
   - Claude chats that hit the plan's usage limit continue automatically when usage returns.
     Uncheck **Continue when usage is back** on that chat's usage error to keep it stopped;
@@ -235,6 +239,10 @@ the repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the contents of the updater 
     key is not on it (an `env` block in Claude's settings wins over HQ), HQ says so.
   - Sessions on the key leave plan usage, the model list and Remote Control alone: those follow
     the plan.
+  - To run on the key from the start, with no Claude plan or sign-in, turn on Settings > **Run
+    Claude sessions on the API key**, or choose **Use an API key instead** on the first-run
+    sign-in card. Every Claude session then starts on the key, open ones change over at their
+    next message, and HQ stops asking you to sign in.
 - **Context window:** a small ring in the composer bar (it appears after the first reply) shows
   how full the session's context is.
   - The ring fills toward the auto-compact point and turns from green to red as it nears it

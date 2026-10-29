@@ -651,6 +651,10 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .setup-status:empty { display: none; }
 .setup-status.err { color: var(--error); font-family: var(--mono); font-size: 11px; }
 .setup-actions { display: flex; align-items: center; gap: 14px; margin-top: 16px; }
+.setup-key { margin-top: 14px; }
+.setup-key-row { display: flex; gap: 8px; margin-top: 8px; }
+.setup-key-row input { flex: 1; min-width: 0; padding: 4px 6px; font-family: var(--mono); background: var(--input-bg); color: var(--fg); border: 1px solid var(--border-strong); border-radius: 3px; outline: none; }
+.setup-key-row input:focus { border-color: var(--accent); }
 
 /* ---------- popup menu (model / effort / MCP) ---------- */
 .menu {
@@ -775,6 +779,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 }
 .usage-head { display: flex; justify-content: space-between; color: var(--fg-muted); font-size: 11px; text-transform: uppercase; margin-bottom: 6px; }
 .usage-plan { color: var(--fg-faint); }
+.usage-credits-head { margin-top: 10px; padding-top: 6px; border-top: 1px solid var(--border); }
 .usage-row { margin-bottom: 8px; }
 .usage-line { display: flex; justify-content: space-between; color: var(--fg-strong); }
 .usage-pct { font-weight: 600; }

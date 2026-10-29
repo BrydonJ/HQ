@@ -1295,7 +1295,12 @@ class Cell {
 
   /** Whether the session is on HQ's API key, or switched to it, so a turn may first need a restart. */
   apiSwitchDue() {
-    return this.backend === 'claude' && (this.apiMode || this.procOnApi);
+    return this.backend === 'claude' && (this.apiMode || this.procOnApi || apiAlways());
+  }
+
+  /** Whether the next claude this session starts runs on HQ's API key: switched to it, or always (Settings). */
+  onApiNext() {
+    return this.backend === 'claude' && (this.apiMode || apiAlways());
   }
 
   /** The session runs on HQ's API key only while the user chose it and the plan's usage is out. */
@@ -1327,7 +1332,7 @@ class Cell {
   async switchCredential() {
     if (this.apiMode && !this.apiWanted() && !usage.data) await withTimeout(refreshUsage(), 15000); // just started: no figures yet
     this.settleApiMode();
-    if (this.proc == null || this.procOnApi === this.apiMode) return;
+    if (this.proc == null || this.procOnApi === this.onApiNext()) return;
     if (this.pending.size || this.bgTasks.length) {
       this.notice(`Claude still has work running, so this message stays on ${this.procOnApi ? 'your API key' : 'your plan'}.`);
       return;
@@ -1381,11 +1386,13 @@ class Cell {
 
   /** The API chip: while the session is switched to HQ's key, or Claude reports running on an API key anyway. */
   renderApi() {
-    const onHqKey = this.apiMode || this.procOnApi;
+    const onHqKey = this.apiMode || this.procOnApi || apiAlways();
     const show = this.backend === 'claude' && (onHqKey || this.apiSource === 'ANTHROPIC_API_KEY');
     this.apiBtn.classList.toggle('hidden', !show);
     const spent = this.cost.apiUsd > 0 ? `\n${formatCost(this.cost.apiUsd)} spent on it in this HQ run, as Claude Code reports it` : '';
-    this.apiBtn.title = !show ? '' : onHqKey
+    this.apiBtn.title = !show ? '' : apiAlways()
+      ? `On your API key (${app.apiKeyHint}): Settings has every Claude session run on it${spent}`
+      : onHqKey
       ? `On your API key${app.apiKeyHint ? ` (${app.apiKeyHint})` : ''}${this.apiMode ? " until your plan's usage is back" : ', back on your plan from the next message'}${spent}`
       : `Claude is using an ANTHROPIC_API_KEY from HQ's environment, not your plan${spent}`;
     const offer = this.backend === 'claude' && !onHqKey;
@@ -1540,7 +1547,7 @@ class Cell {
       if (this.backend === 'codex') await codexBeforeSpawn(this);
       this.spawnedFresh = !this.sessionId; // Remote Control waits for a new session's first prompt
       this.settleApiMode();
-      const onApi = this.backend === 'claude' && this.apiMode;
+      const onApi = this.onApiNext();
       try {
         for (let attempt = 0; ; attempt++) {
           try {
@@ -2145,10 +2152,10 @@ class Cell {
     else card.dataset.live = '';
     const api = card.querySelector('.limit-api');
     labelLimitApi(api);
-    api.classList.toggle('hidden', replay || this.backend !== 'claude' || this.apiMode || this.procOnApi);
+    api.classList.toggle('hidden', replay || this.backend !== 'claude' || this.apiMode || this.procOnApi || apiAlways());
     card.querySelector('.limit-title').textContent = title || 'Usage limit reached';
     card.querySelector('.limit-reset').textContent = reset;
-    if (!replay && this.backend === 'claude' && !this.apiMode && !this.procOnApi && this.apiSource !== 'ANTHROPIC_API_KEY') {
+    if (!replay && this.backend === 'claude' && !this.apiMode && !this.procOnApi && !apiAlways() && this.apiSource !== 'ANTHROPIC_API_KEY') {
       if (!card.querySelector('.limit-resume')) {
         card.querySelector('.limit-main').append(h('label', { class: 'limit-resume' },
           h('input', { type: 'checkbox', onchange: e => this.setLimitAutoContinue(e.target.checked) }),
@@ -4685,6 +4692,37 @@ const LIMIT_LABELS = {
   seven_day_sonnet: 'Weekly · Sonnet',
 };
 
+/**
+ * Names for the dollar credits Claude's usage reply lists among its limits under code names. One
+ * HQ does not know shows its own `label`, else "Credits".
+ */
+const CREDIT_LABELS = {
+  iguana_necktie: 'Cloud credits',
+  cinder_cove: 'Claude Code and Cowork credit',
+};
+
+/** A `{ amount_minor, exponent }` money value in whole units, or null. */
+function moneyValue(m) {
+  if (!m || typeof m !== 'object' || !Number.isFinite(m.amount_minor)) return null;
+  return m.amount_minor / 10 ** (Number.isInteger(m.exponent) ? m.exponent : 2);
+}
+
+/** The account's credits that have something left: dollar allowances among the limits, and a prepaid balance. */
+function sanitizeCredits(r) {
+  const credits = [];
+  for (const [key, l] of Object.entries((r && r.rate_limits) || {})) {
+    if (!l || typeof l !== 'object' || LIMIT_LABELS[key] || !(typeof l.limit_dollars === 'number' && l.limit_dollars > 0)) continue;
+    const used = typeof l.used_dollars === 'number' ? l.used_dollars : null;
+    const left = typeof l.remaining_dollars === 'number' ? l.remaining_dollars : used != null ? l.limit_dollars - used : null;
+    if (!(left > 0)) continue;
+    const label = CREDIT_LABELS[key] || (typeof l.label === 'string' && l.label.trim() ? l.label.trim().slice(0, 60) : 'Credits');
+    credits.push({ key, label, left, limit: l.limit_dollars, resetsAt: Date.parse(l.resets_at) || null });
+  }
+  const balance = moneyValue(r && r.spend && r.spend.balance);
+  if (balance > 0) credits.push({ key: 'balance', label: 'Usage credits', left: balance, limit: null, resetsAt: null });
+  return credits;
+}
+
 /** Keeps only the limits HQ shows. Unknown or missing fields are skipped, never guessed. */
 function sanitizeUsage(r) {
   const rows = [];
@@ -4700,7 +4738,7 @@ function sanitizeUsage(r) {
     if (!name || rows.some(x => x.label === `Weekly · ${name}`)) continue;
     rows.push({ key: `scoped-${name}`, label: `Weekly · ${name}`, percent: Math.round(l.percent), resetsAt: Date.parse(l.resets_at) || null });
   }
-  return { plan: typeof (r && r.subscription_type) === 'string' ? r.subscription_type : null, available: !!(r && r.rate_limits_available), rows };
+  return { plan: typeof (r && r.subscription_type) === 'string' ? r.subscription_type : null, available: !!(r && r.rate_limits_available), rows, credits: sanitizeCredits(r) };
 }
 
 function withTimeout(promise, ms) {
@@ -4888,6 +4926,24 @@ function renderUsagePop() {
       h('div', { class: 'usage-line' }, h('span', { text: row.label }), h('span', { class: 'usage-pct', text: `${percent}%` })),
       h('div', { class: 'usage-bar' }, h('span', { style: `width:${Math.min(100, percent)}%;background:${heatCss(percent)}` })),
       row.resetsAt ? h('div', { class: 'usage-reset', text: expired ? 'Reset; refreshing…' : resetText(row.resetsAt) }) : null));
+  }
+  // Credits with something left, then what sessions spent on HQ's API key in this run.
+  const credits = (usage.data && usage.data.credits) || [];
+  const apiSpent = app.cells.reduce((sum, c) => sum + (c.cost.apiUsd || 0), 0);
+  if (credits.length || apiSpent > 0) parts.push(h('div', { class: 'usage-head usage-credits-head' }, h('span', { text: 'Credits' })));
+  for (const c of credits) {
+    const usedPct = c.limit ? Math.round(100 * (1 - c.left / c.limit)) : null;
+    parts.push(h('div', { class: 'usage-row' },
+      h('div', { class: 'usage-line' }, h('span', { text: c.label }),
+        h('span', { class: 'usage-pct', text: `${formatCost(c.left)} left${c.limit ? ` of ${formatCost(c.limit)}` : ''}` })),
+      usedPct != null ? h('div', { class: 'usage-bar' }, h('span', { style: `width:${Math.max(0, Math.min(100, usedPct))}%;background:${heatCss(usedPct)}` })) : null,
+      c.resetsAt ? h('div', { class: 'usage-reset', text: c.resetsAt < Date.now() ? 'Reset; refreshing…' : resetText(c.resetsAt) }) : null));
+  }
+  if (apiSpent > 0) {
+    parts.push(h('div', { class: 'usage-row' },
+      h('div', { class: 'usage-line' }, h('span', { text: `API key${app.apiKeyHint ? ` (${app.apiKeyHint})` : ''}` }),
+        h('span', { class: 'usage-pct', text: `${formatCost(apiSpent)} spent` })),
+      h('div', { class: 'usage-reset', text: 'In this HQ run, as Claude Code reports it. The Console shows the balance left.' })));
   }
   if (usage.error) parts.push(h('div', { class: 'usage-note error', text: usage.error }));
   const updated = usage.loading ? 'Updating…' : usage.fetchedAt ? `Updated ${timeAgo(usage.fetchedAt)}` : '';
@@ -5218,6 +5274,7 @@ function sanitizeSettings(x) {
     mcp: v.mcp !== false, // HQ's MCP server for new sessions (mcp.js)
     mcpSpawn: v.mcpSpawn !== false, // agents may start sessions
     mcpExternal: v.mcpExternal === true, // installed machine-wide: agents outside HQ may call the tools too
+    apiKeyAlways: v.apiKeyAlways === true, // every Claude session runs on HQ's API key from the start, not on the plan
     // The most sessions started by agents that are open at once.
     mcpMaxSpawned: Number.isInteger(v.mcpMaxSpawned) && v.mcpMaxSpawned >= 0 && v.mcpMaxSpawned <= MCP_MAX_SPAWNED_CAP ? v.mcpMaxSpawned : MCP_DEFAULT_MAX_SPAWNED,
   };
@@ -5291,6 +5348,17 @@ const PREVIEW_MARKDOWN = '## Heading\nSome **bold** text, some *italic*, `inline
 
 let settingsTab = 'general';
 let apiKeyError = null; // why the last key could not be saved, shown under the box
+
+/** True while every Claude session runs on HQ's API key rather than the plan (Settings, or chosen at setup). */
+function apiAlways() {
+  return app.settings.apiKeyAlways && !!app.apiKeyHint;
+}
+
+/** Turns "always on the API key" on or off; open sessions change over at their next message. */
+function setApiAlways(on) {
+  changeSetting('apiKeyAlways', on);
+  for (const c of app.cells) c.renderApi();
+}
 
 /** A saved key shows only its hint, with Remove; otherwise a box saves the key pasted in. The key never comes back from the backend. */
 function apiKeyControl() {
@@ -5374,6 +5442,7 @@ function renderSettings() {
     app.settings.mcp && app.settings.mcpSpawn ? row('Sessions agents can open', 'The most sessions started by agents that can be open at once. Closing one makes room.', mcpMax) : null,
     app.settings.mcp ? row('HQ tools everywhere', 'Adds HQ\'s tools to every Claude Code, Codex and Hermes on this computer, so agents started in a terminal or an editor can see and start HQ sessions too while HQ is open. Agents pick it up the next time they start.', mcpInstallControl()) : null,
     row('API key for API credits', "A session that hits your plan's usage limit can carry on with this Claude Console key, from its limit card, until the plan's usage is back. Max and Team plans' monthly API credits pay only for a key from the Console organization linked in claude.ai's billing settings; any other key is billed as usual. Kept in the system keychain (Credential Manager on Windows, Keychain on macOS), never in the board.", apiKeyControl()),
+    app.apiKeyHint ? row('Run Claude sessions on the API key', "Every Claude session runs on this key from its first message, billed to the key's Console organization, instead of on a Claude plan. No claude.ai sign-in is needed. Open sessions change over at their next message.", toggle(app.settings.apiKeyAlways, setApiAlways)) : null,
     row('Check for HQ updates automatically', 'The Check for updates button in the sessions list always works.', toggle(app.settings.autoUpdate, v => changeSetting('autoUpdate', v))),
     row('Claude command', 'Path to the claude program, for sessions started from now on. Empty uses HQ_CLAUDE, else claude on PATH.', path),
     codexAvailable() ? row('Codex command', 'Path to the codex program, for Codex sessions started from now on. Empty uses HQ_CODEX, else codex on PATH. HQ keeps Codex up to date while no Codex session runs.', codexPath) : null,
@@ -5847,7 +5916,7 @@ async function checkClaudeSetup({ force = false } = {}) {
   const status = await invoke('claude_status').catch(err => { console.warn('claude status failed:', err); return null; });
   if (!status) return;
   if (!status.installed) showSetup('install');
-  else if (status.loggedIn === false) showSetup('login');
+  else if (status.loggedIn === false && !apiAlways()) showSetup('login');
   else if (setup.step) closeSetup();
 }
 
@@ -5863,6 +5932,8 @@ function showSetup(step, error = '') {
   }[step];
   const button = { install: 'Install Claude Code', login: 'Sign in', waiting: 'Open sign-in again' }[step];
   $('#setup-text').textContent = text;
+  $('#setup-use-key').classList.toggle('hidden', step === 'install');
+  if (step === 'install') $('#setup-key').classList.add('hidden');
   const go = $('#setup-go');
   go.textContent = button;
   go.disabled = setup.busy;
@@ -5955,6 +6026,31 @@ $('#setup-go').addEventListener('click', () => {
   if (setup.step === 'install') installClaude();
   else signInClaude();
 });
+// Instead of signing in to a Claude plan, every Claude session can run on a Console API key.
+$('#setup-use-key').addEventListener('click', () => {
+  $('#setup-key').classList.remove('hidden');
+  $('#setup-key-input').focus();
+});
+async function useSetupKey() {
+  const input = $('#setup-key-input');
+  if (!input.value.trim() || setup.busy) return;
+  setup.busy = true;
+  try {
+    app.apiKeyHint = await invoke('set_api_key', { key: input.value });
+  } catch (err) {
+    setSetupStatus(String(err), true);
+    return;
+  } finally {
+    setup.busy = false;
+  }
+  input.value = '';
+  setApiAlways(true);
+  invoke('finish_login').catch(() => {}); // a sign-in window HQ opened is not needed now
+  closeSetup();
+  if (!settingsPanel.classList.contains('hidden')) renderSettings();
+}
+$('#setup-key-save').addEventListener('click', useSetupKey);
+$('#setup-key-input').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); useSetupKey(); } });
 $('#setup-skip').addEventListener('click', () => {
   setup.skipped = true;
   setup.busy = false;
