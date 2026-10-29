@@ -220,6 +220,11 @@ async function afkHandle(cell, requestId, card) {
   afkUnwatch(card);
   const live = () => afkUntil(cell) && cell.pending.get(requestId) === card && !cell.closing;
   if (!live()) return;
+  // HQ's own cards (mcp.js) are not the agent's requests: they finish themselves.
+  if (String(requestId).startsWith('mcp-')) {
+    if (card.onAfk) card.onAfk();
+    return;
+  }
   // Claude reads the reason given below; Codex and Hermes only the note, which must reach them first.
   if (cell.backend !== 'claude') {
     if (!cell.afkNoted) afkSendNote(cell);

@@ -11,8 +11,10 @@
 // Guard rails: a session started by an agent can start one more level of sessions and no deeper,
 // at most `mcpMaxSpawned` agent-started sessions are open at once (Settings), permissions can never
 // be bypassed, and a session may only stop, close or reconfigure sessions it started (directly or
-// through others). Starting, messaging and stopping sessions go through Claude's permission
-// prompts like any other tool (mcp.rs allows only the harmless tools up front).
+// through others). mcp.rs allows only the harmless tools up front, so a Claude caller in a mode that
+// asks gets Claude's own prompt for the rest. Codex, Hermes and outside agents get no such prompt,
+// so HQ guards what matters itself: a new session never runs in a freer mode than its starter, and a
+// message to a session the caller did not start waits for the user's yes in that session's cell.
 
 const MCP_PREFIX = '(HQ:';              // starts every message HQ sends between sessions
 const MCP_MAX_DEPTH = 2;                // the user's sessions are depth 0; theirs 1; those sessions' 2
@@ -30,7 +32,7 @@ const MCP_ASK_TIMEOUT_MS = 30 * 60 * 1000;
 const MCP_EXTERNAL = 'outside';         // the id of an agent that is not one of HQ's sessions
 
 const mcp = {
-  notes: {},          // key -> { value, by, at }: shared notes, saved in the board
+  notes: Object.create(null),          // key -> { value, by, at }: shared notes, saved in the board
   schedule: [],       // { id, to, from, text, at }: messages to send later, saved in the board
   claims: new Map(),  // path key -> { path, by, note, at }: advisory file claims, held while the claimant is open
   cancels: new Map(), // call id -> what ends a waiting call when its client goes away
@@ -74,6 +76,95 @@ function mcpOwns(caller, cell) {
 
 function mcpRequireOwned(caller, cell) {
   if (!mcpOwns(caller, cell)) fail(`Session ${cell.hqId} was not started by you, so only the user can do that.`);
+}
+
+/** Permission modes from strictest to freest; a mode not listed counts as the strictest. */
+const MCP_MODE_RANK = ['plan', 'default', 'acceptEdits', 'auto', 'bypassPermissions'];
+const mcpModeRank = mode => Math.max(0, MCP_MODE_RANK.indexOf(mode));
+
+/** The modes a session started by an agent may run in (never bypassPermissions). */
+function mcpLaunchModes(agent) {
+  return agent === 'claude' ? LAUNCH_MODES : ['default', 'acceptEdits'];
+}
+
+/**
+ * The mode for a session `caller` starts: what it asked for, or else 'default' (or stricter), and
+ * never freer than the caller's own mode. An outside agent's mode is unknown, so it counts as 'default'.
+ */
+function mcpSpawnMode(caller, agent, asked) {
+  const own = caller.external ? 'default' : caller.permissionMode;
+  const cap = mcpModeRank(own);
+  const modes = mcpLaunchModes(agent);
+  if (asked != null) {
+    const mode = String(asked);
+    if (!modes.includes(mode)) fail(`permission_mode for ${AGENT_NAMES[agent] || agent} must be one of ${modes.join(', ')}.`);
+    if (mcpModeRank(mode) > cap) fail(`A session you start cannot run in a freer mode than yours (${own}).`);
+    return mode;
+  }
+  const limit = Math.min(cap, mcpModeRank('default'));
+  const mode = modes.filter(m => mcpModeRank(m) <= limit).sort((x, y) => mcpModeRank(x) - mcpModeRank(y)).pop();
+  if (!mode) fail(`${AGENT_NAMES[agent] || agent} has no mode as strict as yours (${own}), so you cannot start it.`);
+  return mode;
+}
+
+/** True when Claude itself asks the user before the caller's gated tools run (see mcp.rs). */
+function mcpCallerAsks(caller) {
+  return !caller.external && caller.backend === 'claude' && ['default', 'acceptEdits', 'plan'].includes(caller.permissionMode);
+}
+
+/**
+ * Shows a card built by `build(finish)` in `cell` and resolves with what it is finished with. The
+ * card is HQ's own (its request id starts with "mcp-", which afk.js only finishes with `onAway`), and
+ * it finishes with `onGone` when the turn ends, the call is cancelled or time runs out.
+ */
+function mcpCard(cell, callId, kind, timeoutMs, onGone, onAway, build) {
+  const requestId = `mcp-${kind}-${callId}`;
+  return new Promise(resolve => {
+    let card = null;
+    const finish = result => {
+      if (!card) return;
+      const c = card;
+      card = null;
+      clearTimeout(timer);
+      mcp.cancels.delete(callId);
+      c.onDrop = null;
+      c.onAfk = null;
+      cell.dropPrompt(requestId);
+      resolve(result);
+    };
+    const timer = setTimeout(() => finish(onGone), timeoutMs);
+    card = build(finish);
+    card.onDrop = () => finish(onGone);
+    card.onAfk = () => finish(onAway);
+    mcp.cancels.set(callId, () => finish(onGone));
+    cell.pending.set(requestId, card);
+    cell.prompts.append(card);
+    cell.syncPromptsBar();
+    cell.unread = false;
+    cell.refreshState();
+    invoke('request_attention').catch(() => {});
+  });
+}
+
+/**
+ * Asks the user whether `caller` may send `cell` the message `text`; resolves true on yes. The card
+ * sits in the caller's cell, whose turn waits on this call; an outside agent has none, so it sits in
+ * the target's, where the end of a turn there withdraws it (a refusal).
+ */
+async function mcpConfirmMessage(caller, cell, text, callId) {
+  const host = caller.external ? cell : caller;
+  if (host.afkOn) return false;
+  const from = caller.external ? 'An agent outside HQ' : 'This session';
+  return mcpCard(host, callId, 'confirm', MCP_ASK_TIMEOUT_MS, false, false, finish => {
+    const card = h('div', { class: 'prompt' },
+      h('div', { class: 'prompt-title', text: `${from} wants to send ${caller.external ? 'this session' : `session "${mcpName(cell)}" (${cell.hqId})`} a message:` }),
+      h('pre', { text }),
+      h('div', { class: 'actions' },
+        h('button', { class: 'btn primary', onclick: () => finish(true) }, 'Send it'),
+        h('button', { class: 'btn', onclick: () => finish(false) }, 'Refuse')));
+    card.dataset.kind = 'permission';
+    return card;
+  });
 }
 
 function mcpName(cell) {
@@ -193,11 +284,8 @@ const MCP_TOOLS = {
     const opts = { cwd: folder, backend: agent, spawnedBy: caller.hqId, depth, collapsed: a.collapsed === true };
     if (typeof a.model === 'string' && a.model.trim()) opts.model = a.model.trim();
     if (a.effort) opts.effort = a.effort;
-    if (agent === 'claude') {
-      // Never bypassPermissions: an agent must not lift the prompts for another.
-      const mode = a.permission_mode || caller.permissionMode;
-      opts.permissionMode = LAUNCH_MODES.includes(mode) ? mode : 'default';
-    }
+    // Never bypassPermissions, and never freer than the caller: an agent must not lift the prompts for another.
+    opts.permissionMode = mcpSpawnMode(caller, agent, a.permission_mode == null || a.permission_mode === '' ? null : a.permission_mode);
     if (typeof a.name === 'string' && a.name.trim()) opts.customTitle = a.name.trim().slice(0, 80);
     const cell = addNewCell(opts, { background: true });
     const from = caller.external ? 'an agent outside HQ' : `session "${mcpName(caller)}" (${caller.hqId})`;
@@ -205,10 +293,17 @@ const MCP_TOOLS = {
     return { session: cell.hqId, agent, folder, note: 'Started. Call wait_for_sessions, then read_session, to get its result.' };
   },
 
-  send_message(caller, a) {
+  async send_message(caller, a, callId) {
     const cell = mcpTarget(a.session, caller);
     if (cell.missing) fail(`Session ${cell.hqId}'s folder is missing, so it cannot run.`);
     const text = mcpString(a.message, 'message');
+    // A session the caller did not start may run freer than the caller, so the user says yes in its cell.
+    if (!mcpOwns(caller, cell) && !mcpCallerAsks(caller)) {
+      if (!(await mcpConfirmMessage(caller, cell, text, callId))) {
+        fail(`The user did not let you message ${cell.hqId}. Message only sessions you started, or ask the user.`);
+      }
+      if (!app.cells.includes(cell)) fail(`Session ${cell.hqId} has closed.`);
+    }
     const from = caller.external ? 'an agent outside HQ' : `session "${mcpName(caller)}" (${caller.hqId})`;
     const state = mcpState(cell);
     mcpSend(cell, `${MCP_PREFIX} message from ${from}, which can read your reply.)\n\n${text}`);
@@ -301,6 +396,7 @@ const MCP_TOOLS = {
     const text = mcpString(a.message, 'message', MCP_NOTE_MAX);
     const target = a.session == null ? caller : mcpCell(String(a.session));
     if (!target || target.external) fail(a.session == null ? 'Name the session to send it to.' : `No session "${a.session}" is open in HQ.`);
+    if (target !== caller) mcpRequireOwned(caller, target);
     let at = 0;
     if (a.after_usage_reset) {
       at = planLimitedUntil() || usageResetAt();
@@ -329,9 +425,10 @@ const MCP_TOOLS = {
   },
 
   cancel_scheduled(caller, a) {
-    const before = mcp.schedule.length;
-    mcp.schedule = mcp.schedule.filter(s => s.id !== a.id);
-    if (mcp.schedule.length === before) fail(`No scheduled message "${a.id}".`);
+    const s = mcp.schedule.find(x => x.id === a.id);
+    if (!s) fail(`No scheduled message "${a.id}".`);
+    if (s.from !== caller.hqId && s.to !== caller.hqId) fail(`Message ${a.id} was scheduled by another session for another, so only the user can cancel it.`);
+    mcp.schedule = mcp.schedule.filter(x => x !== s);
     saveState();
     return `Cancelled ${a.id}.`;
   },
@@ -351,42 +448,24 @@ const MCP_TOOLS = {
     if (caller.afkOn) return 'The user is away (AFK) and cannot answer now. Go with what you would recommend, and say so in your reply.';
     const options = (Array.isArray(a.options) ? a.options : []).filter(o => typeof o === 'string' && o.trim()).slice(0, 9);
     const timeout = Math.min(3600, Math.max(10, Number(a.timeout_seconds) || MCP_ASK_TIMEOUT_MS / 1000)) * 1000;
-    const requestId = `mcp-ask-${callId}`;
-    return new Promise(resolve => {
-      let card = null;
-      const finish = text => {
-        if (!card) return;
-        const c = card;
-        card = null;
-        clearTimeout(timer);
-        mcp.cancels.delete(callId);
-        c.onDrop = null;
-        caller.dropPrompt(requestId);
-        resolve(text);
-      };
-      const timer = setTimeout(() => finish('The user did not answer in time.'), timeout);
-      const other = h('input', { type: 'text', placeholder: options.length ? 'Other…' : 'Your answer, then Enter' });
-      other.addEventListener('keydown', e => {
-        if (e.key === 'Enter' && other.value.trim()) { e.preventDefault(); finish(`The user answered: ${other.value.trim()}`); }
+    const asked = mcpCard(caller, callId, 'ask', timeout, 'The user did not answer in time.',
+      'The user went away (AFK) and cannot answer now. Go with what you would recommend, and say so in your reply.', finish => {
+        const other = h('input', { type: 'text', placeholder: options.length ? 'Other…' : 'Your answer, then Enter' });
+        other.addEventListener('keydown', e => {
+          if (e.key === 'Enter' && other.value.trim()) { e.preventDefault(); finish(`The user answered: ${other.value.trim()}`); }
+        });
+        const choices = options.map((o, i) => choice(String(i + 1), o, null, () => finish(`The user answered: ${o}`)));
+        const card = h('div', { class: 'prompt' },
+          h('div', { class: 'prompt-title', text: question }),
+          choices.length ? h('div', { class: 'choices' }, choices) : null,
+          other,
+          h('div', { class: 'actions' }, h('button', { class: 'btn', onclick: () => finish('The user declined to answer.') }, 'Skip')));
+        card.hotkeys = choices.map(c => c.run);
+        card.dataset.kind = 'question';
+        return card;
       });
-      const choices = options.map((o, i) => choice(String(i + 1), o, null, () => finish(`The user answered: ${o}`)));
-      card = h('div', { class: 'prompt' },
-        h('div', { class: 'prompt-title', text: question }),
-        choices.length ? h('div', { class: 'choices' }, choices) : null,
-        other,
-        h('div', { class: 'actions' }, h('button', { class: 'btn', onclick: () => finish('The user declined to answer.') }, 'Skip')));
-      card.hotkeys = choices.map(c => c.run);
-      card.dataset.kind = 'question';
-      card.onDrop = () => finish('The question was withdrawn (the turn ended).');
-      mcp.cancels.set(callId, () => finish('Cancelled.'));
-      caller.pending.set(requestId, card);
-      caller.prompts.append(card);
-      caller.syncPromptsBar();
-      caller.unread = false;
-      caller.refreshState();
-      invoke('request_attention').catch(() => {});
-      notifyWaiting(caller, { display_name: 'a question' });
-    });
+    notifyWaiting(caller, { display_name: 'a question' });
+    return asked;
   },
 
   async get_usage() {
@@ -443,7 +522,7 @@ const MCP_TOOLS = {
     const key = mcpString(a.key, 'key', 100).trim();
     const value = typeof a.value === 'string' ? a.value : fail('value is required.');
     if (value.length > MCP_NOTE_MAX) fail(`value is too long (at most ${MCP_NOTE_MAX} characters).`);
-    if (!(key in mcp.notes) && Object.keys(mcp.notes).length >= MCP_NOTES_MAX) fail(`There are already ${MCP_NOTES_MAX} notes. Delete some first.`);
+    if (!Object.hasOwn(mcp.notes, key) && Object.keys(mcp.notes).length >= MCP_NOTES_MAX) fail(`There are already ${MCP_NOTES_MAX} notes. Delete some first.`);
     mcp.notes[key] = { value, by: caller.hqId, at: Date.now() };
     saveState();
     return `Saved "${key}".`;
@@ -453,14 +532,17 @@ const MCP_TOOLS = {
     if (a.key == null || a.key === '') {
       return { notes: Object.entries(mcp.notes).map(([key, n]) => ({ key, by: n.by, at: isoTime(n.at), length: n.value.length })) };
     }
-    const n = mcp.notes[String(a.key).trim()];
+    const k = String(a.key).trim();
+    const n = Object.hasOwn(mcp.notes, k) ? mcp.notes[k] : null;
     if (!n) fail(`No note "${a.key}". Call note_get without a key to list them.`);
     return { key: String(a.key).trim(), value: n.value, by: n.by, at: isoTime(n.at) };
   },
 
   note_delete(caller, a) {
     const key = String(a.key || '').trim();
-    if (!(key in mcp.notes)) fail(`No note "${key}".`);
+    if (!Object.hasOwn(mcp.notes, key)) fail(`No note "${key}".`);
+    const by = mcp.notes[key].by;
+    if (by !== caller.hqId && mcpCell(by)) fail(`Note "${key}" belongs to ${by}, which is still open, so only it can delete it.`);
     delete mcp.notes[key];
     saveState();
     return `Deleted "${key}".`;
@@ -515,7 +597,7 @@ function mcpSaved() {
 /** Restores the notes and schedule from the board, keeping only well-formed entries. */
 function mcpRestore(saved) {
   const s = saved && typeof saved === 'object' ? saved : {};
-  mcp.notes = {};
+  mcp.notes = Object.create(null);
   for (const [key, n] of Object.entries(s.notes && typeof s.notes === 'object' ? s.notes : {}).slice(0, MCP_NOTES_MAX)) {
     if (n && typeof n.value === 'string') mcp.notes[key.slice(0, 100)] = { value: n.value.slice(0, MCP_NOTE_MAX), by: String(n.by || ''), at: Number(n.at) || 0 };
   }

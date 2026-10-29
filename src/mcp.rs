@@ -132,6 +132,9 @@ impl Grant {
     /// file rather than JSON on the command line, which other users of the machine could read.
     /// Read-only tools are allowed up front; the rest go through the session's permission prompts.
     pub fn claude_args(&self) -> Result<(Vec<String>, PathBuf), String> {
+        // On Linux temp_dir() is the shared /tmp, where another user could pre-create this folder or
+        // a file in it; Windows and macOS temp folders are per user, and HQ ships only for those.
+        // A Linux build should move this to a 0700 folder of its own and open with create_new.
         let dir = std::env::temp_dir().join("hq-mcp");
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let file = dir.join(format!("{}-{}.json", std::process::id(), NEXT_FILE.fetch_add(1, Ordering::Relaxed)));
@@ -193,6 +196,8 @@ pub fn keep_config_file(id: u64, file: PathBuf) {
 }
 
 /// The session has ended: its tokens stop working and its config file goes.
+/// A child that exits before its Grant is bound releases first, leaving that token mapped to a dead
+/// id and its config file until HQ quits; the id is never reused, so the token reaches nothing.
 pub fn release(id: u64) {
     if let Some(map) = TOKENS.lock().unwrap().as_mut() {
         map.retain(|_, v| *v != Some(id));
@@ -237,7 +242,8 @@ pub fn reply(id: u64, text: String, is_error: bool) {
 }
 
 /// 256 bits for a session's token. `RandomState` is seeded from the OS's random source, and its
-/// keys are never seen outside this process.
+/// keys are never seen outside this process. std does not promise that is a CSPRNG; the token only
+/// guards a 127.0.0.1 port, so swap in getrandom if one ever joins the dependency tree.
 fn new_token() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
@@ -1031,6 +1037,8 @@ fn codex_block(profile: Option<&str>) -> String {
 }
 
 /// `config` without its `[mcp_servers.hq]` tables, and with `block` at the end when given.
+/// A line-based edit: an hq server written as dotted keys, inline, or under a quoted header is not
+/// seen and gets a duplicate, which Codex then refuses. HQ writes only the plain table form.
 fn codex_edit(config: &str, block: Option<&str>) -> String {
     let own = |header: &str| {
         let name = header.trim().trim_start_matches('[').trim_end_matches(']').trim();
