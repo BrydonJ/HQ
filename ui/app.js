@@ -2511,7 +2511,7 @@ class Cell {
     this.unread = false;
     this.refreshState();
     invoke('request_attention').catch(() => {});
-    notifyWaiting(this, req);
+    notifyWaiting(this, req, m.request_id, card);
   }
 
   /** Folds the prompts area to its bar, or opens it again. Only a class changes, so nothing is re-rendered. */
@@ -2597,6 +2597,7 @@ class Cell {
 
     const card = h('div', { class: 'prompt' }, title, reason, preview, h('div', { class: 'choices' }, choices), feedback);
     card.hotkeys = choices.map(c => c.run);
+    card.notifyAnswers = { approve: allow, deny };
     return card;
   }
 
@@ -2686,6 +2687,7 @@ class Cell {
     ];
     const card = h('div', { class: 'prompt' }, h('div', { class: 'prompt-title', text: 'Ready to code? Here is Claude\'s plan:' }), plan, h('div', { class: 'choices' }, choices), feedback);
     card.hotkeys = choices.map(c => c.run);
+    card.notifyAnswers = { approve: () => approve('default'), deny: keepPlanning }; // the cautious yes: edits still ask
     return card;
   }
 
@@ -3651,17 +3653,72 @@ function notifyTurnDone(cell, m) {
   notify(cell, failed ? 'The turn stopped with an error.' : cell.lastReply || 'Finished.');
 }
 
-function notifyWaiting(cell, req) {
+/**
+ * A question or approval request: the cue sounds (even while HQ is in front, since the cell may be
+ * out of sight), and in the background a notification says so. On macOS a permission or plan
+ * notification has Approve and Deny buttons, which answer the card (`card.notifyAnswers`).
+ */
+function notifyWaiting(cell, req, requestId, card) {
+  playCue();
   if (!app.settings.notify || document.hasFocus()) return;
+  if (IS_MAC && card?.notifyAnswers) {
+    const id = `${++promptNotes.seq}`;
+    promptNotes.map.set(id, { cell, requestId, card });
+    notified.cell = cell;
+    notified.at = Date.now();
+    const title = cell.displayTitle() || baseName(cell.cwd) || 'HQ';
+    invoke('notify_actions', { id, title, body: promptSummary(cell, req) })
+      .catch(() => notify(cell, `Needs your answer: ${req.display_name || req.tool_name}`));
+    return;
+  }
   notify(cell, `Needs your answer: ${req.display_name || req.tool_name || 'a question'}`);
 }
 
-// A notification click only brings the window forward, so coming back to HQ soon after one opens its cell.
-window.addEventListener('focus', () => {
-  const { cell, at } = notified;
-  notified.cell = null;
-  if (cell && Date.now() - at < 60 * 1000 && app.cells.includes(cell)) revealCell(cell);
-});
+/** One line for a prompt notification: what is asked, and its command, path or description. */
+function promptSummary(cell, req) {
+  if (req.tool_name === 'ExitPlanMode') return 'Plan ready: approve it, or keep planning.';
+  const input = req.input || {};
+  const what = input.command || (input.file_path && relPath(input.file_path, cell.cwd)) || req.description || '';
+  const line = `Allow ${req.display_name || req.tool_name}?${what ? ` ${String(what).replace(/\s+/g, ' ').trim()}` : ''}`;
+  return line.length > 200 ? line.slice(0, 199) + '…' : line;
+}
+
+// Notifications with buttons that may still be answered: id -> { cell, requestId, card }. An
+// answer for a card that is gone (answered in HQ, cancelled, or the cell closed) does nothing.
+const promptNotes = { seq: 0, map: new Map() };
+
+window.__TAURI__.event.listen('notification-action', ({ payload }) => {
+  const note = promptNotes.map.get(payload?.id);
+  promptNotes.map.delete(payload?.id);
+  if (!note) return;
+  const { cell, requestId, card } = note;
+  const live = app.cells.includes(cell) && cell.pending.get(requestId) === card;
+  if (payload.action === 'click') {
+    if (app.cells.includes(cell)) revealCell(cell);
+    return;
+  }
+  if (live) card.notifyAnswers[payload.action === 'approve' ? 'approve' : 'deny']();
+}).catch(err => console.error('notification listener failed', err));
+
+// ---------- prompt cue ----------
+
+let cueAt = 0;
+let cueAudio = null;
+
+/** A soft two-note chime (ui/cue.wav) for a question or an approval request; several at once sound once. */
+function playCue() {
+  if (!app.settings.sound || Date.now() - cueAt < 1500) return;
+  cueAt = Date.now();
+  invoke('play_cue').then(played => { if (!played) chime(); }, chime);
+}
+
+/** The chime played by the page, where HQ has no player of its own (Windows). macOS uses afplay,
+ * which still sounds while HQ's window is hidden. */
+function chime() {
+  cueAudio ||= new Audio('cue.wav');
+  cueAudio.currentTime = 0;
+  cueAudio.play().catch(err => console.warn('chime failed', err));
+}
 
 // ---------- slash commands ----------
 
@@ -5262,6 +5319,7 @@ function sanitizeSettings(x) {
   return {
     theme: THEMES.some(([t]) => t === v.theme) ? v.theme : 'auto',
     notify: v.notify !== false,
+    sound: v.sound !== false,
     autoUpdate: v.autoUpdate !== false,
     autoTasks: v.autoTasks !== false, // read when a session starts: Claude or Hermes is asked to keep a task list (Codex plans on its own)
     // The most subagents one Claude session runs at once; 0 is no limit.
@@ -5435,7 +5493,10 @@ function renderSettings() {
   });
   const models = modelList().map(m => [m.value, m.displayName || m.value]);
   body.replaceChildren(...[
-    row('Notifications', 'A notification when a turn finishes, or Claude needs you, while HQ is in the background.', toggle(app.settings.notify, v => changeSetting('notify', v))),
+    row('Notifications', `A notification when a turn finishes, or Claude needs you, while HQ is in the background.${IS_MAC ? ' Approval requests get Approve and Deny buttons.' : ''}`, toggle(app.settings.notify, v => changeSetting('notify', v))),
+    IS_MAC && app.settings.notify ? row('Keep buttons on screen', 'Set HQ\'s notification style to Alerts: a banner hides Approve and Deny until you hover over it, then slides away.',
+      h('button', { class: 'btn', text: 'Open Settings…', onclick: () => invoke('open_notification_settings').catch(err => console.warn('notification settings', err)) })) : null,
+    row('Sound for questions and approvals', 'A chime when a session asks you something or wants approval.', toggle(app.settings.sound, v => changeSetting('sound', v))),
     row('Remote Control for new sessions', 'Continue sessions from claude.ai/code or the Claude app.', toggle(!!app.remoteDefault, v => { app.remoteDefault = v; saveState(); renderRemoteButtons(); })),
     row('Default model for new sessions', 'The same as picking a model in a session. HQ_MODEL still applies when none is picked.',
       select(app.defaults.model || 'default', models, v => rememberChoice({ model: v }))),

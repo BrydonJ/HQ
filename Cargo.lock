@@ -1497,6 +1497,7 @@ name = "hq"
 version = "0.19.2"
 dependencies = [
  "libc",
+ "mac-notification-sys",
  "memchr",
  "security-framework",
  "security-framework-sys",

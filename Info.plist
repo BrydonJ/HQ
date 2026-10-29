@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Merged by the Tauri CLI into HQ.app's Info.plist. Alerts (not banners) by default, so the
+     Approve and Deny buttons on approval notifications stay on screen. macOS only reads it the first
+     time HQ shows a notification, and the user's choice in System Settings always wins. -->
+<plist version="1.0">
+<dict>
+  <key>NSUserNotificationAlertStyle</key>
+  <string>alert</string>
+</dict>
+</plist>
