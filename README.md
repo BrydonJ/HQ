@@ -566,7 +566,7 @@ the token in its environment. Waiting tools stream keep-alives, so a long wait d
 
 **HQ tools everywhere** (Settings) installs the bridge as `hq` for every Claude Code (user
 scope, through `claude mcp add`), Codex (`~/.codex/config.toml`) and Hermes
-(`~/.hermes/config.yaml`) on this computer, so agents started in a terminal or an editor can use
+(`config.yaml` in `$HERMES_HOME`, `%LOCALAPPDATA%\hermes` on Windows, else `~/.hermes`) on this computer, so agents started in a terminal or an editor can use
 the tools too while HQ is open. They act as "outside" (`ask_user` is not available to them). The
 bridge finds the running HQ through `~/.hq/mcp.json`, which HQ writes while it runs (readable
 only by you). Each config file edited gets a `.hq-backup` copy first. **Remove** takes it out
