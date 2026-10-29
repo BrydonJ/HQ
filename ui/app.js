@@ -5471,11 +5471,11 @@ function mcpInstallControl() {
     mcpInstalling = false;
     if (!settingsPanel.classList.contains('hidden')) renderSettings();
   };
-  const buttons = h('div', { class: 'api-key' },
+  const buttons = h('div', { class: 'mcp-install-buttons' },
     h('button', { class: 'btn', disabled: mcpInstalling || undefined, text: mcpInstalling ? 'Working…' : app.settings.mcpExternal ? 'Reinstall' : 'Install', onclick: () => run(true) }),
     app.settings.mcpExternal ? h('button', { class: 'btn', disabled: mcpInstalling || undefined, text: 'Remove', onclick: () => run(false) }) : null);
-  const report = (mcpInstallReport || []).map(r => h('div', { class: r.status === 'failed' ? 'api-key-error' : 'desc', text: `${r.agent}: ${r.status === 'done' ? '' : r.status + ' — '}${r.detail}` }));
-  return h('div', null, buttons, ...report);
+  const report = (mcpInstallReport || []).map(r => h('div', { class: `mcp-install-line${r.status === 'failed' ? ' failed' : ''}`, text: `${r.agent}: ${r.status === 'done' ? '' : r.status + ' — '}${r.detail}` }));
+  return h('div', { class: 'mcp-install' }, buttons, ...report);
 }
 
 function renderAppearanceSettings(row, toggle, select) {

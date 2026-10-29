@@ -602,6 +602,11 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .api-key:has(.api-key-hint) { flex-direction: row; flex-wrap: wrap; justify-content: flex-end; align-items: center; }
 .api-key-hint { font-family: var(--mono); color: var(--fg-muted); }
 .api-key-error { color: var(--error); font-size: 12px; max-width: 260px; text-align: right; }
+/* The install control's report is capped, or its long lines squeeze the setting's description to a sliver. */
+.mcp-install { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex: none; width: 260px; max-width: 50%; }
+.mcp-install-buttons { display: flex; gap: 6px; }
+.mcp-install-line { max-width: 100%; text-align: right; font-size: 11px; color: var(--fg-faint); overflow-wrap: anywhere; }
+.mcp-install-line.failed { color: var(--error); }
 .act-mcp.warn { color: var(--waiting); }
 .attachments { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 8px 0; }
 .attachments:empty { display: none; }

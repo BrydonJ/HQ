@@ -1070,8 +1070,12 @@ fn codex_edit(config: &str, block: Option<&str>) -> String {
     out
 }
 
+/// Hermes' state folder: `HERMES_HOME`, else `%LOCALAPPDATA%\hermes` on Windows (where its installer
+/// puts it), else `~/.hermes`.
 fn hermes_config() -> Option<PathBuf> {
-    let dir = std::env::var_os("HERMES_HOME").filter(|d| !d.is_empty()).map(PathBuf::from).or_else(|| home().map(|h| h.join(".hermes")))?;
+    let set = std::env::var_os("HERMES_HOME").filter(|d| !d.is_empty()).map(PathBuf::from);
+    let local = if cfg!(windows) { std::env::var_os("LOCALAPPDATA").filter(|d| !d.is_empty()).map(|d| PathBuf::from(d).join("hermes")).filter(|d| d.is_dir()) } else { None };
+    let dir = set.or(local).or_else(|| home().map(|h| h.join(".hermes")))?;
     Some(dir.join("config.yaml"))
 }
 
@@ -1079,7 +1083,7 @@ fn hermes_config() -> Option<PathBuf> {
 fn hermes_install(profile: Option<&str>, install: bool) -> Result<String, String> {
     let file = hermes_config().ok_or("No home folder.")?;
     if !file.parent().is_some_and(|d| d.is_dir()) {
-        return Ok("skipped: Hermes has not been set up on this machine (no ~/.hermes).".into());
+        return Ok("skipped: Hermes has not been set up on this machine (no HERMES_HOME, %LOCALAPPDATA%\\hermes or ~/.hermes).".into());
     }
     let old = std::fs::read_to_string(&file).unwrap_or_default();
     let new = hermes_edit(&old, install.then_some(profile))?;
