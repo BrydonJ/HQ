@@ -573,6 +573,18 @@ fn notify_actions(app: AppHandle, id: String, title: String, body: String) -> Re
     }
 }
 
+/// HQ's page in System Settings › Notifications (macOS only).
+#[tauri::command]
+fn open_notification_settings(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    return macos::open_notification_settings(&app.config().identifier);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Err("only on macOS".into())
+    }
+}
+
 /// A freshly loaded page owns no cells, so any `claude` still running belonged to a page that
 /// was reloaded (F5 in a dev build, or WebView2 recovering from a crash) and nobody can reach it.
 #[tauri::command]
@@ -832,6 +844,7 @@ fn main() {
             request_attention,
             play_cue,
             notify_actions,
+            open_notification_settings,
             check_update,
             install_update,
             kill_all_sessions,

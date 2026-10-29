@@ -5515,7 +5515,9 @@ function renderSettings() {
   });
   const models = modelList().map(m => [m.value, m.displayName || m.value]);
   body.replaceChildren(...[
-    row('Notifications', `A notification when a turn finishes, or Claude needs you, while HQ is in the background.${IS_MAC ? ' Approval requests get Approve and Deny buttons; set HQ to Alerts in System Settings › Notifications to keep them on screen.' : ''}`, toggle(app.settings.notify, v => changeSetting('notify', v))),
+    row('Notifications', `A notification when a turn finishes, or Claude needs you, while HQ is in the background.${IS_MAC ? ' Approval requests get Approve and Deny buttons.' : ''}`, toggle(app.settings.notify, v => changeSetting('notify', v))),
+    IS_MAC && app.settings.notify ? row('Keep buttons on screen', 'Set HQ\'s notification style to Alerts: a banner hides Approve and Deny until you hover over it, then slides away.',
+      h('button', { class: 'btn', text: 'Open Settings…', onclick: () => invoke('open_notification_settings').catch(err => console.warn('notification settings', err)) })) : null,
     row('Sound for questions and approvals', 'A chime when a session asks you something or wants approval.', toggle(app.settings.sound, v => changeSetting('sound', v))),
     row('Remote Control for new sessions', 'Continue sessions from claude.ai/code or the Claude app.', toggle(!!app.remoteDefault, v => { app.remoteDefault = v; saveState(); renderRemoteButtons(); })),
     row('Default model for new sessions', 'The same as picking a model in a session. HQ_MODEL still applies when none is picked.',

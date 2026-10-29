@@ -267,6 +267,17 @@ pub fn play_cue() {
     }
 }
 
+/// Opens HQ's own page in System Settings › Notifications, where its style can be set to Alerts.
+pub fn open_notification_settings(identifier: &str) -> Result<(), String> {
+    let url = format!("x-apple.systempreferences:com.apple.preference.notifications?id={identifier}");
+    let out = Command::new("/usr/bin/open").arg(url).stdin(Stdio::null()).output().map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err("System Settings could not be opened".into())
+    }
+}
+
 /// What the user did with a notification from `notify_actions`, sent to the UI as `notification-action`.
 #[derive(serde::Serialize, Clone)]
 struct NotificationAction {
