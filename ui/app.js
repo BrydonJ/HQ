@@ -1315,6 +1315,7 @@ class Cell {
     for (const card of this.msgs.querySelectorAll('.limit-card[data-live]')) this.retireLimitCard(card); // that limit is over
     saveState();
     this.renderApi();
+    if (apiAlways()) return; // it stays on the key, as Settings has every session
     this.notice(app.apiKeyHint ? "Your plan's usage is back, so this session is on your plan again." : 'The API key was removed from HQ, so this session is on your plan again.');
   }
 
@@ -2412,7 +2413,9 @@ class Cell {
     if (m.is_error && m.subtype !== 'error_during_execution') {
       const detail = m.result || (m.errors && m.errors.join('\n')) || m.subtype;
       if (!this.limitHit && !LIMIT_TEXT.test(String(detail))) this.notice(`Error: ${detail}`, true);
-      if (this.backend === 'claude' && LOGIN_TEXT.test(String(detail))) checkClaudeSetup({ force: true });
+      if (this.backend === 'claude' && this.procOnApi && /invalid api key/i.test(String(detail))) {
+        this.notice(`HQ's API key (${app.apiKeyHint}) was refused. Replace it in Settings > API key for API credits.`, true);
+      } else if (this.backend === 'claude' && LOGIN_TEXT.test(String(detail))) checkClaudeSetup({ force: true });
     }
     this.noteResult(m);
     if (this.compacting) this.setCompacting(false);
@@ -4937,7 +4940,7 @@ function renderUsagePop() {
       h('div', { class: 'usage-line' }, h('span', { text: c.label }),
         h('span', { class: 'usage-pct', text: `${formatCost(c.left)} left${c.limit ? ` of ${formatCost(c.limit)}` : ''}` })),
       usedPct != null ? h('div', { class: 'usage-bar' }, h('span', { style: `width:${Math.max(0, Math.min(100, usedPct))}%;background:${heatCss(usedPct)}` })) : null,
-      c.resetsAt ? h('div', { class: 'usage-reset', text: c.resetsAt < Date.now() ? 'Reset; refreshing…' : resetText(c.resetsAt) }) : null));
+      c.resetsAt ? h('div', { class: 'usage-reset', text: c.resetsAt < Date.now() ? 'Reset' : resetText(c.resetsAt) }) : null));
   }
   if (apiSpent > 0) {
     parts.push(h('div', { class: 'usage-row' },
@@ -5378,6 +5381,7 @@ async function saveApiKey(key) {
   } catch (err) {
     apiKeyError = String(err);
   }
+  if (!app.apiKeyHint && app.settings.apiKeyAlways) changeSetting('apiKeyAlways', false);
   for (const c of app.cells) {
     c.settleApiMode(); // a removed key ends every switch to it
     c.renderApi();
@@ -5952,6 +5956,7 @@ function closeSetup() {
   setup.poll = 0;
   setup.step = null;
   setupEl.classList.add('hidden');
+  $('#setup-key').classList.add('hidden');
 }
 
 async function installClaude() {
@@ -5973,7 +5978,7 @@ async function installClaude() {
   app.claudeUpdateAt = Date.now();
   saveState();
   const status = await invoke('claude_status').catch(() => null);
-  if (status && status.loggedIn === true) return finishSetup(); // a reinstall may already be signed in
+  if ((status && status.loggedIn === true) || apiAlways()) return finishSetup(); // a reinstall may already be signed in, or sessions run on the key
   signInClaude();
 }
 
@@ -6033,7 +6038,8 @@ $('#setup-use-key').addEventListener('click', () => {
 });
 async function useSetupKey() {
   const input = $('#setup-key-input');
-  if (!input.value.trim() || setup.busy) return;
+  if (!input.value.trim()) return;
+  if (setup.busy) return setSetupStatus('Wait a moment: HQ is still opening the sign-in.');
   setup.busy = true;
   try {
     app.apiKeyHint = await invoke('set_api_key', { key: input.value });

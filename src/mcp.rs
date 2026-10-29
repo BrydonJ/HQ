@@ -306,7 +306,7 @@ const TOOLS: &[Tool] = &[
                 "name": { "type": "string", "description": "A short name shown in its header." },
                 "model": { "type": "string", "description": "A model for the agent (for Claude: fable, opus, sonnet, haiku or a full id). Defaults to the user's default." },
                 "effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"] },
-                "permission_mode": { "type": "string", "enum": ["default", "acceptEdits", "plan", "auto"], "description": "Claude takes any of these; Codex and Hermes take default (asks before edits) or acceptEdits. Defaults to default, or plan if you are in plan mode. Never freer than your own mode, and permissions can never be bypassed." },
+                "permission_mode": { "type": "string", "enum": ["default", "acceptEdits", "plan", "auto"], "description": "Claude takes any of these; Codex and Hermes take default (asks before edits) or acceptEdits. Defaults to default, or plan if you are in plan mode (which cannot start Codex or Hermes). Never freer than your own mode, and permissions can never be bypassed." },
                 "worktree": { "type": "string", "description": "A branch name: creates a git worktree for it beside the repository of `folder`, and starts the session there." },
                 "collapsed": { "type": "boolean", "description": "Open it collapsed in the dock, out of the user's way." }
             },
