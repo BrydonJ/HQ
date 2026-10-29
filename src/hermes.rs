@@ -121,34 +121,54 @@ pub fn spawn(app: &AppHandle, opts: SpawnOptions, events: Channel<InvokeResponse
     }
 }
 
+/// How long `hermes sessions discard` may take; it waits on Hermes' gateway.
+const DISCARD_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Why a session will not open while Hermes holds a turn it lost, and what clears it by hand.
-fn lost_turn_message(session: Option<&str>) -> String {
-    let command = session.map_or("hermes sessions discard <session id>".to_owned(), |id| format!("hermes sessions discard {id} --yes"));
-    format!("Hermes could not start the session: a turn it lost when its gateway restarted blocks it. Run `{command}` in a terminal, then reopen it.")
+fn lost_turn_message(session: &str, why: &str) -> String {
+    format!(
+        "Hermes could not start the session: a turn it lost when its gateway restarted blocks it, and HQ could not clear it ({why}). Run `hermes sessions discard {session} --yes` in a terminal, then reopen it."
+    )
 }
 
 /// Runs `hermes sessions discard`, which acknowledges the turn a session lost when Hermes' gateway
-/// restarted without replaying it. True when Hermes accepted. Bounded, as it waits on the gateway.
-fn discard_lost_turn(session: &str, cwd: &str) -> bool {
+/// restarted without replaying it. Err says why Hermes did not accept. Run off the bridge thread.
+/// On a timeout only the launcher is killed (`kill_group` does nothing on Windows), which is
+/// acceptable for a rare, bounded wait.
+fn discard_lost_turn(session: &str, cwd: &str) -> Result<(), String> {
     let mut cmd = Command::new(hermes_program());
     cmd.args(["sessions", "discard", "--yes", "--", session])
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     hide_console(&mut cmd);
-    let Ok(mut child) = cmd.spawn() else { return false };
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut child = cmd.spawn().map_err(|e| format!("could not run hermes: {e}"))?;
+    let (tx, rx) = mpsc::channel::<String>();
+    if let Some(mut stderr) = child.stderr.take() {
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = stderr.read_to_string(&mut text);
+            let _ = tx.send(text);
+        });
+    }
+    let deadline = Instant::now() + DISCARD_TIMEOUT;
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => {
+                let text = rx.recv_timeout(Duration::from_secs(2)).unwrap_or_default();
+                let last = text.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or("no message");
+                return Err(format!("exit {}: {}", status.code().map_or("?".into(), |c| c.to_string()), last.chars().take(200).collect::<String>()));
+            }
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
-            _ => {
+            Ok(None) => {
                 crate::session::kill_group(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
-                return false;
+                return Err("timed out".into());
             }
+            Err(e) => return Err(e.to_string()),
         }
     }
 }
@@ -158,6 +178,7 @@ fn discard_lost_turn(session: &str, cwd: &str) -> bool {
 fn translate(stdin: ChildStdin, stdout: impl Read + Send + 'static, mirror: PathBuf, opts: SpawnOptions, mcp_servers: Value) -> Result<(mpsc::Sender<String>, PipeReader), String> {
     let (lines, writer) = std::io::pipe().map_err(|e| e.to_string())?;
     let (events_tx, events_rx) = mpsc::channel::<Event>();
+    let bridge_tx = events_tx.clone();
     let (input_tx, input_rx) = mpsc::channel::<String>();
     {
         let tx = events_tx.clone();
@@ -188,7 +209,7 @@ fn translate(stdin: ChildStdin, stdout: impl Read + Send + 'static, mirror: Path
         }
         let _ = events_tx.send(Event::HermesClosed);
     });
-    let bridge = Bridge::new(stdin, writer, mirror, opts, mcp_servers);
+    let bridge = Bridge::new(stdin, writer, mirror, opts, mcp_servers, bridge_tx);
     std::thread::spawn(move || bridge.run(events_rx));
     Ok((input_tx, lines))
 }
@@ -437,6 +458,8 @@ enum Event {
     FrontendClosed,
     Hermes(String),
     HermesClosed,
+    /// `discard_lost_turn` finished for this session, off the bridge thread.
+    LostTurnDiscarded { session: String, result: Result<(), String> },
 }
 
 /// What a JSON-RPC response from Hermes answers.
@@ -499,6 +522,8 @@ struct Bridge {
     loading: bool,
     /// Whether the session's lost turn was already discarded, so opening it is retried only once.
     discarded_lost_turn: bool,
+    /// The bridge's own event queue, for work finished on another thread.
+    events: mpsc::Sender<Event>,
     /// Frontend lines that arrived before the session was open.
     early: Vec<String>,
     /// Setup calls Hermes has yet to answer; the cell's lines wait in `early` until it has.
@@ -541,7 +566,7 @@ struct Bridge {
 }
 
 impl Bridge {
-    fn new(hermes: ChildStdin, out: PipeWriter, mirror_dir: PathBuf, opts: SpawnOptions, mcp_servers: Value) -> Bridge {
+    fn new(hermes: ChildStdin, out: PipeWriter, mirror_dir: PathBuf, opts: SpawnOptions, mcp_servers: Value, events: mpsc::Sender<Event>) -> Bridge {
         let task_prompt_due = opts.auto_tasks;
         Bridge {
             hermes: Some(hermes),
@@ -555,6 +580,7 @@ impl Bridge {
             session: None,
             loading: false,
             discarded_lost_turn: false,
+            events,
             early: Vec::new(),
             setup: 0,
             prompts: VecDeque::new(),
@@ -607,6 +633,10 @@ impl Bridge {
                 Event::FrontendClosed => self.hermes = None,
                 Event::Hermes(line) => self.from_hermes(&line),
                 Event::HermesClosed => break,
+                Event::LostTurnDiscarded { session, result } => match result {
+                    Ok(()) => self.open_session(),
+                    Err(why) => self.fatal(&lost_turn_message(&session, &why)),
+                },
             }
         }
         // Dropping the writer ends the frontend's stream, which then reports the exit.
@@ -734,17 +764,19 @@ impl Bridge {
             // A turn Hermes lost when its gateway restarted (HQ restarting to update does that to
             // every running session) blocks the session, and Hermes reports it only as "Internal
             // error". Discarding it is what Hermes' own `/discard` does; the turn is gone either way.
-            Call::Open { loaded, fork_of } if details == Some("unknown_execution") => {
-                let id = loaded.or(fork_of).filter(|id| valid_session_id(id));
-                match id {
-                    Some(id) if !self.discarded_lost_turn => {
+            Call::Open { loaded, fork_of } if details.is_some_and(|d| d.starts_with("unknown_execution")) => {
+                match loaded.or(fork_of).filter(|id| valid_session_id(id)) {
+                    Some(session) if !self.discarded_lost_turn => {
                         self.discarded_lost_turn = true;
-                        if discard_lost_turn(&id, &self.opts.cwd) {
-                            return self.open_session();
-                        }
-                        self.fatal(&lost_turn_message(Some(&id)));
+                        let (cwd, events) = (self.opts.cwd.clone(), self.events.clone());
+                        // The gateway can take a while to answer; the bridge keeps serving the cell.
+                        std::thread::spawn(move || {
+                            let result = discard_lost_turn(&session, &cwd);
+                            let _ = events.send(Event::LostTurnDiscarded { session, result });
+                        });
                     }
-                    id => self.fatal(&lost_turn_message(id.as_deref())),
+                    Some(session) => self.fatal(&lost_turn_message(&session, "it was discarded, but Hermes still reports one")),
+                    None => self.fatal(&format!("Hermes could not start the session: {error}")),
                 }
             }
             Call::Initialize | Call::Open { .. } => self.fatal(&format!("Hermes could not start the session: {error}")),
@@ -1538,8 +1570,9 @@ mod tests {
 
     #[test]
     fn names_the_command_that_clears_a_lost_turn() {
-        assert!(lost_turn_message(Some("local-abc")).contains("`hermes sessions discard local-abc --yes`"));
-        assert!(lost_turn_message(None).contains("hermes sessions discard <session id>"));
+        let message = lost_turn_message("local-abc", "exit 1: no gateway");
+        assert!(message.contains("`hermes sessions discard local-abc --yes`"));
+        assert!(message.contains("exit 1: no gateway"));
     }
 
     #[test]
