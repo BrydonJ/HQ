@@ -390,7 +390,7 @@ the repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the contents of the updater 
     assumption". Plans are held for you. Any other permission request is declined as
     **deferred, not refused**: the agent is told not to look for another way to do the same thing,
     to note it as pending and to carry on with the rest. Each card is left for a minute first,
-    in case you are still there.
+    in case you are still there, and counts it down ("AFK: Deferring in 0:42", with a draining bar).
   - Only Claude reads the reason given with a declined request. Codex and Hermes learn from the
     AFK message that a decline now means "later"; HQ sends it before their first decline.
   - When a turn ends, the session is asked to carry on, or to list what is waiting for you if

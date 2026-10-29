@@ -155,7 +155,7 @@ function afkStart(cell) {
 
 function afkEnd(cell) {
   cell.afkOn = false;
-  for (const card of cell.pending.values()) clearTimeout(card.afkTimer);
+  for (const card of cell.pending.values()) afkUnwatch(card);
   clearTimeout(cell.afkNudgeTimer);
   // Only to a turn that can read it now: a Hermes turn would only read it when it ends, and a new
   // turn just to say so costs a request (the user's next message says it anyway), unless the AFK
@@ -186,15 +186,38 @@ function afkRecord(cell, kind, text) {
 
 // ---------- prompts ----------
 
-/** A prompt arrived (onControlRequest): answered after the grace period if the user has not. */
+const AFK_ACTIONS = { question: 'Answering for you', plan: 'Holding the plan', permission: 'Deferring' };
+
+/** A prompt arrived (onControlRequest): answered after the grace period if the user has not. The card counts it down. */
 function afkWatch(cell, requestId, card) {
   if (!cell.afkOn) return;
+  const due = Date.now() + AFK_GRACE_MS;
+  const text = h('span', { class: 'afk-count-text' });
+  const bar = h('div', { class: 'afk-count-bar' });
+  bar.style.animationDuration = `${AFK_GRACE_MS}ms`;
+  card.afkCount = h('div', { class: 'afk-count', title: 'You are AFK. Answer it yourself before then to keep it.' },
+    h('div', { class: 'afk-count-row' }, icon('watch'), text), h('div', { class: 'afk-count-track' }, bar));
+  const tick = () => {
+    const s = Math.max(0, Math.ceil((due - Date.now()) / 1000));
+    text.textContent = `AFK: ${AFK_ACTIONS[card.dataset.kind] || 'Deferring'} in ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  };
+  tick();
+  card.afkTick = setInterval(tick, 1000);
+  card.prepend(card.afkCount);
   card.afkTimer = setTimeout(() => afkHandle(cell, requestId, card), AFK_GRACE_MS);
+}
+
+/** Stops a prompt's AFK countdown: it was answered, AFK ended, or HQ answers it now. */
+function afkUnwatch(card) {
+  clearTimeout(card.afkTimer);
+  clearInterval(card.afkTick);
+  if (card.afkCount) card.afkCount.remove();
+  card.afkCount = null;
 }
 
 /** Answers a waiting prompt for the away user: a question with "your call", a plan held, anything else deferred. */
 async function afkHandle(cell, requestId, card) {
-  clearTimeout(card.afkTimer);
+  afkUnwatch(card);
   const live = () => afkUntil(cell) && cell.pending.get(requestId) === card && !cell.closing;
   if (!live()) return;
   // Claude reads the reason given below; Codex and Hermes only the note, which must reach them first.

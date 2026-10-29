@@ -2521,7 +2521,7 @@ class Cell {
   dropPrompt(requestId) {
     const card = this.pending.get(requestId);
     if (card) {
-      clearTimeout(card.afkTimer);
+      afkUnwatch(card);
       card.remove();
     }
     this.pending.delete(requestId);

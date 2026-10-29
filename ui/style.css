@@ -1200,4 +1200,11 @@ input[type=color]::-webkit-color-swatch { border: 0; border-radius: 2px; }
 .afk-text { flex: 1; min-width: 0; color: var(--fg); overflow-wrap: anywhere; }
 .afk-time { flex: none; color: var(--fg-faint); font-size: 11px; }
 .afk-hint { color: var(--fg-faint); font-size: 11.5px; margin-top: 6px; }
+.afk-count { margin-bottom: 6px; color: var(--waiting); font-size: 11.5px; }
+.afk-count-row { display: flex; align-items: center; gap: 5px; font-variant-numeric: tabular-nums; }
+.afk-count-row .codicon { font-size: 12px; }
+.afk-count-track { height: 2px; margin-top: 3px; border-radius: 1px; background: color-mix(in srgb, var(--waiting) 20%, transparent); overflow: hidden; }
+.afk-count-bar { height: 100%; background: var(--waiting); transform-origin: left; animation: afk-drain linear forwards; }
+@keyframes afk-drain { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+@media (prefers-reduced-motion: reduce) { .afk-count-bar { animation: none; } }
 
