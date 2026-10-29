@@ -918,6 +918,9 @@ impl Bridge {
             let outcome = pick_option(&options, false, false).map_or(json!({ "outcome": "cancelled" }), |o| json!({ "outcome": "selected", "optionId": o }));
             return self.send_hermes(json!({ "jsonrpc": "2.0", "id": id, "result": { "outcome": outcome } }));
         }
+        if !self.in_turn {
+            self.note_own_turn(); // a turn Hermes started may ask before it reports anything
+        }
         let tool = &params["toolCall"];
         let (name, input) = tool_use(tool);
         let title = tool["title"].as_str().unwrap_or_default();
@@ -960,8 +963,10 @@ impl Bridge {
             return;
         }
         // Work while no prompt of HQ's runs is a turn Hermes started itself. Usage, title and
-        // command updates also follow HQ's own turns, so they do not count.
-        if !self.in_turn && matches!(kind, "agent_message_chunk" | "agent_thought_chunk" | "tool_call" | "tool_call_update" | "plan") {
+        // command updates also follow HQ's own turns, so they do not count, nor does news of a
+        // tool that is not open (a straggler from a turn already over).
+        let open_tool = || u["toolCallId"].as_str().is_some_and(|t| self.tools.contains(t));
+        if !self.in_turn && (matches!(kind, "agent_message_chunk" | "agent_thought_chunk" | "tool_call" | "plan") || (kind == "tool_call_update" && open_tool())) {
             self.note_own_turn();
         }
         match kind {
@@ -1273,7 +1278,8 @@ impl Bridge {
         }));
         self.record(json!({ "type": "user", "message": { "role": "user", "content": content } }));
         self.in_turn = true;
-        // A turn Hermes started itself runs ahead of this prompt; this prompt's reply ends both.
+        // A turn Hermes started itself runs ahead of this prompt. Hermes' gateway queues the
+        // prompt behind it and replies only once the prompt has run, so that reply ends both.
         self.own_turn = None;
         self.turn_prompt = prompt_text(&content);
         self.turn_tools.clear();
@@ -1633,7 +1639,7 @@ mod tests {
     /// A translator on a scripted Hermes: what the test writes is Hermes' output, and what the
     /// translator sends Hermes goes to a process that only reads it.
     fn scripted() -> (Child, PipeWriter, mpsc::Sender<String>, mpsc::Receiver<Value>) {
-        let dir = std::env::temp_dir().join("hq-hermes-scripted");
+        let dir = std::env::temp_dir().join(format!("hq-hermes-scripted-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let opts = SpawnOptions {
             cwd: dir.to_string_lossy().into_owned(),
@@ -1707,7 +1713,9 @@ mod tests {
         let result = next_matching(&rx, "result", |v| v["type"] == "result");
         assert_eq!(result["subtype"], "success", "{result}");
 
-        // With no turn of its own left, Stop goes to Hermes as before.
+        // News of a tool already closed starts no turn; with none left, Stop goes to Hermes as before.
+        hermes_says(&mut hermes, update(json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed", "content": [] })));
+        std::thread::sleep(Duration::from_millis(100));
         input.send(json!({ "type": "control_request", "request_id": "stop2", "request": { "subtype": "interrupt" } }).to_string()).unwrap();
         let reply = next_matching(&rx, "the second interrupt's reply", |v| v["type"] == "control_response");
         assert_eq!(reply["response"]["subtype"], "success", "{reply}");
