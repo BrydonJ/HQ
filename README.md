@@ -56,7 +56,9 @@ The dev copy runs next to the installed HQ. A debug build also:
   DevTools MCP server. Right-click > Inspect works too.
 
 `cargo test` runs the backend's unit tests (stream filtering, batching, transcript reading,
-session search). The UI has none; check it in the dev copy. With `codex` on PATH,
+session search, token usage and prices). `node --test tests/*.test.cjs` runs the setup and usage-chart
+regressions; both suites and a build run on Windows and macOS for each PR. On Windows, use the
+Build Tools environment selected by `build.cmd` for Cargo commands. With `codex` on PATH,
 `cargo test codex::live -- --ignored --test-threads=1` drives a real Codex through HQ's bridge
 against a fake model server, so it needs no account.
 
@@ -185,6 +187,22 @@ the repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the contents of the updater 
     HQ asks a running session when there is one. Otherwise it starts a short-lived `claude`
     that skips MCP servers and hooks and saves no transcript.
   - It refreshes after each finished turn, and every 5 minutes (15 when no session is running).
+  - Claude chats that hit the plan's usage limit continue automatically when usage returns.
+    Uncheck **Continue when usage is back** on that chat's usage error to keep it stopped;
+    the choice lasts only while that chat is open and does not affect other chats.
+- **Token usage** (the graph button in the top bar, or Ctrl+U) shows where the tokens went:
+  - Today, the last 7 or 30 days, or all time: the total, a bar per hour, day or month, and the
+    split between input, output, cache writes, cache reads and subagents.
+  - One line per session, folder or model, with its tokens, its cost and its share of the total.
+    Click a session to open it; click a folder to see only its sessions.
+  - It reads the `usage` Claude Code saves with every reply in its own transcripts, subagents'
+    included, and counts each reply once. Nothing is asked of Claude, so looking costs no tokens.
+    A transcript is read again only once it has changed, and one last changed before the period
+    is not read at all.
+  - Costs are estimates at the Claude API's list prices (`src/usage.rs` has the table, with cache
+    write lifetimes, fast mode, US-only inference and web searches). A Pro or Max plan is not billed
+    these amounts; it shows what the work would cost on an API key. A model the table does not
+    know shows its tokens without a cost. Codex and Hermes cells are not counted.
 - **API credits** let a session carry on past your plan's usage limit on a Claude Console API
   key. Max and Team plans include monthly API credits, which pay only for a key from the
   Console organization linked in claude.ai's billing settings; any other key is billed as usual.
@@ -365,6 +383,7 @@ the repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the contents of the updater 
   - Ctrl+W: close the focused cell.
   - Ctrl+B: show or hide the sessions list.
   - Ctrl+O: resume a session from VS Code or the terminal.
+  - Ctrl+U: token usage.
   - F2: rename the focused session.
 - The board is saved to `%APPDATA%\dev.brydon.hq\board.json` (`dev.brydon.hq.<profile>` for
   another profile):

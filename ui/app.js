@@ -272,6 +272,7 @@ class Cell {
     this.wrapUp = null;        // the plan's limit was hit mid-turn and Claude is finishing on the wrap-up allowance: { credits }
     this.limitResetAt = 0;     // when the limit that refused the last request resets (ms), from its rate_limit_event
     this.limitResume = null;   // { resetsAt }: carry on by itself once the plan's usage is back (checkLimitResumes)
+    this.limitAutoContinue = true; // only this open chat; uncheck on its usage error to keep it stopped
     this.cost = { usd: 0, tokens: 0, procUsd: 0, procTokens: 0, apiUsd: 0 }; // this HQ run's spend; proc* = last total of the current process; apiUsd = on HQ's API key
     this.apiMode = !!api && this.backend === 'claude'; // the user switched this session to HQ's API key until the plan's usage is back
     this.procOnApi = false;    // the running claude was started with HQ's API key
@@ -2125,13 +2126,22 @@ class Cell {
     api.classList.toggle('hidden', replay || this.backend !== 'claude' || this.apiMode || this.procOnApi);
     card.querySelector('.limit-title').textContent = title || 'Usage limit reached';
     card.querySelector('.limit-reset').textContent = reset;
-    if (!replay && this.backend === 'claude') {
+    if (!replay && this.backend === 'claude' && !this.apiMode && !this.procOnApi && this.apiSource !== 'ANTHROPIC_API_KEY') {
       if (!card.querySelector('.limit-resume')) {
-        card.querySelector('.limit-usage').before(h('button', { class: 'btn limit-resume', onclick: () => this.setLimitResume(!this.limitResume) }));
+        card.querySelector('.limit-main').append(h('label', { class: 'limit-resume' },
+          h('input', { type: 'checkbox', onchange: e => this.setLimitAutoContinue(e.target.checked) }),
+          h('span', {}, 'Continue when usage is back', h('span', { class: 'limit-resume-at' }))));
       }
-      this.drawLimitResume();
+      card.querySelector('.limit-resume').classList.remove('hidden');
+      this.setLimitResume(this.limitAutoContinue);
       scheduleUsageRefresh(this);
     }
+  }
+
+  /** A user's opt-out lasts for this open chat, across further usage errors; it is never saved. */
+  setLimitAutoContinue(on) {
+    this.limitAutoContinue = on;
+    this.setLimitResume(on);
   }
 
   /** Arms or disarms carrying on by itself once the plan's usage is back (checkLimitResumes). */
@@ -2145,18 +2155,19 @@ class Cell {
 
   drawLimitResume() {
     const at = this.limitResume && this.limitResume.resetsAt;
-    for (const btn of this.msgs.querySelectorAll('.limit-resume')) {
-      btn.classList.toggle('on', !!this.limitResume);
-      btn.textContent = !this.limitResume ? 'Continue when usage is back'
-        : at > Date.now() ? `Continuing at ${new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} · Cancel`
-          : 'Continuing when usage is back · Cancel';
-      btn.title = this.limitResume ? 'Cancel: stay stopped' : 'Send "continue" by itself once the usage limit resets';
+    for (const label of this.msgs.querySelectorAll('.limit-resume')) {
+      label.querySelector('input').checked = this.limitAutoContinue;
+      label.querySelector('.limit-resume-at').textContent = at > Date.now()
+        ? `Continuing at ${new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : '';
+      label.title = this.limitAutoContinue ? 'Uncheck to keep this chat stopped when usage returns' : 'Check to continue this chat when usage returns';
     }
   }
 
   retireLimitCard(card) {
     delete card.dataset.live;
     card.querySelector('.limit-api').classList.add('hidden');
+    const resume = card.querySelector('.limit-resume');
+    if (resume) resume.classList.add('hidden');
   }
 
   /** Text followed by a tool call is Claude narrating its work, not its answer. */
@@ -4183,6 +4194,7 @@ let pickerIndex = -1;
 
 async function openPicker() {
   closeResumer();
+  closeTokens();
   const list = $('#picker-recent');
   list.replaceChildren();
   const exists = await Promise.all(app.recent.map(p => invoke('folder_exists', { path: p }).catch(() => false)));
@@ -4292,6 +4304,7 @@ const resumeState = { sessions: [], all: [], project: '', source: '', loading: f
 async function openResumer() {
   closePicker();
   closeSettings();
+  closeTokens();
   closeMenu();
   resumer.classList.remove('hidden');
   resumeSearch.value = '';
@@ -4730,7 +4743,7 @@ async function checkLimitResumes() {
   if (usage.fetchedAt < latest && now - latest < LIMIT_RESUME_BLIND_MS) return;
   const still = usage.fetchedAt < latest ? 0 : usageResetAt();
   for (const cell of due) {
-    if (!cell.limitResume || !app.cells.includes(cell) || cell.closing) continue;
+    if (!cell.limitResume || !app.cells.includes(cell) || cell.closing || Date.now() < cell.limitResume.resetsAt) continue;
     if (still) { cell.limitResume.resetsAt = still; cell.drawLimitResume(); continue; }
     if (cell.status === 'running' || cell.pending.size || cell.spawning) continue; // busy; the next tick sends it
     cell.setLimitResume(false); // before submit, which can wait: an overlapping tick must not send it twice
@@ -4857,6 +4870,253 @@ setInterval(() => {
   if (five && five.resetsAt && five.resetsAt < Date.now() && Date.now() - usage.fetchedAt > 60000) refreshUsage();
   else renderUsage();
 }, 30000);
+
+// ======================================================================================
+// Token usage: where the tokens went, by session, folder and model
+// ======================================================================================
+
+// Read from the usage Claude Code writes into its transcripts (usage.rs), so looking costs no
+// tokens. The backend keeps what it read, and only reads a file again once it has changed.
+const tokensPanel = $('#tokens');
+const tokensBody = $('#tokens-body');
+const TOKEN_VIEWS = [['sessions', 'Sessions'], ['folders', 'Folders'], ['models', 'Models']];
+const HOUR_MS = 3600 * 1000;
+// `sessions` is usage_report's reply for `range`; `seq` drops a reply that a newer request overtook.
+// `folder` narrows everything to one folder, picked in the Folders view.
+const tokens = { range: '7', view: 'sessions', folder: '', sessions: null, loading: false, error: null, seq: 0 };
+
+function openTokens() {
+  closePicker();
+  closeResumer();
+  closeSettings();
+  closeMenu();
+  tokensPanel.classList.remove('hidden');
+  loadTokens();
+}
+
+function closeTokens() {
+  tokensPanel.classList.add('hidden');
+}
+
+/** Local midnight at the start of the range (ms), or null for all of it. */
+function tokensSince(range) {
+  if (range === 'all') return null;
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  if (range !== 'today') d.setDate(d.getDate() - (Number(range) - 1));
+  return d.getTime();
+}
+
+async function loadTokens() {
+  const seq = ++tokens.seq;
+  tokens.loading = true;
+  tokens.error = null;
+  renderTokens();
+  let sessions = null;
+  let error = null;
+  try {
+    sessions = await invoke('usage_report', { sinceMs: tokensSince(tokens.range) });
+  } catch (err) {
+    error = String(err);
+  }
+  if (seq !== tokens.seq) return;
+  if (sessions) tokens.sessions = sessions;
+  tokens.error = error;
+  tokens.loading = false;
+  renderTokens();
+}
+
+/** Adds up rows of usage. Rows on a model without a known price add tokens but no cost. */
+function tokenTotals(rows) {
+  const t = { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0, subCost: 0, unpriced: 0, requests: 0 };
+  for (const r of rows) {
+    t.input += r.input;
+    t.output += r.output;
+    t.cacheWrite += r.cacheWrite;
+    t.cacheRead += r.cacheRead;
+    t.requests += r.requests;
+    if (r.cost == null) t.unpriced += r.input + r.output + r.cacheWrite + r.cacheRead;
+    else {
+      t.cost += r.cost;
+      if (r.sub) t.subCost += r.cost;
+    }
+  }
+  t.tokens = t.input + t.output + t.cacheWrite + t.cacheRead;
+  return t;
+}
+
+/** The sessions shown: those in the picked folder, or all of them. */
+function tokenSessions() {
+  const all = tokens.sessions || [];
+  return tokens.folder ? all.filter(s => s.cwd && projectKey(s.cwd) === projectKey(tokens.folder)) : all;
+}
+
+/** One line per session, folder or model, biggest first: { key, name, path, title, rows, open }. */
+function tokenGroups(sessions) {
+  const groups = new Map();
+  const group = (key, make) => groups.get(key) || groups.set(key, { key, rows: [], sessions: new Set(), ...make() }).get(key);
+  for (const s of sessions) {
+    if (tokens.view === 'models') {
+      for (const r of s.rows) {
+        const g = group(r.model, () => ({ name: r.model }));
+        g.rows.push(r);
+        g.sessions.add(s.sessionId);
+      }
+      continue;
+    }
+    const folder = tokens.view === 'folders';
+    const g = group(folder ? projectKey(s.cwd || '') : s.sessionId, () => folder
+      ? { name: baseName(s.cwd || '') || s.cwd || '(unknown folder)', title: s.cwd || '', cwd: s.cwd, open: s.cwd ? () => setTokensFolder(s.cwd) : null }
+      : { name: s.title || '(no title)', title: `${s.cwd || ''}\n${s.sessionId}`, cwd: s.cwd, modifiedMs: s.modifiedMs,
+          open: s.cwd ? () => { closeTokens(); resumeSession({ sessionId: s.sessionId, cwd: s.cwd, title: s.title, modifiedMs: s.modifiedMs }); } : null });
+    for (const row of s.rows) g.rows.push(row);
+    g.sessions.add(s.sessionId);
+  }
+  const list = [...groups.values()].map(g => ({ ...g, totals: tokenTotals(g.rows) }));
+  return list.sort((a, b) => b.totals.cost - a.totals.cost || b.totals.tokens - a.totals.tokens);
+}
+
+/** 12%, or <1% for a share too small to round up to one. */
+function percentText(p) {
+  return p >= 1 || !p ? `${Math.round(p)}%` : '<1%';
+}
+
+function setTokensFolder(folder) {
+  tokens.folder = folder;
+  if (folder) tokens.view = 'sessions';
+  renderTokens();
+}
+
+/**
+ * The bars over the range: an hour each for today, a day each up to two months, else a month each.
+ * Each bar is the cost, or the tokens when nothing in the range has a price.
+ */
+function tokenChart(sessions, byCost) {
+  const rows = sessions.flatMap(s => s.rows);
+  if (!rows.length) return null;
+  const now = new Date();
+  // All time starts at the first usage anywhere, so picking a folder keeps the same bars.
+  const firstAt = (tokens.sessions || sessions).reduce((min, s) => s.rows.reduce((at, r) => Math.min(at, r.at), min), Infinity);
+  const first = new Date(tokensSince(tokens.range) ?? firstAt);
+  let unit = tokens.range === 'today' ? 'hour' : 'day';
+  if (unit === 'day' && now - first > 62 * 24 * HOUR_MS) unit = 'month';
+  const start = d => {
+    const x = new Date(d);
+    if (unit === 'hour') x.setMinutes(0, 0, 0);
+    else x.setHours(0, 0, 0, 0);
+    if (unit === 'month') x.setDate(1);
+    return x;
+  };
+  const step = d => {
+    const x = new Date(d);
+    if (unit === 'hour') x.setHours(x.getHours() + 1);
+    else if (unit === 'day') x.setDate(x.getDate() + 1);
+    else x.setMonth(x.getMonth() + 1);
+    return x;
+  };
+  const bars = [];
+  const index = new Map();
+  for (let d = start(first); d <= now; d = step(d)) {
+    index.set(d.getTime(), bars.length);
+    bars.push({ at: d, cost: 0, tokens: 0 });
+  }
+  for (const r of rows) {
+    const bar = bars[index.get(start(r.at).getTime())];
+    if (!bar) continue;
+    bar.cost += r.cost || 0;
+    bar.tokens += r.input + r.output + r.cacheWrite + r.cacheRead;
+  }
+  const value = b => (byCost ? b.cost : b.tokens);
+  const max = Math.max(...bars.map(value)) || 1;
+  const label = d => (unit === 'hour' ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : unit === 'day' ? d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })
+      : d.toLocaleDateString([], { year: 'numeric', month: 'long' }));
+  return h('div', { class: 'tk-chart', 'aria-hidden': 'true' }, bars.map(b => h('span', {
+    class: value(b) ? null : 'zero',
+    style: `height:${Math.max(2, Math.round((value(b) / max) * 100))}%`,
+    title: `${label(b.at)} · ${formatCost(b.cost)} · ${formatTokens(b.tokens)} tokens`,
+  })));
+}
+
+function renderTokens() {
+  for (const b of $('#tokens-range').querySelectorAll('button')) b.classList.toggle('on', b.dataset.range === tokens.range);
+  $('#tokens-refresh').classList.toggle('spin', tokens.loading);
+  const parts = [];
+  if (tokens.error) parts.push(h('div', { class: 'usage-note error', text: tokens.error }));
+  if (!tokens.sessions) {
+    parts.push(h('div', { class: 'session-empty', text: tokens.loading ? 'Reading transcripts…' : 'No usage found.' }));
+    tokensBody.replaceChildren(...parts);
+    return;
+  }
+  const sessions = tokenSessions();
+  const all = tokenTotals(sessions.flatMap(s => s.rows));
+  const byCost = all.cost > 0;
+  const count = n => `${n} session${n === 1 ? '' : 's'}`;
+  parts.push(h('div', { class: 'tk-summary' },
+    h('span', { class: 'tk-cost', text: byCost ? formatCost(all.cost) : formatTokens(all.tokens), title: 'At API list prices' }),
+    h('span', { class: 'tk-sub', text: [byCost ? `${formatTokens(all.tokens)} tokens` : 'tokens', `${all.requests} requests`, count(sessions.length)].join(' · ') }),
+    tokens.loading ? h('span', { class: 'tk-sub', text: 'Updating…' }) : null));
+  parts.push(h('div', { class: 'tk-kinds', text: [
+    `Input ${formatTokens(all.input)}`, `Output ${formatTokens(all.output)}`,
+    `Cache write ${formatTokens(all.cacheWrite)}`, `Cache read ${formatTokens(all.cacheRead)}`,
+    all.subCost ? `Subagents ${formatCost(all.subCost)} (${percentText((all.subCost / all.cost) * 100)})` : null,
+    all.unpriced ? `${formatTokens(all.unpriced)} tokens on models without a known price` : null,
+  ].filter(Boolean).join(' · ') }));
+  parts.push(tokenChart(sessions, byCost));
+
+  const views = h('div', { class: 'filters' }, TOKEN_VIEWS.map(([view, label]) => h('button', {
+    class: tokens.view === view ? 'on' : null, text: label, onclick: () => { tokens.view = view; renderTokens(); },
+  })));
+  if (tokens.folder) {
+    views.append(h('button', { class: 'tk-folder on', title: `${tokens.folder}\nShow every folder`, onclick: () => setTokensFolder('') },
+      `${baseName(tokens.folder) || tokens.folder} `, icon('close')));
+  }
+  parts.push(views);
+
+  const groups = tokenGroups(sessions);
+  const total = byCost ? all.cost : all.tokens;
+  const rows = [h('div', { class: 'tk-row tk-head' }, h('span', { text: TOKEN_VIEWS.find(([v]) => v === tokens.view)[1] }),
+    h('span', { class: 'tk-num', text: 'Tokens' }), h('span', { class: 'tk-num', text: 'Cost' }), h('span', { class: 'tk-num', text: byCost ? '% of cost' : '% of tokens' }))];
+  for (const g of groups) {
+    const t = g.totals;
+    const share = total ? ((byCost ? t.cost : t.tokens) / total) * 100 : 0;
+    const path = tokens.view === 'sessions' ? [baseName(g.cwd || ''), g.modifiedMs ? timeAgo(g.modifiedMs) : null].filter(Boolean).join(' · ')
+      : tokens.view === 'folders' ? `${g.cwd || ''} · ${count(g.sessions.size)}`
+        : `${t.requests} requests · ${count(g.sessions.size)}`;
+    const breakdown = `Input ${formatTokens(t.input)} · Output ${formatTokens(t.output)} · Cache write ${formatTokens(t.cacheWrite)} · Cache read ${formatTokens(t.cacheRead)}`
+      + (t.subCost ? `\nSubagents ${formatCost(t.subCost)}` : '');
+    const row = h(g.open ? 'button' : 'div', { class: `tk-row${g.open ? '' : ' static'}`, title: `${g.title ? `${g.title}\n` : ''}${breakdown}`, onclick: g.open },
+      h('span', { class: 'tk-name' }, h('span', { class: 'name', text: g.name }), h('span', { class: 'path', text: path })),
+      h('span', { class: 'tk-num', text: formatTokens(t.tokens) }),
+      h('span', { class: 'tk-num cost', text: t.unpriced && !t.cost ? '—' : formatCost(t.cost) }),
+      h('span', { class: 'tk-share' }, h('span', { class: 'bar' }, h('span', { style: `width:${Math.min(100, share)}%` })),
+        h('span', { class: 'pct', text: percentText(share) })));
+    if (g.cwd) row.style.setProperty('--proj', projectColor(g.cwd));
+    rows.push(row);
+  }
+  if (!groups.length) rows.push(h('div', { class: 'session-empty', text: tokens.loading ? 'Reading transcripts…' : 'No usage in this period.' }));
+  parts.push(h('div', { class: 'tk-list' }, rows));
+  parts.push(h('div', { class: 'usage-foot', text: 'Estimated at API list prices from the Claude Code transcripts on this computer; '
+    + 'a Pro or Max plan is not billed these amounts. Requests Claude Code keeps out of its transcripts, and Codex and Hermes cells, '
+    + 'are not counted. Reading them costs no tokens.' }));
+  tokensBody.replaceChildren(...parts);
+}
+
+$('#tokens-range').addEventListener('click', e => {
+  const range = e.target.closest('button') && e.target.closest('button').dataset.range;
+  if (!range || range === tokens.range) return;
+  tokens.range = range;
+  tokens.sessions = null; // another range is another set of rows; the old one would mislead while it loads
+  loadTokens();
+});
+$('#tokens-refresh').addEventListener('click', () => loadTokens());
+tokensPanel.addEventListener('keydown', e => {
+  if (e.key === 'Escape') { e.stopPropagation(); closeTokens(); }
+});
+document.addEventListener('mousedown', e => {
+  if (!tokensPanel.classList.contains('hidden') && !tokensPanel.contains(e.target) && !e.target.closest('#tokens-btn')) closeTokens();
+});
+$('#tokens-btn').addEventListener('click', () => (tokensPanel.classList.contains('hidden') ? openTokens() : closeTokens()));
 
 // ======================================================================================
 // Settings: what used to be environment variables, plus the theme and notifications
@@ -5160,6 +5420,7 @@ document.documentElement.addEventListener('mouseleave', clearButtonFade);
 function openSettings() {
   closePicker();
   closeResumer();
+  closeTokens();
   closeMenu();
   renderSettings();
   settingsPanel.classList.remove('hidden');
@@ -5362,6 +5623,7 @@ document.addEventListener('keydown', e => {
   if (mod && !e.shiftKey && !e.altKey) {
     if (e.key === 'n' || e.key === 'N') { e.preventDefault(); openPicker(); return; }
     if (e.key === 'o' || e.key === 'O') { e.preventDefault(); openResumer(); return; }
+    if (e.key === 'u' || e.key === 'U') { e.preventDefault(); tokensPanel.classList.contains('hidden') ? openTokens() : closeTokens(); return; }
     if (e.key === ',') { e.preventDefault(); openSettings(); return; }
     if (e.key === 'b' || e.key === 'B') { e.preventDefault(); setSidebar(!app.sidebarOpen, !app.sidebarOpen); return; }
     if ((e.key === 'm' || e.key === 'M') && cell) { e.preventDefault(); toggleMaximize(cell); return; }
@@ -5539,7 +5801,7 @@ async function installClaude() {
   app.claudeUpdateAt = Date.now();
   saveState();
   const status = await invoke('claude_status').catch(() => null);
-  if (status && status.loggedIn !== false) return finishSetup(); // signed in before (a reinstall), or it cannot tell
+  if (status && status.loggedIn === true) return finishSetup(); // a reinstall may already be signed in
   signInClaude();
 }
 
@@ -5568,7 +5830,10 @@ async function pollSignIn() {
   try {
     const status = await invoke('claude_status').catch(() => null);
     if (setup.step !== 'waiting') return;
-    if (status && status.loggedIn !== false) return finishSetup();
+    if (status && status.loggedIn === true) return finishSetup();
+    setSetupStatus(status && status.loggedIn === false
+      ? 'Waiting for you to sign in…'
+      : 'Could not confirm sign-in yet; HQ will keep checking.');
     if (Date.now() - setup.since > SETUP_GIVE_UP_MS) {
       clearInterval(setup.poll);
       showSetup('login', 'Still not signed in. Click Sign in to try again.');

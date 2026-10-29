@@ -230,7 +230,7 @@ pub fn api_key_hint(key: &str) -> String {
     format!("sk-ant-…{}", &key[key.len().saturating_sub(4)..])
 }
 
-fn claude_config_dir() -> Option<PathBuf> {
+pub(crate) fn claude_config_dir() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("CLAUDE_CONFIG_DIR") {
         return Some(PathBuf::from(dir));
     }
@@ -533,6 +533,13 @@ impl Index {
         self.sessions.lock().unwrap().retain(|path, _| live.contains(path.as_path()));
     }
 
+    /// The folder a session started in and the name the resume list gives it, for the usage
+    /// dashboard. Shares the resume list's cache, so a file read for one costs nothing for the other.
+    pub(crate) fn session_name(&self, path: &Path, len: u64, modified: SystemTime) -> Option<(String, Option<String>)> {
+        let info = self.info(&TranscriptFile { path: path.to_owned(), len, modified })?;
+        Some((info.cwd, info.title.or(info.last_prompt)))
+    }
+
     /// Starts a search and cancels any that is still running.
     pub fn begin_search(&self) -> u64 {
         self.search.fetch_add(1, Ordering::SeqCst) + 1
@@ -596,7 +603,7 @@ fn folder_key(path: &str) -> String {
     path.replace('/', "\\").trim_end_matches('\\').to_lowercase()
 }
 
-fn is_session_id(s: &str) -> bool {
+pub(crate) fn is_session_id(s: &str) -> bool {
     s.len() == 36 && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
 

@@ -1098,8 +1098,11 @@ input[type=color]::-webkit-color-swatch { border: 0; border-radius: 2px; }
 .limit-reset { color: var(--fg-muted); font-size: 12px; }
 .limit-reset:empty { display: none; }
 .limit-count { color: var(--fg-faint); font-size: 11px; }
-.limit-usage, .limit-resume, .limit-api { flex: none; }
-.limit-resume.on { color: var(--link); border-color: var(--link); }
+.limit-usage, .limit-api { flex: none; }
+.limit-resume { display: flex; align-items: flex-start; gap: 6px; margin-top: 6px; color: var(--fg); font-size: 12px; cursor: pointer; }
+.limit-resume input { flex: none; margin: 2px 0 0; accent-color: var(--link); }
+.limit-resume-at { display: block; color: var(--fg-muted); font-size: 11px; }
+.limit-resume-at:empty { display: none; }
 
 /* ---------- code blocks: Markdown preview and Run ---------- */
 .code-act { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 20px; padding: 0; border: 0; border-radius: 3px; background: transparent; color: var(--fg-muted); cursor: pointer; }
@@ -1126,3 +1129,40 @@ input[type=color]::-webkit-color-swatch { border: 0; border-radius: 2px; }
 .hover-buttons .cell-head > .icon-btn { opacity: 0; transition: opacity 0.12s; }
 .hover-buttons .cell-head:hover > .icon-btn, .hover-buttons .cell-head:focus-within > .icon-btn,
 .hover-buttons .cell-head > .act-close.confirm { opacity: 1; }
+
+/* ---------- token usage (where the tokens went) ---------- */
+.tokens { width: 660px; }
+.tokens .picker-title { display: flex; align-items: center; }
+.tokens .picker-title .icon-btn { margin-left: auto; }
+#tokens-refresh.spin .codicon { animation: codicon-spin 1.2s linear infinite; }
+.tk-summary { display: flex; align-items: baseline; gap: 10px; padding: 0 8px 2px; }
+.tk-cost { color: var(--fg-strong); font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.tk-sub { color: var(--fg-muted); font-size: 12px; }
+.tk-kinds { color: var(--fg-faint); font-size: 11px; padding: 0 8px 8px; }
+.tk-chart { display: flex; align-items: flex-end; gap: 2px; height: 56px; margin: 0 8px 8px; border-bottom: 1px solid var(--border); }
+.tk-chart span { flex: 1; min-width: 2px; background: var(--accent); border-radius: 2px 2px 0 0; opacity: 0.8; }
+.tk-chart span:hover { opacity: 1; }
+.tk-chart span.zero { background: var(--border-strong); opacity: 0.5; }
+.filters .tk-folder { margin-left: auto; display: flex; align-items: center; gap: 2px; max-width: 220px; overflow: hidden; white-space: nowrap; }
+.filters .tk-folder .codicon { font-size: 11px; }
+.tk-list { max-height: 45vh; overflow-y: auto; }
+.tk-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) 56px 64px 104px; align-items: center; gap: 10px; width: 100%; margin: 1px 0;
+  padding: 4px 8px 4px 10px; border: 0; border-radius: 4px; background: transparent; text-align: left; cursor: pointer;
+  box-shadow: inset 3px 0 0 var(--proj, transparent);
+}
+.tk-row:hover, .tk-row:focus-visible { background: color-mix(in srgb, var(--accent) 20%, transparent); outline: none; }
+.tk-row.static, .tk-row.tk-head { cursor: default; }
+.tk-row.static:hover, .tk-row.tk-head:hover { background: transparent; }
+.tk-head { padding-top: 0; padding-bottom: 0; color: var(--fg-faint); font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; }
+.tk-head .tk-num { color: var(--fg-faint); font-size: 10px; }
+.tk-name { display: flex; flex-direction: column; min-width: 0; }
+.tk-name .name { color: var(--fg-strong); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tk-name .path { color: var(--fg-faint); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tk-num { color: var(--fg-muted); font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
+.tk-num.cost { color: var(--fg); }
+.tk-share { display: flex; align-items: center; gap: 6px; color: var(--fg-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.tk-share .bar { flex: 1; height: 4px; border-radius: 2px; background: var(--border); overflow: hidden; }
+.tk-share .bar span { display: block; height: 100%; background: var(--accent); }
+.tk-share .pct { width: 30px; text-align: right; }
+.tokens .usage-foot { margin-top: 6px; padding: 5px 8px 0; }

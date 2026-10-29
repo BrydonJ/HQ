@@ -27,6 +27,7 @@
       <span class="codicon codicon-dashboard"></span><span class="usage-text">&hellip;</span>
       <span class="usage-week" aria-hidden="true"><span></span></span>
     </button>
+    <button id="tokens-btn" class="icon-btn" title="Token usage (Ctrl+U)"><span class="codicon codicon-graph"></span></button>
     <button id="terminal-btn" class="icon-btn big" title="Open a terminal"><span class="codicon codicon-terminal"></span></button>
     <button id="settings-btn" class="icon-btn" title="Settings (Ctrl+,)"><span class="codicon codicon-settings-gear"></span></button>
     <button id="resume-session" class="btn" title="Continue a session from VS Code or the terminal (Ctrl+O)">
@@ -92,6 +93,20 @@
       <select id="resume-project" title="Only sessions from this folder"><option value="">All folders</option></select>
     </div>
     <div id="resume-list" class="picker-list resume-list"></div>
+  </div>
+
+  <div id="tokens" class="picker tokens hidden" role="dialog" aria-label="Token usage">
+    <div class="picker-title">
+      <span>Token usage</span>
+      <button id="tokens-refresh" class="icon-btn" title="Read the transcripts again"><span class="codicon codicon-refresh"></span></button>
+    </div>
+    <div id="tokens-range" class="filters">
+      <button data-range="today">Today</button>
+      <button data-range="7" class="on">7 days</button>
+      <button data-range="30">30 days</button>
+      <button data-range="all">All time</button>
+    </div>
+    <div id="tokens-body"></div>
   </div>
 
   <div id="usage-pop" class="usage-pop hidden" role="tooltip"></div>
