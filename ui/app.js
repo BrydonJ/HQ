@@ -184,7 +184,7 @@ function updateClaude() {
 }
 
 /** The agents a cell can run, by `backend`, as the UI names them. */
-const AGENT_NAMES = { claude: 'Claude', codex: 'Codex', hermes: 'Hermes' };
+const AGENT_NAMES = { claude: 'Claude', codex: 'Codex', hermes: 'Hermes', cloud: 'Cloud' };
 /** Where each agent's history comes from: Claude's transcript, Codex's thread, HQ's copy of Hermes'. */
 const TRANSCRIPT_COMMANDS = { claude: 'load_transcript', codex: 'load_codex_transcript', hermes: 'load_hermes_transcript' };
 
@@ -353,6 +353,7 @@ class Cell {
     el.querySelector('.cell-path').textContent = this.cwd;
     if (this.backend === 'hermes') hermesDecorate(this);
     if (this.backend === 'codex') codexDecorate(this);
+    if (this.backend === 'cloud') cloudDecorate(this);
     this.modeSel.value = this.permissionMode;
     this.setTitle(this.title);
     this.applyDetail();
@@ -1186,11 +1187,12 @@ class Cell {
   remember(choice) {
     if (this.backend === 'hermes') hermesRemember(choice);
     else if (this.backend === 'codex') codexRemember(choice);
+    else if (this.backend === 'cloud') return; // each cloud cell picks its own model
     else rememberChoice(choice);
   }
 
   models() {
-    return this.backend === 'hermes' ? hermesModels() : this.backend === 'codex' ? codexModels() : modelList();
+    return this.backend === 'hermes' ? hermesModels() : this.backend === 'codex' ? codexModels() : this.backend === 'cloud' ? cloudModels() : modelList();
   }
 
   modelLabel() {
@@ -1208,7 +1210,7 @@ class Cell {
 
   /** Effort levels the chosen model accepts; empty when it has no effort setting. */
   effortLevels() {
-    if (this.backend === 'hermes') return []; // Hermes has no effort setting
+    if (this.backend === 'hermes' || this.backend === 'cloud') return []; // neither has an effort setting
     if (this.backend === 'codex') return codexEffortLevels(this);
     // Searches the unfiltered list: a saved choice of a full model id still has its real effort levels.
     const m = (app.models.length ? app.models : FALLBACK_MODELS).find(x => x.value === (this.modelChoice || 'default'));
@@ -3817,7 +3819,7 @@ function slashToken(input) {
 function slashUpdate(cell) {
   const token = slashToken(cell.input);
   // After other text a lone "/" is not taken as a command until a letter follows it.
-  const commands = cell.backend === 'hermes' ? hermes.commands : cell.backend === 'codex' ? codex.commands : app.commands;
+  const commands = cell.backend === 'hermes' ? hermes.commands : cell.backend === 'codex' ? codex.commands : cell.backend === 'cloud' ? [] : app.commands;
   if (!token || !commands.length || cell.collapsed || (token.start > 0 && !token.query)) { slashClose(cell); return; }
   const q = token.query.toLowerCase();
   const rank = c => {
@@ -4003,7 +4005,7 @@ function placeCell(cell) {
 
 /** Opens a new session with the permission mode, model and effort the user picked last. */
 function addNewCell(opts, flags) {
-  const { permissionMode = 'default', model = null, effort = null } = opts.backend === 'hermes' ? hermes.defaults : opts.backend === 'codex' ? codexDefaults() : app.defaults;
+  const { permissionMode = 'default', model = null, effort = null } = opts.backend === 'hermes' ? hermes.defaults : opts.backend === 'codex' ? codexDefaults() : opts.backend === 'cloud' ? {} : app.defaults;
   return addCell({ permissionMode, model, effort, ...opts }, flags);
 }
 
@@ -4388,7 +4390,7 @@ function closePicker() {
 
 /** The agents this build can start, in the order the switch shows them. */
 function availableBackends() {
-  return ['claude', 'codex', 'hermes'].filter(b => b === 'claude' || (Array.isArray(build.backends) && build.backends.includes(b)));
+  return ['claude', 'codex', 'hermes', 'cloud'].filter(b => b === 'claude' || (Array.isArray(build.backends) && build.backends.includes(b)));
 }
 
 /** The agent the new-session picker is set to. */
