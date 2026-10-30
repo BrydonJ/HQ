@@ -239,10 +239,10 @@ the repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the contents of the updater 
     key is not on it (an `env` block in Claude's settings wins over HQ), HQ says so.
   - Sessions on the key leave plan usage, the model list and Remote Control alone: those follow
     the plan.
-  - To run on the key from the start, with no Claude plan or sign-in, turn on Settings > **Run
-    Claude sessions on the API key**, or choose **Use an API key instead** on the first-run
-    sign-in card. Every Claude session then starts on the key, open ones change over at their
-    next message, and HQ stops asking you to sign in.
+  - To run one session on the key from the start, click the key button next to the MCP button
+    in a new Claude session before sending its first message (click again to undo). Only that
+    session runs on the key, for its whole life; other sessions stay on your plan. The button
+    goes once the first message is sent, and the API chip shows the session is on the key.
 - **Context window:** a small ring in the composer bar (it appears after the first reply) shows
   how full the session's context is.
   - The ring fills toward the auto-compact point and turns from green to red as it nears it

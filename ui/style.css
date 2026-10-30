@@ -608,6 +608,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .mcp-install-line { max-width: 100%; text-align: right; font-size: 11px; color: var(--fg-faint); overflow-wrap: anywhere; }
 .mcp-install-line.failed { color: var(--error); }
 .act-mcp.warn { color: var(--waiting); }
+/* A new session marked to run on HQ's API key from its first message. */
+.act-apikey.on { color: var(--waiting); background: var(--hover); }
 .attachments { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 8px 0; }
 .attachments:empty { display: none; }
 .attachment { position: relative; }
@@ -656,10 +658,6 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .setup-status:empty { display: none; }
 .setup-status.err { color: var(--error); font-family: var(--mono); font-size: 11px; }
 .setup-actions { display: flex; align-items: center; gap: 14px; margin-top: 16px; }
-.setup-key { margin-top: 14px; }
-.setup-key-row { display: flex; gap: 8px; margin-top: 8px; }
-.setup-key-row input { flex: 1; min-width: 0; padding: 4px 6px; font-family: var(--mono); background: var(--input-bg); color: var(--fg); border: 1px solid var(--border-strong); border-radius: 3px; outline: none; }
-.setup-key-row input:focus { border-color: var(--accent); }
 
 /* ---------- popup menu (model / effort / MCP) ---------- */
 .menu {

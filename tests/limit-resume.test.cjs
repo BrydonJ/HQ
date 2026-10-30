@@ -13,7 +13,7 @@ function harness() {
   const usage = { fetchedAt: now };
   class Clock extends Date { static now() { return now; } }
   const context = vm.createContext({ app, usage, Date: Clock, USAGE_EVERY_MS: 300_000,
-    setInterval: () => 1, clearInterval() {}, labelLimitApi() {}, apiAlways: () => false, scheduleUsageRefresh() {},
+    setInterval: () => 1, clearInterval() {}, labelLimitApi() {}, scheduleUsageRefresh() {},
     usageResetAt: () => reset > now ? reset : 0,
     refreshUsage: async () => { refreshes++; usage.fetchedAt = now; },
   });
@@ -22,7 +22,7 @@ function harness() {
     const control = { classList: { add() {}, remove() {}, toggle() {} }, textContent: '' };
     const card = { dataset: {}, querySelector: () => control };
     const cell = vm.runInContext('new LimitCell()', context);
-    Object.assign(cell, { backend: 'claude', apiMode: false, procOnApi: false, apiSource: null,
+    Object.assign(cell, { backend: 'claude', apiMode: false, procOnApi: false, apiSource: null, onKeyAlways: () => false,
       limitAutoContinue: true, limitResume: null, limitResetAt: reset, status: 'idle', pending: new Map(),
       msgs: { querySelectorAll: selector => selector.startsWith(':scope') ? [card] : [] },
       append: node => node, sent: [], notice() {}, submit(text) { this.sent.push(text); }, ...options });

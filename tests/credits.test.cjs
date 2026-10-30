@@ -10,11 +10,12 @@ const code = [
   between('const LIMIT_LABELS = {', '\n/**\n * Names for the dollar credits'),
   between('const CREDIT_LABELS = {', '\n/** Keeps only the limits HQ shows.'),
   between('async function checkClaudeSetup(', '\nfunction showSetup('),
-  between('function apiAlways()', '\n/** Turns "always on the API key"'),
+  `class KeyCell {\n${between("  /** Whether the session is on HQ's API key, or switched to it", "  /** The session runs on HQ's API key only while")}\n}\nglobalThis.KeyCell = KeyCell;`,
 ].join('\n');
 
 function harness({ settings = {}, apiKeyHint = null, status = null } = {}) {
   const shown = [];
+  let opened = 0;
   const context = vm.createContext({
     Date,
     app: { settings, apiKeyHint },
@@ -22,10 +23,12 @@ function harness({ settings = {}, apiKeyHint = null, status = null } = {}) {
     invoke: async () => status,
     showSetup: step => shown.push(step),
     closeSetup: () => shown.push('closed'),
+    openSettings: () => { opened++; },
+    saveState() {},
     console,
   });
   vm.runInContext(code, context);
-  return { shown, run: expr => vm.runInContext(expr, context) };
+  return { shown, run: expr => vm.runInContext(expr, context), settingsOpened: () => opened };
 }
 
 const reply = {
@@ -53,12 +56,37 @@ test('a prepaid balance above zero is listed; zero or missing is not', () => {
   assert.equal(run("sanitizeCredits(null).length"), 0);
 });
 
-test('with every session on the API key, a signed-out Claude Code is not asked to sign in', async () => {
-  const signedOut = { installed: true, loggedIn: false };
-  const onKey = harness({ settings: { apiKeyAlways: true }, apiKeyHint: 'sk-ant-…-123', status: signedOut });
-  await onKey.run('checkClaudeSetup()');
-  assert.deepEqual(onKey.shown, []);
-  const noKey = harness({ settings: { apiKeyAlways: true }, apiKeyHint: null, status: signedOut });
-  await noKey.run('checkClaudeSetup()');
-  assert.deepEqual(noKey.shown, ['login']);
+test('a signed-out Claude Code is asked to sign in, even with an API key saved', async () => {
+  const signedOut = harness({ apiKeyHint: 'sk-ant-…-123', status: { installed: true, loggedIn: false } });
+  await signedOut.run('checkClaudeSetup()');
+  assert.deepEqual(signedOut.shown, ['login']);
+});
+
+test('only a session marked before its first message runs on the API key', () => {
+  const { run, settingsOpened } = harness({ apiKeyHint: 'sk-ant-…-123' });
+  run(`globalThis.make = o => Object.assign(new KeyCell(), { backend: 'claude', apiMode: false, procOnApi: false, apiKeyed: false,
+    sessionId: null, promptWritten: false, fork: false, modelChoice: 'claude-opus-5-5', notes: [],
+    notice(t) { this.notes.push(t); }, renderApi() {} }, o);
+    globalThis.marked = make(); globalThis.plain = make(); marked.toggleApiKeyed();`);
+  assert.equal(run('marked.onApiNext()'), true);
+  assert.equal(run('marked.apiSwitchDue()'), true);
+  assert.equal(run('plain.onApiNext()'), false);
+  assert.equal(run('plain.apiSwitchDue()'), false);
+  // Once the first message is out the choice is closed: the button does nothing.
+  run('marked.promptWritten = true; marked.toggleApiKeyed(); plain.sessionId = "abc"; plain.toggleApiKeyed();');
+  assert.equal(run('marked.apiKeyed && !marked.keyChoiceOpen()'), true);
+  assert.equal(run('plain.apiKeyed'), false);
+  assert.equal(run('make({ backend: "codex" }).keyChoiceOpen()'), false);
+  assert.equal(run('make({ fork: true }).keyChoiceOpen()'), false);
+  assert.equal(settingsOpened(), 0);
+});
+
+test('with no key saved the key button opens Settings and marks nothing', () => {
+  const { run, settingsOpened } = harness({ apiKeyHint: null });
+  run(`globalThis.cell = Object.assign(new KeyCell(), { backend: 'claude', apiMode: false, procOnApi: false, apiKeyed: false,
+    sessionId: null, promptWritten: false, fork: false, notice() {}, renderApi() {} }); cell.toggleApiKeyed();`);
+  assert.equal(run('cell.apiKeyed'), false);
+  assert.equal(settingsOpened(), 1);
+  // A session marked earlier whose key was removed goes back to the plan.
+  assert.equal(run('cell.apiKeyed = true; cell.onApiNext()'), false);
 });

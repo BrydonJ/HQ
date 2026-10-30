@@ -11,7 +11,7 @@ function harness(status) {
   const calls = [];
   const setup = { step: 'waiting', since: Date.now(), skipped: false };
   const context = vm.createContext({
-    setup, app: { settings: {} }, Date, apiAlways: () => false, SETUP_POLL_MS: 2500, SETUP_GIVE_UP_MS: 900000,
+    setup, app: { settings: {} }, Date, SETUP_POLL_MS: 2500, SETUP_GIVE_UP_MS: 900000,
     $: () => ({}), saveState() {}, clearInterval() {}, setInterval: () => 1,
     setSetupStatus(text) { calls.push(text); },
     showSetup(step) { setup.step = step; },

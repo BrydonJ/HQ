@@ -127,16 +127,8 @@
       <div class="setup-title">Set up Claude Code</div>
       <div id="setup-text" class="setup-text"></div>
       <div id="setup-status" class="setup-status"></div>
-      <div id="setup-key" class="setup-key hidden">
-        <div class="setup-text">Paste a Claude Console API key (console.anthropic.com). Every Claude session then runs on it, billed to its organization, with no sign-in. Settings can switch back to a plan later.</div>
-        <div class="setup-key-row">
-          <input id="setup-key-input" type="password" placeholder="sk-ant-api03-…" spellcheck="false" autocomplete="off">
-          <button id="setup-key-save" class="btn primary">Use this key</button>
-        </div>
-      </div>
       <div class="setup-actions">
         <button id="setup-go" class="btn primary"></button>
-        <button id="setup-use-key" class="link-btn hidden">Use an API key instead</button>
         <button id="setup-skip" class="link-btn">Not now</button>
       </div>
     </div>
@@ -203,6 +195,7 @@
           </select>
           <button class="chip act-model" title="Model and effort"><span class="label"></span><span class="codicon codicon-chevron-down"></span></button>
           <button class="chip act-api hidden"><span class="codicon codicon-key"></span><span class="label">API</span></button>
+          <button class="icon-btn act-apikey hidden"><span class="codicon codicon-key"></span></button>
           <button class="icon-btn act-mcp" title="MCP servers"><span class="codicon codicon-plug"></span></button>
           <button class="icon-btn act-tasklist" title="Ask for a task list on this prompt"><span class="codicon codicon-tasklist"></span></button>
           <button class="icon-btn act-remote hidden"><span class="codicon codicon-broadcast"></span></button>
