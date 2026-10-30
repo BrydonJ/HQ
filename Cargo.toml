@@ -1,6 +1,6 @@
 [package]
 name = "hq"
-version = "0.20.1"
+version = "0.21.0"
 description = "Lightweight grid of Claude Code chat sessions across any folders"
 edition = "2021"
 
