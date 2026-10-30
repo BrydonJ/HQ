@@ -453,6 +453,22 @@ the repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the contents of the updater 
     file…** browses for any other.
   - If the workspace file is gone, the button opens the folder and says so.
 
+### Cloud cells
+
+A cloud cell runs on Anthropic's Managed Agents instead of this PC, so it uses none of its CPU or
+memory, and it is billed to the API key saved under Settings > API key for API credits (never to
+a Claude plan). Pick **Cloud** in the new-session switch before choosing a folder.
+
+- The session is created with the first message you send; a cell that never sends one costs
+  nothing. HQ makes one environment and one agent per model in your Console organization
+  (named "HQ cloud") and reuses them; the sessions show in the Console's Managed Agents list.
+- The container starts **empty**: it has none of the folder the cell was opened on, so a cloud
+  cell suits questions, research and work that needs no local files. Its network is unrestricted
+  and its tools (shell, files, web search and fetch) run without asking.
+- Models: Sonnet 5.5 (the default), Opus 5.5, Haiku 5.5 and Fable 5.1, picked before the first
+  message. Closing the cell ends HQ's connection but leaves the session in the Console. A cloud
+  session cannot be resumed in HQ afterwards.
+
 ### Codex cells
 
 A cell can run [Codex](https://developers.openai.com/codex) (OpenAI's coding agent) instead of
