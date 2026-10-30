@@ -9,6 +9,10 @@
   4. Publishes the installer, its signature and latest.json as a GitHub release in -Repo.
      Installed copies of HQ read latest.json from the newest release there and update
      themselves (see src/update.rs).
+  5. Publishes the same release, with the same files and notes, in -SourceRepo, so both repos
+     always list the same releases.
+
+  -Notes is required: a release cannot go out without change notes written for its users.
 
   Mac: the Mac build runs on GitHub (the "Build HQ for macOS" workflow, run with this same
   version), then `gh run download <run-id> -n hq-macos -D mac-artifacts`. Pass that folder as
@@ -20,15 +24,16 @@
   and every user must install the next version by hand.
 
 .EXAMPLE
-  .\release.ps1 0.2.1
-  .\release.ps1 0.3.0 -Notes "Adds @-file mentions."
+  .\release.ps1 0.3.0 -Notes "- Adds @-file mentions."
 #>
 param(
   [Parameter(Mandatory = $true)] [string] $Version,
-  # Release notes. By default, the subjects of the commits since the previous tag.
-  [string] $Notes,
+  # Release notes in Markdown, written for the people who install HQ.
+  [Parameter(Mandatory = $true)] [string] $Notes,
   # Where installers are published. Must match the endpoint in tauri.conf.json.
   [string] $Repo = 'BrydonJ/HQ-releases',
+  # HQ's own repo, which gets a copy of every release.
+  [string] $SourceRepo = 'BrydonJ/HQ',
   [string] $Key = "$env:USERPROFILE\.tauri\hq-updater.key",
   # A folder holding the Mac build's HQ_<version>_universal.dmg, HQ.app.tar.gz and HQ.app.tar.gz.sig.
   [string] $MacArtifacts
@@ -51,6 +56,7 @@ function Set-FirstMatch([string] $path, [string] $pattern, [string] $replacement
 
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw 'Version must look like 1.2.3.' }
 $tag = "v$Version"
+if (-not $Notes.Trim()) { throw 'Release notes are required: pass -Notes with what changed.' }
 if (git status --porcelain) { throw 'Commit or stash your changes first.' }
 if (git tag --list $tag) { throw "Tag $tag already exists." }
 if (-not (Test-Path $Key)) { throw "Signing key not found: $Key" }
@@ -59,6 +65,16 @@ if (-not (Select-String -Path tauri.conf.json -SimpleMatch $endpoint -Quiet)) {
   throw "tauri.conf.json does not use $endpoint, so installed copies would never see this release."
 }
 Invoke-Checked 'gh auth status' { gh auth status *> $null }
+# Both repos are checked before anything is built, so a release never lands in only one of them.
+foreach ($r in $Repo, $SourceRepo) {
+  Invoke-Checked "gh repo view $r" { gh repo view $r --json name *> $null }
+  # 'Continue', because Windows PowerShell 5.1 turns gh's "release not found" on stderr into an error.
+  $ErrorActionPreference = 'Continue'
+  gh release view $tag --repo $r --json tagName *> $null
+  $exists = $LASTEXITCODE -eq 0
+  $ErrorActionPreference = 'Stop'
+  if ($exists) { throw "$r already has a release $tag." }
+}
 
 # The Mac files are checked up front, so a wrong folder fails before anything is built or tagged.
 $macFiles = $null
@@ -73,12 +89,6 @@ if ($MacArtifacts) {
     Tar = Find-Mac 'HQ.app.tar.gz'
     Sig = Find-Mac 'HQ.app.tar.gz.sig'
   }
-}
-
-if (-not $Notes) {
-  $previous = git tag --sort=-creatordate --list 'v*' | Select-Object -First 1
-  $range = if ($previous) { "$previous..HEAD" } else { 'HEAD' }
-  $Notes = (git log $range --no-merges --pretty='- %s') -join "`n"
 }
 
 Set-FirstMatch Cargo.toml '^version = "[^"]+"' "version = `"$Version`""
@@ -119,11 +129,22 @@ if ($macFiles) {
 }
 $latestPath = "$bundle\latest.json"
 [IO.File]::WriteAllText($latestPath, ($latest | ConvertTo-Json -Depth 5), [Text.UTF8Encoding]::new($false))
+# Through a file, because Windows PowerShell 5.1 mangles quotes in multi-line native arguments.
+$notesPath = "$bundle\notes.md"
+[IO.File]::WriteAllText($notesPath, $Notes, [Text.UTF8Encoding]::new($false))
 
 if (git status --porcelain) { Invoke-Checked 'git commit' { git commit -q -am "Release $tag" } }
 Invoke-Checked 'git tag' { git tag -a $tag -m "HQ $tag" }
 Invoke-Checked 'git push' { git push -q origin HEAD $tag }
 Invoke-Checked 'gh release create' {
-  gh release create $tag --repo $Repo --title "HQ $tag" --notes $Notes @assets $latestPath
+  gh release create $tag --repo $Repo --title "HQ $tag" --notes-file $notesPath @assets $latestPath
 }
 Write-Host "Published HQ $tag to https://github.com/$Repo/releases/tag/$tag"
+try {
+  Invoke-Checked "gh release create in $SourceRepo" {
+    gh release create $tag --repo $SourceRepo --verify-tag --title "HQ $tag" --notes-file $notesPath @assets $latestPath
+  }
+} catch {
+  throw "$_ $tag is live in $Repo only. Finish it with: gh release create $tag --repo $SourceRepo --verify-tag --title `"HQ $tag`" --notes-file `"$notesPath`" $($assets -join ' ') `"$latestPath`""
+}
+Write-Host "Published HQ $tag to https://github.com/$SourceRepo/releases/tag/$tag"

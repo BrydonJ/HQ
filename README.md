@@ -82,8 +82,10 @@ does. Set `HQ_NO_UPDATE=1` to turn updates off.
 To publish a release, commit your changes and run:
 
 ```powershell
-.\release.ps1 0.2.1          # notes default to the commit subjects since the last tag
+.\release.ps1 0.2.1 -Notes "- What changed, for the people who install HQ"
 ```
+
+Release notes are required: neither the script nor the workflow publishes without them.
 
 The script does these steps:
 
@@ -92,11 +94,11 @@ The script does these steps:
    VS 2022 environment as `build.cmd`).
 3. Signs the installer with `%USERPROFILE%\.tauri\hq-updater.key`.
 4. Commits, tags and pushes.
-5. Publishes the installer, its signature and `latest.json` as a GitHub release.
+5. Publishes the installer, its signature and `latest.json` as a GitHub release in `HQ-releases`,
+   then the same release, files and notes in this repo, so both repos list the same releases.
 
 Or release from GitHub without a Windows PC: **Actions > Release HQ > Run workflow** on `main`,
-with the version and, optionally, release notes in Markdown (they default to the commit subjects
-since the last tag, as above). It builds Windows and the Mac app, and only once both succeed
+with the version and the release notes in Markdown. It builds Windows and the Mac app, and only once both succeed
 commits the version, tags, pushes and publishes the same files and `latest.json` as
 `release.ps1 -MacArtifacts`. Besides the two signing-key secrets below it needs
 `RELEASES_TOKEN`, a fine-grained token with Contents read and write on `HQ-releases`.
