@@ -3,7 +3,8 @@ name: Release HQ
 # Does what release.ps1 does, on GitHub: builds the signed Windows installer and the Mac app, then
 # commits the version, tags it, pushes, and publishes the release that installed copies update
 # to. Run it from main (Actions > Release HQ > Run workflow). Nothing is pushed or published
-# unless both builds succeed.
+# unless both builds succeed. The release goes to BrydonJ/HQ-releases and, with the same files and
+# notes, to this repo, so both always list the same releases. Release notes are required.
 #
 # Repository secrets (Settings > Secrets and variables > Actions):
 #   TAURI_SIGNING_PRIVATE_KEY           the contents of the updater key
@@ -19,8 +20,8 @@ on:
         required: true
         type: string
       notes:
-        description: Release notes in Markdown (defaults to the commit subjects since the last tag)
-        required: false
+        description: Release notes in Markdown, written for the people who install HQ (required)
+        required: true
         type: string
 
 permissions:
@@ -47,16 +48,29 @@ jobs:
       - name: Check the version, the branch and the secrets
         env:
           VERSION: ${{ inputs.version }}
+          NOTES: ${{ inputs.notes }}
           KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TOKEN: ${{ secrets.RELEASES_TOKEN }}
         run: |
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Version must look like 1.2.3"; exit 1; }
+          [[ -n "${NOTES//[[:space:]]/}" ]] || { echo "Release notes are required"; exit 1; }
           [[ "$GITHUB_REF" == refs/heads/main ]] || { echo "Run it from main"; exit 1; }
           ! git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null || { echo "Tag v$VERSION already exists"; exit 1; }
           [[ -n "$KEY" ]] || { echo "Secret TAURI_SIGNING_PRIVATE_KEY is not set"; exit 1; }
           [[ -n "$TOKEN" ]] || { echo "Secret RELEASES_TOKEN is not set"; exit 1; }
           endpoint="https://github.com/$RELEASES_REPO/releases/latest/download/latest.json"
           grep -qF "$endpoint" tauri.conf.json || { echo "tauri.conf.json does not use $endpoint"; exit 1; }
+
+      # Both repos get the release, so neither may have it already: that would fail after the push.
+      - name: Check neither repo has the release
+        env:
+          VERSION: ${{ inputs.version }}
+          TOKEN: ${{ secrets.RELEASES_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          GH_TOKEN="$TOKEN" gh repo view "$RELEASES_REPO" --json name >/dev/null || { echo "RELEASES_TOKEN cannot read $RELEASES_REPO"; exit 1; }
+          ! GH_TOKEN="$TOKEN" gh release view "v$VERSION" --repo "$RELEASES_REPO" >/dev/null 2>&1 || { echo "$RELEASES_REPO already has a release v$VERSION"; exit 1; }
+          ! gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || { echo "$GITHUB_REPOSITORY already has a release v$VERSION"; exit 1; }
 
   mac:
     needs: check
@@ -135,10 +149,6 @@ jobs:
           VERSION: ${{ inputs.version }}
           NOTES: ${{ inputs.notes }}
         run: |
-          if [[ -z "${NOTES//[[:space:]]/}" ]]; then
-            previous=$(git tag --sort=-creatordate --list 'v*' | head -n1)
-            NOTES=$(git log ${previous:+"$previous..HEAD"} --no-merges --pretty='- %s')
-          fi
           printf '%s\n' "$NOTES" > notes.md
           base="https://github.com/$RELEASES_REPO/releases/download/v$VERSION"
           win="HQ_${VERSION}_x64-setup.exe"
@@ -174,3 +184,13 @@ jobs:
             dist/HQ_"$VERSION"_x64-setup.exe dist/HQ_"$VERSION"_x64-setup.exe.sig \
             dist/HQ_"$VERSION"_universal.dmg dist/HQ.app.tar.gz dist/HQ.app.tar.gz.sig dist/latest.json
           echo "Published HQ v$VERSION to https://github.com/$RELEASES_REPO/releases/tag/v$VERSION"
+
+      - name: Publish the same release in this repo
+        env:
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag --title "HQ v$VERSION" --notes-file notes.md \
+            dist/HQ_"$VERSION"_x64-setup.exe dist/HQ_"$VERSION"_x64-setup.exe.sig \
+            dist/HQ_"$VERSION"_universal.dmg dist/HQ.app.tar.gz dist/HQ.app.tar.gz.sig dist/latest.json
+          echo "Published HQ v$VERSION to https://github.com/$GITHUB_REPOSITORY/releases/tag/v$VERSION"
