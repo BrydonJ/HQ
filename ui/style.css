@@ -381,7 +381,7 @@ body:not(.fade-buttons):not(.hover-buttons) .cell.wm-on .cell-head:hover > .icon
   display: none; max-width: 100%; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: 14px; letter-spacing: 0.01em; color: color-mix(in srgb, var(--claude) 80%, var(--fg-strong));
 }
-.cell.state-running .wv-busy { display: block; }
+.cell.state-running .wv-busy, .cell.state-bg .wv-busy { display: block; }
 .cell.wrapping-up .wv-busy { color: var(--waiting); }
 .wv-body { flex: none; width: min(460px, 100%); font-size: 13px; }
 .wv-body > .pv-progress { margin: 0 0 12px; }
