@@ -263,6 +263,8 @@ function updateClaude() {
 }
 
 /** The agents a cell can run, by `backend`, as the UI names them. */
+/** The stand-in folder of a cloud cell: cloud sessions have no folder of yours. */
+const CLOUD_CWD = 'Cloud';
 const AGENT_NAMES = { claude: 'Claude', codex: 'Codex', hermes: 'Hermes', cloud: 'Cloud' };
 /** Where each agent's history comes from: Claude's transcript, Codex's thread, HQ's copy of Hermes'. */
 const TRANSCRIPT_COMMANDS = { claude: 'load_transcript', codex: 'load_codex_transcript', hermes: 'load_hermes_transcript' };
@@ -407,7 +409,6 @@ class Cell {
     this.mcpBtn = el.querySelector('.act-mcp');
     this.apiBtn = el.querySelector('.act-api');
     this.keyBtn = el.querySelector('.act-apikey');
-    this.cloudBtn = el.querySelector('.act-cloud');
     this.attachEl = el.querySelector('.attachments');
     this.metaEl = el.querySelector('.meta');
     this.stopBtn = el.querySelector('.act-stop');
@@ -509,7 +510,6 @@ class Cell {
     this.modelBtn.addEventListener('click', () => openMenu(this.modelBtn, this, menuEl => this.buildModelMenu(menuEl)));
     this.apiBtn.addEventListener('click', () => openMenu(this.apiBtn, this, menuEl => this.buildApiMenu(menuEl)));
     this.keyBtn.addEventListener('click', () => this.toggleApiKeyed());
-    this.cloudBtn.addEventListener('click', () => openMenu(this.cloudBtn, this, menuEl => this.buildCloudMenu(menuEl)));
     this.mcpBtn.addEventListener('click', () => {
       openMenu(this.mcpBtn, this, menuEl => this.buildMcpMenu(menuEl));
       if (menuState.anchor === this.mcpBtn) this.loadMcp();
@@ -1563,7 +1563,6 @@ class Cell {
     // Before the first message the key button is the indicator; the chip takes over after it.
     const choosing = this.keyChoiceOpen();
     this.keyBtn.classList.toggle('hidden', !choosing);
-    this.cloudBtn.classList.toggle('hidden', !(choosing && availableBackends().includes('cloud')));
     this.keyBtn.classList.toggle('on', choosing && this.onKeyAlways());
     this.keyBtn.title = !app.apiKeyHint ? 'Run this session on your API key (save one in Settings first)'
       : this.onKeyAlways() ? `This session runs on your API key (${app.apiKeyHint}) from its first message. Click for your plan.`
@@ -1582,26 +1581,6 @@ class Cell {
       b.classList.toggle('hidden', !offer);
     }
     if (menuState.cell === this && menuState.anchor === this.apiBtn) refreshMenu();
-  }
-
-  /** The cloud button's menu: a fresh session can move to a cloud container on the API key; the subscription route is not drivable from HQ. */
-  buildCloudMenu(menuEl) {
-    menuEl.append(h('div', { class: 'menu-title', text: 'Run in the cloud' }));
-    const key = h('button', { class: 'menu-item', disabled: !app.apiKeyHint, onclick: () => { closeMenu(); this.moveToCloud(); } },
-      icon('key'), h('span', { class: 'menu-main' }, h('span', { class: 'name', text: 'Cloud session on API key' }),
-        h('span', { class: 'desc', text: app.apiKeyHint ? `Managed Agents, billed to ${app.apiKeyHint}. Starts empty: none of this folder.` : 'Save an API key in Settings first.' })));
-    const sub = h('button', { class: 'menu-item', disabled: true },
-      icon('account'), h('span', { class: 'menu-main' }, h('span', { class: 'name', text: 'Cloud session on subscription' }),
-        h('span', { class: 'desc', text: 'Not available: Claude Code cloud sessions (claude --cloud) have no stream HQ can drive.' })));
-    menuEl.append(key, sub);
-  }
-
-  /** Replaces this empty session with a cloud one in the same folder, keeping the unsent draft. */
-  moveToCloud() {
-    const { cwd, input } = this;
-    const draft = input.value;
-    closeCell(this);
-    addCell({ cwd, backend: 'cloud', permissionMode: 'bypassPermissions', draft });
   }
 
   buildApiMenu(menuEl) {
@@ -4577,7 +4556,7 @@ function availableBackends() {
 
 /** The agent the new-session picker is set to. */
 function pickerBackend() {
-  return availableBackends().includes(app.nextBackend) ? app.nextBackend : 'claude';
+  return app.nextBackend !== 'cloud' && availableBackends().includes(app.nextBackend) ? app.nextBackend : 'claude';
 }
 
 /** The Claude / Codex / Hermes switch at the top of the new-session picker, when this build has more than Claude. */
@@ -4597,6 +4576,10 @@ function agentPickerSwitch(picker) {
     class: current === b ? 'on' : '',
     onclick: e => {
       e.stopPropagation();
+      if (b === 'cloud') {
+        if (!app.apiKeyHint) { e.currentTarget.title = 'Cloud sessions run on an API key: save one in Settings first'; openSettings && openSettings(); return; }
+        closePicker(); addNewCell({ cwd: CLOUD_CWD, backend: 'cloud' }); return;
+      } // no folder: the container starts empty
       app.nextBackend = b;
       saveState();
       agentPickerSwitch(picker);
@@ -4611,6 +4594,7 @@ async function browseFolder() {
 }
 
 function rememberFolder(path) {
+  if (path === CLOUD_CWD) return;
   app.recent = [path, ...app.recent.filter(p => p.toLowerCase() !== path.toLowerCase())].slice(0, MAX_RECENT);
 }
 
@@ -6492,7 +6476,7 @@ async function restore() {
   saved.forEach((c, i) => {
     // Version 1 saved the model Claude reported, not one the user picked; drop it so the cell follows the default.
     if ((state.version || 1) < 2) c.model = null;
-    addCell({ ...c, missing: !exists[i], remote: c.remote === true }, { restore: true, batch: true });
+    addCell({ ...c, missing: c.backend === 'cloud' ? false : !exists[i], remote: c.remote === true }, { restore: true, batch: true });
   });
   // Each restored cell took focus in turn; a collapsed one must not keep it.
   if (app.focused && app.focused.collapsed) {
