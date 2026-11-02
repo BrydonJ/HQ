@@ -310,6 +310,7 @@ class Cell {
     this.wmArmed = false;          // waiting mode: while Claude works, a calm progress view stands in for the chat
     this.wmWorked = false;         // work has been seen since arming (an idle cell arms and waits for it)
     this.wmView = false;           // the waiting view is on screen now (the chat is display:none)
+    this.wmNews = false;           // the agent replied there while background work went on (badged instead of the green border)
     this.wmTimer = 0;              // one timeout: finishes waiting mode once the cell has stayed idle
     this.wmDoneOpen = false;       // the waiting view shows its completed tasks (folded away by default)
     this.wmStick = true;           // stickToBottom, kept while the chat is hidden
@@ -334,6 +335,8 @@ class Cell {
     this.resumeMark = null;        // set as an update starts installing: { queued } for a working cell, which the restart saves
     this.busyWord = '';            // the verb shown above the prompt box this turn
     this.lastReply = '';
+    this.lastSaid = null;          // the agent's latest top-level text { text, at }, shown faded in the waiting view
+    this.lastSaidOpen = false;     // that text is expanded past its three lines
     this.color = projectColor(cwd);
     this.attachments = [];         // images waiting to be sent: { mediaType, data, url }
     this.turnTexts = [];           // top-level text items since the last tool call in this turn
@@ -410,14 +413,12 @@ class Cell {
     this.detailBtn = el.querySelector('.act-detail');
     this.progressBtn = el.querySelector('.act-progress');
     this.progressEl = el.querySelector('.progress-panel');
-    this.headBar = el.querySelector('.head-progress');
-    this.taskEl = el.querySelector('.cell-tasks');
+    this.taskEl = this.progressBtn.querySelector('.btn-count');
     this.waitBtn = el.querySelector('.act-waiting');
     this.waitEl = el.querySelector('.waiting-view');
     this.waitBody = el.querySelector('.wv-body');
     this.loader = null;            // the waiting view's current loader, a fresh one each time the view opens
     this.taskBtn = el.querySelector('.act-tasklist');
-    this.bgEl = el.querySelector('.bg-tasks');
     this.stateEl = el.querySelector('.cell-state');
     this.codeBtn = el.querySelector('.act-code');
     this.collapseBtn = el.querySelector('.act-collapse');
@@ -477,6 +478,9 @@ class Cell {
     this.detailBtn.addEventListener('click', () => this.setDetail(this.detail % 3 + 1));
     this.progressBtn.addEventListener('click', () => this.setProgressView(!this.progressView));
     this.waitBtn.addEventListener('click', () => this.setWaitingMode(!this.wmArmed));
+    wireButtonDrag(el.querySelector('.cell-head'));
+    const moreBtn = el.querySelector('.act-more');
+    moreBtn.addEventListener('click', e => { e.stopPropagation(); openMenu(moreBtn, this, menuEl => buildMoreMenu(menuEl, this)); });
     this.taskBtn.addEventListener('click', () => this.setAskTasks(!this.askTasks));
     el.querySelector('.act-max').addEventListener('click', () => toggleMaximize(this));
     el.querySelector('.act-close').addEventListener('click', e => this.requestClose(e.currentTarget));
@@ -877,6 +881,7 @@ class Cell {
   startTurn() {
     this.nextBusyWord();
     this.turnStart = Date.now();
+    this.wmNews = false;
     this.limitHit = false;
     this.turnTools = 0;
     this.currentTool = null;
@@ -1038,12 +1043,18 @@ class Cell {
     const active = list.filter(t => t.status === 'in_progress').length;
     const taskPct = list.length ? Math.round(((done + active / 2) / list.length) * 100) : 0;
     const running = this.status === 'running';
-    // A thin bar along the header, so progress shows in the grid without opening the panel.
-    const headBar = live && (running || taskPct < 100);
-    this.headBar.classList.toggle('hidden', !headBar);
-    if (headBar) this.headBar.style.setProperty('--pct', `${taskPct}%`);
-    this.drawTaskLine(list, headBar, done);
+    // The progress button shows "3/7" in place of its icon while a task list is under way.
+    this.drawTaskLine(list, live && (running || taskPct < 100), done);
     this.syncProgressTimer();
+    const answer = this.statusAnswer;
+    const agent = this.agent;
+    const estimate = answer && answer.percent != null && this.turnStart && answer.at >= this.turnStart ? answer.percent : null;
+    const pct = live ? taskPct : estimate;
+    this.trackPct(pct, live ? Date.now() : answer && answer.at);
+    // The waiting-mode header: a ring fills with the percentage, and a chip flags a reply made while work goes on.
+    this.el.classList.toggle('has-pct', pct != null);
+    if (pct != null) this.el.style.setProperty('--ring', `${pct}%`);
+    this.el.classList.toggle('wm-news', this.wmView && this.wmNews);
     const asWaiting = this.wmView; // the waiting view takes the panel's place (the chat is hidden under both)
     if (!this.progressView && !asWaiting) return;
 
@@ -1053,12 +1064,9 @@ class Cell {
       : this.bgTasks.length ? ['Background work running', 'bg']
       : this.status === 'exited' ? ['Stopped', 'exited']
       : ['Idle', ''];
-    const answer = this.statusAnswer;
-    const agent = this.agent;
-    const estimate = answer && answer.percent != null && this.turnStart && answer.at >= this.turnStart ? answer.percent : null;
-    const pct = live ? taskPct : estimate;
-    const barLabel = live ? `${taskPct}%  ·  ${done} of ${list.length} tasks done`
-      : estimate != null ? `About ${estimate}%  ·  ${agent}'s estimate`
+    const timing = pct != null ? this.pctTiming(pct) : '';
+    const barLabel = live ? `${taskPct}%  ·  ${done} of ${list.length} tasks done${timing}`
+      : estimate != null ? `About ${estimate}%  ·  ${agent}'s estimate${timing}`
       : running ? 'No task list. Ask for a sitrep to get a rough percentage.' : '';
 
     const ask = h('button', { class: 'btn pv-ask', disabled: this.proc == null || (answer && answer.asking),
@@ -1067,10 +1075,11 @@ class Cell {
     ask.addEventListener('click', () => this.askStatus());
 
     const turnActive = (running || waiting) && this.turnStart;
+    // The waiting view keeps only the sitrep button here: its loader and busy word already say it is working.
     const head = h('div', { class: 'pv-head' },
-      h('span', { class: `pv-state ${stateCls}` }, h('span', { class: 'pv-dot' }), state),
-      turnActive ? h('span', { class: 'pv-elapsed', text: formatDuration(Date.now() - this.turnStart) }) : null,
-      turnActive && this.turnTools ? h('span', { text: `${this.turnTools} tool call${this.turnTools === 1 ? '' : 's'}` }) : null,
+      asWaiting ? null : h('span', { class: `pv-state ${stateCls}` }, h('span', { class: 'pv-dot' }), state),
+      turnActive && !asWaiting ? h('span', { class: 'pv-elapsed', text: formatDuration(Date.now() - this.turnStart) }) : null,
+      turnActive && !asWaiting && this.turnTools ? h('span', { text: `${this.turnTools} tool call${this.turnTools === 1 ? '' : 's'}` }) : null,
       h('span', { class: 'spacer' }),
       ask,
       asWaiting ? null : h('button', { class: 'icon-btn pv-close', title: 'Close', onclick: () => this.setProgressView(false) }, icon('close')));
@@ -1084,12 +1093,21 @@ class Cell {
     }
 
     let now = null;
-    if (waiting) now = h('div', { class: 'pv-now' }, icon('bell'), `${agent} needs your answer or permission below.`);
+    if (asWaiting) now = null; // the tool line is noise there; the agent's latest message says what it is doing
+    else if (waiting) now = h('div', { class: 'pv-now' }, icon('bell'), `${agent} needs your answer or permission below.`);
     else if (running) {
       const t = this.currentTool;
       now = h('div', { class: 'pv-now' }, icon('debug-stackframe'),
         t ? [h('span', { class: 'tname', text: t.name }), h('span', { class: 'targ', text: t.summary })] : h('span', { text: 'Thinking or writing' }));
     }
+
+    // The agent's latest words, faded and clamped to three lines; a click shows all of it.
+    const said = asWaiting && this.lastSaid;
+    const saidEl = said ? h('div', { class: `wv-said${this.lastSaidOpen ? ' open' : ''}${this.wmNews ? ' news' : ''}`,
+      title: this.lastSaidOpen ? 'Click to shorten' : `${agent}'s latest message. Click to show all of it.`,
+      onclick: () => { if (!getSelection().toString()) { this.lastSaidOpen = !this.lastSaidOpen; this.wmNews = false; this.renderProgress(); } } },
+    this.wmNews ? h('span', { class: 'wv-news', text: `${agent} replied · still working in the background` }) : null,
+    h('span', { class: 'wv-said-text', text: said.text }), stamp(said.at)) : null;
 
     let tasks = null;
     if (list.length) {
@@ -1137,11 +1155,25 @@ class Cell {
       h('div', { class: 'pv-title' }, `${agent} says`, stamp(answer.at)),
       h('div', { class: `pv-answer${answer.error ? ' error' : ''}`, text: answer.text })) : null;
 
-    const empty = !bar && !now && !tasks && !agentsEl
+    const empty = !bar && !now && !tasks && !agentsEl && !(asWaiting && (running || saidEl))
       ? h('div', { class: 'pv-empty', text: 'Nothing is running. Progress shows here while Claude works.' }) : null;
 
-    const parts = asWaiting ? [bar, head, now, tasks, agentsEl, answerEl, empty] : [head, bar, now, tasks, agentsEl, answerEl, empty];
+    const parts = asWaiting ? [bar, head, now, saidEl, tasks, agentsEl, answerEl, empty] : [head, bar, now, tasks, agentsEl, answerEl, empty];
     (asWaiting ? this.waitBody : this.progressEl).replaceChildren(...parts.filter(Boolean));
+  }
+
+  /** Remembers when the percentage last moved, for pctTiming's "updated" time; a new turn starts over. */
+  trackPct(pct, at) {
+    if (pct == null || !at) return;
+    const t = this.pctTrack;
+    if (!t || t.turn !== this.turnStart || pct !== t.pct) this.pctTrack = { turn: this.turnStart, pct, at };
+  }
+
+  /** "  ·  updated 13:44": when the percentage last moved. */
+  pctTiming(pct) {
+    const t = this.pctTrack;
+    if (!t || t.pct !== pct) return '';
+    return `  ·  updated ${new Date(t.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
   }
 
   /** "3/7" for the header, "3/7 · Creating b.txt" for the sessions list; touches the DOM only when it changes. */
@@ -1157,8 +1189,8 @@ class Cell {
     if (line !== this.taskLine) {
       this.taskLine = line;
       this.taskEl.textContent = line;
-      this.taskEl.title = line ? `Tasks done: ${line}` : '';
-      this.taskEl.classList.toggle('hidden', !line);
+      this.progressBtn.classList.toggle('has-count', !!line);
+      this.progressBtn.setAttribute('aria-label', line ? `Tasks done: ${line}` : 'Progress');
     }
     if (side !== this.sideTaskLine) {
       this.sideTaskLine = side;
@@ -1221,6 +1253,11 @@ class Cell {
       [this.wmTop, this.wmStick] = this.collapsed && this.savedScroll ? this.savedScroll : [this.msgs.scrollTop, this.stickToBottom];
     }
     this.wmView = view;
+    if (!view) {
+      this.wmNews = false;
+      // refreshState held the green border back while the view showed background work; it calls here, so set it directly.
+      this.el.classList.toggle('unread', this.unread && this.pending.size === 0);
+    }
     this.el.classList.toggle('wm-on', view);
     if (!view && !this.collapsed) {
       if (this.live) this.scheduleLiveRender(); // text that streamed in while hidden was not drawn
@@ -1615,15 +1652,10 @@ class Cell {
     el.classList.toggle('state-waiting', waiting);
     el.classList.toggle('state-exited', this.status === 'exited');
     el.classList.toggle('state-bg', this.bgTasks.length > 0 && this.status !== 'running' && !waiting);
-    el.classList.toggle('unread', this.unread && !waiting);
+    // A reply while waiting mode still shows background work is most likely a progress note: the waiting view badges it instead.
+    el.classList.toggle('unread', this.unread && !waiting && !(this.wmView && this.bgTasks.length));
     this.stopBtn.classList.toggle('hidden', this.status !== 'running' && !waiting);
-    this.bgEl.classList.toggle('hidden', !this.bgTasks.length);
     this.stateEl.textContent = stateOf(this)[1]; // shown while collapsed, where the chat cannot say it
-    if (this.bgTasks.length) {
-      this.bgEl.querySelector('.bg-count').textContent = String(this.bgTasks.length);
-      const lines = this.bgTasks.map(t => `${BG_LABELS[t.type] || 'Task'}: ${t.description}`);
-      this.bgEl.title = ['Running in the background:', ...lines].join('\n');
-    }
     this.syncWaiting();
     this.renderProgress();
     this.renderContext(); // the button waits while a turn runs
@@ -1637,6 +1669,7 @@ class Cell {
 
   setBackground(tasks) {
     this.bgTasks = tasks;
+    if (!tasks.length) this.wmNews = false; // "still working in the background" is no longer true
     this.pruneTaskProgress();
     this.refreshState();
   }
@@ -2013,7 +2046,7 @@ class Cell {
     for (const id of [...this.pending.keys()]) this.dropPrompt(id);
     Object.assign(this, {
       sessionId: null, fork: false, bridgeSessionId: null, aiTitle: false, renamePending: false, titleTries: 0,
-      titleAsked: '', promptText: '', sentPrompts: [], lastReply: '', replyLog: [], mcpExpect: false, turnTexts: [], tasksStale: false, lastDuration: '',
+      titleAsked: '', promptText: '', sentPrompts: [], lastReply: '', lastSaid: null, lastSaidOpen: false, wmNews: false, replyLog: [], mcpExpect: false, turnTexts: [], tasksStale: false, lastDuration: '',
       historyStart: 0, historyPending: false, statusAnswer: null, live: null, promptWritten: false, lastSent: null,
       remoteAsked: false, currentTool: null, turnStart: null, turnTools: 0, resumeWarning: null,
     });
@@ -2248,6 +2281,11 @@ class Cell {
             item.dataset.ts = ts;
             this.turnTexts.push(item);
           }
+        }
+        if (!parent && !this.replayingEarlier && block.text.trim()) {
+          this.lastSaid = { text: block.text.trim().slice(-2000), at: Number(ts) };
+          this.lastSaidOpen = false;
+          if (this.wmView) this.renderProgress();
         }
       } else if (block.type === 'thinking') {
         if (!block.thinking) continue;
@@ -2563,6 +2601,7 @@ class Cell {
     this.renderMeta();
     this.setStatus('idle');
     if (!local) {
+      if (this.wmView && this.bgTasks.length) this.wmNews = true;
       this.markUnread();
       notifyTurnDone(this, m);
     }
@@ -4014,7 +4053,11 @@ function refreshMenu() {
 
 /** Opens above the anchor (the composer sits at the bottom of a cell), or below when there is no room. */
 function positionMenu() {
-  const r = menuState.anchor.getBoundingClientRect();
+  // A header button kept under "…" is display:none; its own menu (AFK, VS Code) opens at the "…" button.
+  let anchor = menuState.anchor;
+  const head = anchor.closest('.cell-head');
+  if (!anchor.getClientRects().length && head) anchor = head.querySelector('.act-more') || anchor;
+  const r = anchor.getBoundingClientRect();
   const width = menu.offsetWidth;
   const height = menu.offsetHeight;
   const left = Math.max(8, Math.min(r.left, window.innerWidth - width - 8));
@@ -5451,6 +5494,11 @@ const CUSTOM_COLORS = [['--accent', 'Accent'], ['--link', 'Links'], ['--claude',
 // The cell header's buttons that can be hidden: [class, label].
 const HEAD_BUTTONS = [['act-afk', 'AFK'], ['act-handoff', 'Handoff'], ['act-detail', 'Detail level'], ['act-progress', 'Progress'], ['act-waiting', 'Waiting mode'], ['act-code', 'VS Code'],
   ['act-terminal', 'Terminal'], ['act-reveal', FILE_MANAGER], ['act-collapse', 'Collapse'], ['act-max', 'Maximize'], ['act-close', 'Close']];
+const DEFAULT_PINNED = ['act-waiting', 'act-progress', 'act-collapse', 'act-close'];
+/** Buttons a collapsed cell hides (style.css, .cell.collapsed); its "…" menu leaves them out too. */
+const COLLAPSED_HIDES = ['act-detail', 'act-handoff', 'act-progress', 'act-waiting', 'act-code', 'act-reveal', 'act-max'];
+/** The header's window buttons: "…" sits just before the first of them. */
+const WINDOW_BUTTONS = ['act-collapse', 'act-max', 'act-close'];
 const HEX = /^#[0-9a-f]{6}$/i;
 const DEFAULT_MAX_AGENTS = 2;
 const MAX_AGENTS_CAP = 50;
@@ -5481,7 +5529,11 @@ function sanitizeSettings(x) {
     defaultDetail: [1, 2, 3].includes(v.defaultDetail) ? v.defaultDetail : 2,
     // How the header buttons show: always, fading in as the pointer nears, or only while the header is hovered.
     buttonReveal: ['always', 'near', 'hover'].includes(v.buttonReveal) ? v.buttonReveal : v.fadeButtons === true ? 'near' : 'always',
-    hiddenButtons: Array.isArray(v.hiddenButtons) ? HEAD_BUTTONS.map(([b]) => b).filter(b => v.hiddenButtons.includes(b)) : [],
+    // The buttons shown in the header; the rest live in its "…" menu.
+    pinnedButtons: HEAD_BUTTONS.map(([b]) => b).filter(b => (Array.isArray(v.pinnedButtons) ? v.pinnedButtons : DEFAULT_PINNED).includes(b)),
+    // The header buttons' order, dragged into place in any cell and shared by all; unknown names dropped, new buttons appended.
+    buttonOrder: [...new Set([...(Array.isArray(v.buttonOrder) ? v.buttonOrder : []), ...HEAD_BUTTONS.map(([b]) => b)])]
+      .filter(b => HEAD_BUTTONS.some(([k]) => k === b)),
     colors,
     mcp: v.mcp !== false, // HQ's MCP server for new sessions (mcp.js)
     mcpSpawn: v.mcpSpawn !== false, // agents may start sessions
@@ -5507,7 +5559,7 @@ function applySettings() {
 /** Theme, custom colours, hidden header buttons and the fade. Cheap, so a colour picker can call it while it is dragged. */
 function applyAppearance() {
   const root = document.documentElement;
-  const { theme, colors, hiddenButtons, buttonReveal } = app.settings;
+  const { theme, colors, pinnedButtons, buttonOrder, buttonReveal } = app.settings;
   if (theme === 'auto') delete root.dataset.theme;
   else root.dataset.theme = theme;
   const custom = colors[activeTheme()] || {};
@@ -5520,13 +5572,108 @@ function applyAppearance() {
   else root.style.removeProperty('--accent-hover');
   let style = document.getElementById('appearance-style');
   if (!style) style = document.head.appendChild(h('style', { id: 'appearance-style' }));
-  style.textContent = hiddenButtons.map(b => `.cell-head > .${b} { display: none; }`).join('\n');
+  // CSS order places the buttons, so every cell follows a drag or a pin without touching its DOM.
+  // Buttons take odd places; "…" takes the even one before the first window button.
+  const shown = buttonOrder.filter(b => pinnedButtons.includes(b));
+  const firstWindow = shown.findIndex(b => WINDOW_BUTTONS.includes(b));
+  style.textContent = [...buttonOrder.filter(b => !pinnedButtons.includes(b)).map(b => `.cell-head > .${b} { display: none; }`),
+    ...shown.map((b, i) => `.cell-head > .${b} { order: ${2 * i + 1}; }`),
+    `.cell-head > .act-more { order: ${2 * (firstWindow < 0 ? shown.length : firstWindow)}; }`].join('\n');
   document.body.classList.toggle('fade-buttons', buttonReveal === 'near');
   document.body.classList.toggle('hover-buttons', buttonReveal === 'hover');
   if (buttonReveal !== 'near') clearButtonFade();
   renderUsage();
 }
 lightQuery.addEventListener('change', () => { if (app.settings.theme === 'auto') { applyAppearance(); if (!settingsPanel.classList.contains('hidden')) renderSettings(); } });
+
+/**
+ * Lets a header button be dragged along the header to a new place. The order is a setting, so
+ * the move shows in every cell at once (applyAppearance turns it into CSS order).
+ */
+function wireButtonDrag(head) {
+  const TYPE = 'application/x-hq-button';
+  const nameOf = btn => HEAD_BUTTONS.map(([b]) => b).find(b => btn.classList.contains(b));
+  let marked = null;
+  const unmark = () => { if (marked) marked.classList.remove('drop-before', 'drop-after', 'drop-into'); marked = null; };
+  // The button under the pointer, and whether the drop lands after it (its right half).
+  const spot = e => {
+    const btn = e.target.closest && e.target.closest('.cell-head > .icon-btn');
+    if (btn && btn.classList.contains('act-more')) return { btn, more: true };
+    if (!btn || !nameOf(btn)) return null;
+    const r = btn.getBoundingClientRect();
+    return { btn, after: e.clientX > r.left + r.width / 2 };
+  };
+  for (const [b] of HEAD_BUTTONS) {
+    const btn = head.querySelector(`:scope > .${b}`);
+    if (!btn) continue;
+    btn.draggable = true;
+    btn.addEventListener('dragstart', e => {
+      e.dataTransfer.setData(TYPE, b);
+      e.dataTransfer.effectAllowed = 'move';
+    });
+    btn.addEventListener('dragend', unmark);
+  }
+  head.addEventListener('dragover', e => {
+    if (!e.dataTransfer.types.includes(TYPE)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const s = spot(e);
+    if (!s) return;
+    if (marked !== s.btn) unmark();
+    marked = s.btn;
+    s.btn.classList.toggle('drop-before', !s.more && !s.after);
+    s.btn.classList.toggle('drop-after', !s.more && s.after);
+    s.btn.classList.toggle('drop-into', !!s.more);
+  });
+  head.addEventListener('dragleave', e => { if (!head.contains(e.relatedTarget)) unmark(); });
+  head.addEventListener('drop', e => {
+    const moved = e.dataTransfer.getData(TYPE);
+    const s = spot(e);
+    unmark();
+    if (!moved || !s) return;
+    e.preventDefault();
+    if (s.more) { changeSetting('pinnedButtons', app.settings.pinnedButtons.filter(b => b !== moved)); return; } // onto "…": put away
+    const target = nameOf(s.btn);
+    if (target === moved) return;
+    const order = app.settings.buttonOrder.filter(b => b !== moved);
+    order.splice(order.indexOf(target) + (s.after ? 1 : 0), 0, moved);
+    changeSetting('buttonOrder', order);
+  });
+}
+
+/** The header's "…" menu: every button that is not pinned to the header, in the dragged order. */
+function buildMoreMenu(menuEl, cell) {
+  const more = menuState.anchor;
+  const { pinnedButtons, buttonOrder } = app.settings;
+  const items = buttonOrder.filter(b => !pinnedButtons.includes(b) && !(cell.collapsed && COLLAPSED_HIDES.includes(b))).map(b => {
+    const btn = cell.el.querySelector(`.cell-head > .${b}`);
+    const label = (HEAD_BUTTONS.find(([k]) => k === b) || [])[1] || b;
+    const confirm = btn.classList.contains('confirm'); // Close on a busy cell asks for a second click
+    const glyph = btn.firstElementChild ? btn.firstElementChild.cloneNode(true) : icon('circle-small');
+    const pin = h('button', { class: 'icon-btn more-pin', title: `Pin ${label} to the header (all sessions)` }, icon('pin'));
+    pin.addEventListener('click', e => {
+      e.stopPropagation();
+      changeSetting('pinnedButtons', [...pinnedButtons, b]);
+      refreshMenu();
+    });
+    const item = h('div', { class: `menu-item more-item${btn.classList.contains('on') ? ' on' : ''}`, role: 'menuitem', tabindex: '0' },
+      h('span', { class: 'more-glyph' }, glyph),
+      h('span', { class: 'menu-main' }, h('span', { class: 'name', text: label }),
+        confirm ? h('span', { class: 'desc error', text: btn.title }) : null),
+      pin);
+    const run = () => {
+      btn.click(); // the hidden button keeps every handler, so the menu runs exactly what the header would
+      if (menuState.anchor !== more) return; // it opened a menu of its own (AFK, VS Code), or closed the cell
+      if (btn.classList.contains('confirm')) refreshMenu();
+      else closeMenu();
+    };
+    item.addEventListener('click', run);
+    item.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); run(); } });
+    return item;
+  });
+  menuEl.append(h('div', { class: 'menu-title', text: 'More' }),
+    ...(items.length ? items : [h('div', { class: 'menu-empty', text: 'Every button is pinned to the header.' })]));
+}
 
 function changeSetting(key, value) {
   app.settings = { ...app.settings, [key]: value };
@@ -5693,11 +5840,11 @@ function renderAppearanceSettings(row, toggle, select) {
   };
   const resetAll = h('button', { class: 'link-btn', text: 'Reset all', disabled: !Object.keys(custom).length });
   resetAll.addEventListener('click', () => { changeSetting('colors', Object.fromEntries(Object.entries(app.settings.colors).filter(([t]) => t !== theme))); renderSettings(); });
-  const buttons = h('div', { class: 'button-checks' }, HEAD_BUTTONS.map(([cls, label]) => {
+  const buttons = h('div', { class: 'button-checks' }, app.settings.buttonOrder.map(b => HEAD_BUTTONS.find(([k]) => k === b)).map(([cls, label]) => {
     const box = h('input', { type: 'checkbox' });
-    box.checked = !app.settings.hiddenButtons.includes(cls);
-    box.addEventListener('change', () => changeSetting('hiddenButtons',
-      box.checked ? app.settings.hiddenButtons.filter(b => b !== cls) : [...app.settings.hiddenButtons, cls]));
+    box.checked = app.settings.pinnedButtons.includes(cls);
+    box.addEventListener('change', () => changeSetting('pinnedButtons',
+      box.checked ? [...app.settings.pinnedButtons, cls] : app.settings.pinnedButtons.filter(b => b !== cls)));
     return h('label', null, box, label);
   }));
   const themeName = (THEMES.find(([t]) => t === theme) || [])[1] || theme;
@@ -5719,7 +5866,7 @@ function renderAppearanceSettings(row, toggle, select) {
     row('Header buttons show', 'Fade in: faint until the pointer comes near. On hover: hidden until the pointer is over the header.',
       select(app.settings.buttonReveal, [['always', 'Always'], ['near', 'Fade in near the pointer'], ['hover', 'Only on hover']], v => changeSetting('buttonReveal', v))),
     h('div', { class: 'setting column' }, h('div', { class: 'setting-main' }, h('span', { class: 'name', text: 'Header buttons' }),
-      h('span', { class: 'desc', text: 'Unticked buttons are hidden; their shortcuts still work.' })), buttons),
+      h('span', { class: 'desc', text: 'Ticked buttons sit in the header; the rest are under its "…" button. Drag a header button to move it, or onto "…" to put it away.' })), buttons),
   ];
 }
 

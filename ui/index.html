@@ -142,24 +142,24 @@
     <section class="cell" tabindex="-1">
       <div class="cell-head">
         <span class="status-dot"></span>
+        <span class="head-ring" aria-hidden="true"></span>
         <span class="cell-project"><span class="proj-name"></span><span class="sweep" aria-hidden="true"><span class="sweep-name"></span></span></span>
         <span class="cell-title" title="Rename session (F2)"></span>
         <span class="cell-state"></span>
-        <span class="cell-tasks hidden"></span>
+        <span class="head-news" title="The agent replied while its background work goes on. Its message is in the waiting view.">Replied</span>
         <span class="cell-path"></span>
-        <span class="bg-tasks hidden"><span class="codicon codicon-loading codicon-modifier-spin"></span><span class="bg-count"></span></span>
         <button class="icon-btn act-afk"><span class="codicon codicon-coffee"></span></button>
         <button class="icon-btn act-handoff" title="Handoff: Claude writes a Markdown summary another session can continue from"><span class="codicon codicon-note"></span></button>
         <button class="icon-btn act-detail"><span class="codicon codicon-eye-closed"></span></button>
-        <button class="icon-btn act-progress"><span class="codicon codicon-checklist"></span></button>
-        <button class="icon-btn act-waiting" title="Waiting mode"><span class="codicon codicon-watch"></span></button>
+        <button class="icon-btn act-progress"><span class="codicon codicon-checklist"></span><span class="btn-count"></span></button>
+        <button class="icon-btn act-waiting" title="Waiting mode"><svg class="svg-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 1.5h8M4 14.5h8M4.5 1.5c0 3.5 3.5 4.5 3.5 6.5S4.5 11 4.5 14.5M11.5 1.5c0 3.5-3.5 4.5-3.5 6.5s3.5 3 3.5 6.5" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><path d="M6.2 13.6c.6-1.3 1.8-1.9 1.8-1.9s1.2.6 1.8 1.9z" fill="currentColor"/></svg></button>
         <button class="icon-btn act-code"><span class="codicon codicon-vscode"></span></button>
         <button class="icon-btn act-terminal" title="Open a terminal in this folder"><span class="codicon codicon-terminal"></span></button>
         <button class="icon-btn act-reveal" title="Open folder in Explorer"><span class="codicon codicon-folder"></span></button>
+        <button class="icon-btn act-more" title="More buttons" aria-haspopup="menu"><span class="codicon codicon-ellipsis"></span></button>
         <button class="icon-btn act-collapse"><span class="codicon codicon-chrome-minimize"></span></button>
         <button class="icon-btn act-max" title="Maximize (Ctrl+M)"><span class="codicon codicon-screen-full"></span></button>
         <button class="icon-btn act-close" title="Close session"><span class="codicon codicon-close"></span></button>
-        <span class="head-progress hidden" aria-hidden="true"></span>
       </div>
       <div class="stage">
         <div class="messages"></div>
