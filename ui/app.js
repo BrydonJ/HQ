@@ -5630,7 +5630,8 @@ function wireButtonDrag(head) {
     const moved = e.dataTransfer.getData(TYPE);
     const s = spot(e);
     unmark();
-    if (!moved || !s) return;
+    // The data can come from outside HQ, and the name ends up in a CSS rule: only a known button may move.
+    if (!moved || !s || !HEAD_BUTTONS.some(([k]) => k === moved)) return;
     e.preventDefault();
     if (s.more) { changeSetting('pinnedButtons', app.settings.pinnedButtons.filter(b => b !== moved)); return; } // onto "…": put away
     const target = nameOf(s.btn);
