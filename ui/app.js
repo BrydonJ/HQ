@@ -632,7 +632,7 @@ class Cell {
   applyDetail() {
     for (const n of [1, 2, 3]) this.el.classList.toggle(`detail-${n}`, this.detail === n);
     const [icon, now, next] = DETAIL_LEVELS[this.detail];
-    this.detailBtn.classList.toggle('on', this.detail !== 2); // lit when off the default
+    this.detailBtn.classList.toggle('on', this.detail !== app.settings.defaultDetail); // lit when off the default
     this.detailBtn.querySelector('.codicon').className = `codicon codicon-${icon}`;
     this.detailBtn.title = `Showing ${now}. Click to show ${next}.`;
   }
@@ -1731,8 +1731,9 @@ class Cell {
       this.renderAttachments();
     }
     this.stickToBottom = true;
-    // HQ's own prompt shows as a notice instead, and names nothing.
+    // HQ's own prompt shows as a notice instead, and names nothing; one an agent sent through HQ's tools shows as what it said.
     if (prompt == null) draft.bubble = this.append(userBubble(text, images.map(i => i.url), Date.now()));
+    else if (isMcpMessage(text)) this.append(mcpBubble(text, Date.now()));
     if (prompt == null && !this.aiTitle && !this.customTitle && text && this.promptText.length < 2000) {
       this.promptText = `${this.promptText}\n${text}`.trim().slice(0, 2000);
       draft.addedPrompt = true;
@@ -2429,7 +2430,8 @@ class Cell {
       this.closeTurn(true);
       this.sealTasks(); // a replay has no turn start, so each prompt closes the list before it
       const text = texts.join('\n');
-      this.append(userBubble(text, images, Date.parse(m.timestamp), omitted));
+      const viaHq = texts.length === 1 && !images.length && !omitted && isMcpMessage(text);
+      this.append(viaHq ? mcpBubble(text, Date.parse(m.timestamp)) : userBubble(text, images, Date.parse(m.timestamp), omitted));
       if (!this.title) this.title = firstLine(text, 90) || 'Image';
     } else if (!replay && !parent && !m.isSynthetic && this.remoteState === 'on') {
       // A prompt typed on the phone or on claude.ai/code arrives like this; HQ's own prompts were drawn when sent.
@@ -3970,6 +3972,8 @@ const projectKey = path => normPath(path).toLowerCase();
  * and the Ctrl+1..9 keys show sessions grouped by project, projects in the order first opened.
  */
 function addCell(opts, { restore = false, batch = false, background = false } = {}) {
+  // A new cell starts at the eye button's level picked in Settings; a restored one keeps its own.
+  if (!restore && opts.detail == null) opts = { ...opts, detail: app.settings.defaultDetail };
   const cell = new Cell(opts);
   placeCell(cell);
   // A batch (the restore at startup) lays the board out once, when it is done.
@@ -4985,16 +4989,24 @@ function resetText(ms) {
   return `Resets in ${untilText(ms)} · ${sameDay ? time : `${d.toLocaleDateString([], { weekday: 'short' })} ${time}`}`;
 }
 
+/** The limit the usage button shows: the 5-hour window, or the weekly one on plans with no 5-hour limit (20x, Ultra). */
+function primaryUsageRow() {
+  const rows = (usage.data && usage.data.rows) || [];
+  return rows.find(r => r.key === 'five_hour') || rows.find(r => r.key === 'seven_day') || null;
+}
+
 function renderUsage() {
-  const five = usage.data && usage.data.rows.find(r => r.key === 'five_hour');
+  const main = primaryUsageRow();
+  const weeklyOnly = !!main && main.key === 'seven_day';
   const text = usagePill.querySelector('.usage-text');
-  usagePill.classList.toggle('empty', !five);
+  usagePill.classList.toggle('empty', !main);
   usagePill.classList.toggle('loading', !!usage.loading);
-  if (five) {
+  if (main) {
     // A window that has already reset shows 0% until the next refresh brings the new numbers.
-    const expired = five.resetsAt && five.resetsAt < Date.now();
-    const percent = expired ? 0 : five.percent;
-    text.textContent = expired || !five.resetsAt ? `${percent}%` : `${percent}% · ${untilText(five.resetsAt)}`;
+    const expired = main.resetsAt && main.resetsAt < Date.now();
+    const percent = expired ? 0 : main.percent;
+    const label = weeklyOnly ? `Week ${percent}%` : `${percent}%`;
+    text.textContent = expired || !main.resetsAt ? label : `${label} · ${untilText(main.resetsAt)}`;
     usagePill.style.background = heatCss(percent);
     usagePill.style.color = heatText(percent);
   } else {
@@ -5005,7 +5017,7 @@ function renderUsage() {
   // The weekly limit as a thin bar along the bottom, on the pill's colour scale.
   const week = usage.data && usage.data.rows.find(r => r.key === 'seven_day');
   const weekBar = usagePill.querySelector('.usage-week');
-  const showWeek = !!(five && week && app.settings.weeklyBar);
+  const showWeek = !!(main && !weeklyOnly && week && app.settings.weeklyBar);
   weekBar.classList.toggle('hidden', !showWeek);
   if (showWeek) {
     const percent = week.resetsAt && week.resetsAt < Date.now() ? 0 : week.percent;
@@ -5013,7 +5025,7 @@ function renderUsage() {
     weekBar.firstElementChild.style.backgroundColor = heatCss(percent);
     usagePill.title = `Plan usage · weekly ${percent}%`;
   } else {
-    usagePill.title = 'Plan usage';
+    usagePill.title = weeklyOnly ? 'Plan usage · weekly limit (this plan has no 5-hour limit)' : 'Plan usage';
   }
   if (!usagePop.classList.contains('hidden')) renderUsagePop();
 }
@@ -5078,10 +5090,10 @@ usagePill.addEventListener('blur', hideUsagePop);
 usagePop.addEventListener('mouseenter', () => clearTimeout(usageHideTimer));
 usagePop.addEventListener('mouseleave', hideUsagePop);
 usagePill.addEventListener('click', () => refreshUsage());
-// Keeps the countdown current, and fetches fresh numbers once the 5-hour window resets.
+// Keeps the countdown current, and fetches fresh numbers once the shown window resets.
 setInterval(() => {
-  const five = usage.data && usage.data.rows.find(r => r.key === 'five_hour');
-  if (five && five.resetsAt && five.resetsAt < Date.now() && Date.now() - usage.fetchedAt > 60000) refreshUsage();
+  const main = primaryUsageRow();
+  if (main && main.resetsAt && main.resetsAt < Date.now() && Date.now() - usage.fetchedAt > 60000) refreshUsage();
   else renderUsage();
 }, 30000);
 
@@ -5374,6 +5386,8 @@ function sanitizeSettings(x) {
     codexPath: typeof v.codexPath === 'string' ? v.codexPath.trim().slice(0, 500) : '',
     autoCopy: v.autoCopy !== false,
     weeklyBar: v.weeklyBar !== false,
+    // The eye button's level new sessions start at: 1 everything, 2 no tool calls, 3 replies only.
+    defaultDetail: [1, 2, 3].includes(v.defaultDetail) ? v.defaultDetail : 2,
     // How the header buttons show: always, fading in as the pointer nears, or only while the header is hovered.
     buttonReveal: ['always', 'near', 'hover'].includes(v.buttonReveal) ? v.buttonReveal : v.fadeButtons === true ? 'near' : 'always',
     hiddenButtons: Array.isArray(v.hiddenButtons) ? HEAD_BUTTONS.map(([b]) => b).filter(b => v.hiddenButtons.includes(b)) : [],
@@ -5607,7 +5621,10 @@ function renderAppearanceSettings(row, toggle, select) {
     h('div', { class: 'settings-section', text: 'Top bar' }),
     row('Weekly usage bar', 'A thin bar along the bottom of the usage button showing the weekly limit.', toggle(app.settings.weeklyBar, v => changeSetting('weeklyBar', v))),
     h('div', { class: 'settings-section', text: 'Sessions' }),
-    row('Copy on select', 'Selecting text in a chat copies it, as in a terminal.', toggle(app.settings.autoCopy, v => changeSetting('autoCopy', v))),
+    row('Show in new sessions', 'How much of the chat a new session shows. The eye button on a session still changes it for that session.',
+      select(String(app.settings.defaultDetail), [['1', 'Everything (replies, thinking, narration, tools)'], ['2', 'Replies, thinking and narration'], ['3', 'Replies only']],
+        v => { changeSetting('defaultDetail', Number(v)); for (const c of app.cells) c.applyDetail(); })),
+    row('Copy on select','Selecting text in a chat copies it, as in a terminal.', toggle(app.settings.autoCopy, v => changeSetting('autoCopy', v))),
     row('Header buttons show', 'Fade in: faint until the pointer comes near. On hover: hidden until the pointer is over the header.',
       select(app.settings.buttonReveal, [['always', 'Always'], ['near', 'Fade in near the pointer'], ['hover', 'Only on hover']], v => changeSetting('buttonReveal', v))),
     h('div', { class: 'setting column' }, h('div', { class: 'setting-main' }, h('span', { class: 'name', text: 'Header buttons' }),
@@ -5958,7 +5975,7 @@ function flushState() {
       aiTitle: c.aiTitle || undefined,
       customTitle: c.customTitle || undefined,
       renamePending: c.renamePending || undefined,
-      detail: c.detail === 2 ? undefined : c.detail, // 2 (no tool calls) is the default
+      detail: c.detail, // saved always: a missing level restores as 2, whatever the default for new sessions is now
       progress: c.progressView || undefined,
       fork: c.fork || undefined,
       collapsed: c.collapsed || undefined,
