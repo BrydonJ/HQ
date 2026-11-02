@@ -213,6 +213,7 @@ function nextLoader(avoid) {
 
 setInterval(() => {
   for (const cell of app.cells) if (cell.status === 'running' && !cell.compacting && !cell.wrapUp && !cell.collapsed) cell.nextBusyWord();
+    else if (cell.wmView && cell.bgTasks.length && cell.status !== 'running') { cell.busyWord = nextBusyVerb(cell.busyWord); cell.syncWaitingBusy(); }
 }, BUSY_ROTATE_MS);
 
 // Prompt cache lifetimes: Claude Code asks for an hour on a plan, and the API's default is five minutes.
@@ -406,6 +407,7 @@ class Cell {
     this.mcpBtn = el.querySelector('.act-mcp');
     this.apiBtn = el.querySelector('.act-api');
     this.keyBtn = el.querySelector('.act-apikey');
+    this.cloudBtn = el.querySelector('.act-cloud');
     this.attachEl = el.querySelector('.attachments');
     this.metaEl = el.querySelector('.meta');
     this.stopBtn = el.querySelector('.act-stop');
@@ -507,6 +509,7 @@ class Cell {
     this.modelBtn.addEventListener('click', () => openMenu(this.modelBtn, this, menuEl => this.buildModelMenu(menuEl)));
     this.apiBtn.addEventListener('click', () => openMenu(this.apiBtn, this, menuEl => this.buildApiMenu(menuEl)));
     this.keyBtn.addEventListener('click', () => this.toggleApiKeyed());
+    this.cloudBtn.addEventListener('click', () => openMenu(this.cloudBtn, this, menuEl => this.buildCloudMenu(menuEl)));
     this.mcpBtn.addEventListener('click', () => {
       openMenu(this.mcpBtn, this, menuEl => this.buildMcpMenu(menuEl));
       if (menuState.anchor === this.mcpBtn) this.loadMcp();
@@ -844,6 +847,15 @@ class Cell {
       : this.wrapUp ? (this.wrapUp.credits ? 'Usage limit reached · continuing on usage credits…' : 'Usage limit reached · wrapping up…')
       : nextBusyVerb(this.busyWord);
     for (const el of this.el.querySelectorAll('.busy-word')) el.textContent = this.busyWord;
+    this.syncWaitingBusy();
+  }
+
+  /** The waiting view shows the busy line plain: no star, no trailing ellipsis. It also runs while background work does. */
+  syncWaitingBusy() {
+    const el = this.el.querySelector('.wv-busy');
+    if (!el) return;
+    if (!this.busyWord && this.bgTasks.length) this.busyWord = nextBusyVerb('');
+    el.textContent = this.busyWord.replace(/(…|\.\.\.)$/, '');
   }
 
   /**
@@ -1411,7 +1423,7 @@ class Cell {
         icon(checked ? 'check' : 'blank'),
         h('span', { class: 'menu-main' }, h('span', { class: 'name', text: m.displayName || m.value }), m.description ? h('span', { class: 'desc', text: m.description }) : null)));
     }
-    if (this.backend === 'hermes') return; // Hermes has no effort setting
+    if (this.backend === 'hermes' || this.backend === 'cloud') return; // neither has an effort setting
     menuEl.append(h('div', { class: 'menu-title', text: 'Effort' }));
     const levels = this.effortLevels();
     if (!levels.length) {
@@ -1551,6 +1563,7 @@ class Cell {
     // Before the first message the key button is the indicator; the chip takes over after it.
     const choosing = this.keyChoiceOpen();
     this.keyBtn.classList.toggle('hidden', !choosing);
+    this.cloudBtn.classList.toggle('hidden', !(choosing && availableBackends().includes('cloud')));
     this.keyBtn.classList.toggle('on', choosing && this.onKeyAlways());
     this.keyBtn.title = !app.apiKeyHint ? 'Run this session on your API key (save one in Settings first)'
       : this.onKeyAlways() ? `This session runs on your API key (${app.apiKeyHint}) from its first message. Click for your plan.`
@@ -1569,6 +1582,26 @@ class Cell {
       b.classList.toggle('hidden', !offer);
     }
     if (menuState.cell === this && menuState.anchor === this.apiBtn) refreshMenu();
+  }
+
+  /** The cloud button's menu: a fresh session can move to a cloud container on the API key; the subscription route is not drivable from HQ. */
+  buildCloudMenu(menuEl) {
+    menuEl.append(h('div', { class: 'menu-title', text: 'Run in the cloud' }));
+    const key = h('button', { class: 'menu-item', disabled: !app.apiKeyHint, onclick: () => { closeMenu(); this.moveToCloud(); } },
+      icon('key'), h('span', { class: 'menu-main' }, h('span', { class: 'name', text: 'Cloud session on API key' }),
+        h('span', { class: 'desc', text: app.apiKeyHint ? `Managed Agents, billed to ${app.apiKeyHint}. Starts empty: none of this folder.` : 'Save an API key in Settings first.' })));
+    const sub = h('button', { class: 'menu-item', disabled: true },
+      icon('account'), h('span', { class: 'menu-main' }, h('span', { class: 'name', text: 'Cloud session on subscription' }),
+        h('span', { class: 'desc', text: 'Not available: Claude Code cloud sessions (claude --cloud) have no stream HQ can drive.' })));
+    menuEl.append(key, sub);
+  }
+
+  /** Replaces this empty session with a cloud one in the same folder, keeping the unsent draft. */
+  moveToCloud() {
+    const { cwd, input } = this;
+    const draft = input.value;
+    closeCell(this);
+    addCell({ cwd, backend: 'cloud', permissionMode: 'bypassPermissions', draft });
   }
 
   buildApiMenu(menuEl) {
@@ -1659,6 +1692,7 @@ class Cell {
     this.stopBtn.classList.toggle('hidden', this.status !== 'running' && !waiting);
     this.stateEl.textContent = stateOf(this)[1]; // shown while collapsed, where the chat cannot say it
     this.syncWaiting();
+    this.syncWaitingBusy();
     this.renderProgress();
     this.renderContext(); // the button waits while a turn runs
     updateSummary();
@@ -4241,6 +4275,16 @@ function closeCell(cell) {
   saveState();
 }
 
+/** Clicking empty board space (no cell, no sidebar) clears the focus highlight. */
+function unfocusAll() {
+  if (!app.focused) return;
+  app.focused.el.classList.remove('focused');
+  app.focused = null;
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  renderSidebar();
+}
+board.addEventListener('mousedown', e => { if (!e.target.closest('.cell')) unfocusAll(); });
+
 function focusCell(cell, focusInput) {
   if (app.focused && app.focused !== cell) app.focused.el.classList.remove('focused');
   const changed = app.focused !== cell;
@@ -5184,7 +5228,7 @@ function renderUsagePop() {
   // Credits with something left, then what sessions spent on HQ's API key in this run.
   const credits = (usage.data && usage.data.credits) || [];
   const apiSpent = app.cells.reduce((sum, c) => sum + (c.cost.apiUsd || 0), 0);
-  if (credits.length || apiSpent > 0) parts.push(h('div', { class: 'usage-head usage-credits-head' }, h('span', { text: 'Credits' })));
+  if (credits.length) parts.push(h('div', { class: 'usage-head usage-credits-head' }, h('span', { text: 'Credits' })));
   for (const c of credits) {
     const usedPct = c.limit ? Math.round(100 * (1 - c.left / c.limit)) : null;
     parts.push(h('div', { class: 'usage-row' },
@@ -5193,11 +5237,18 @@ function renderUsagePop() {
       usedPct != null ? h('div', { class: 'usage-bar' }, h('span', { style: `width:${Math.max(0, Math.min(100, usedPct))}%;background:${heatCss(usedPct)}` })) : null,
       c.resetsAt ? h('div', { class: 'usage-reset', text: c.resetsAt < Date.now() ? 'Reset' : resetText(c.resetsAt) }) : null));
   }
-  if (apiSpent > 0) {
+  {
+    const left = app.settings.apiCreditLeft;
+    const expires = app.settings.apiCreditExpires ? new Date(`${app.settings.apiCreditExpires}T23:59:59Z`).getTime() : null;
+    const days = expires ? Math.ceil((expires - Date.now()) / 86400000) : null;
+    const gone = expires != null && days <= 0;
+    parts.push(h('div', { class: 'usage-head usage-credits-head' }, h('span', { text: 'API key' }), app.apiKeyHint ? h('span', { class: 'usage-plan', text: app.apiKeyHint }) : null));
     parts.push(h('div', { class: 'usage-row' },
-      h('div', { class: 'usage-line' }, h('span', { text: `API key${app.apiKeyHint ? ` (${app.apiKeyHint})` : ''}` }),
-        h('span', { class: 'usage-pct', text: `${formatCost(apiSpent)} spent` })),
-      h('div', { class: 'usage-reset', text: 'In this HQ run, as Claude Code reports it. The Console shows the balance left.' })));
+      h('div', { class: 'usage-line' }, h('span', { text: 'Balance' }),
+        h('span', { class: 'usage-pct', text: left == null ? 'not set' : formatCost(left) })),
+      h('div', { class: 'usage-reset', text: expires == null ? 'Expiry not set' : gone ? `Expired ${app.settings.apiCreditExpires}` : `Expires ${app.settings.apiCreditExpires} (${days} day${days === 1 ? '' : 's'})` }),
+      left == null && expires == null ? h('div', { class: 'usage-reset', text: 'Type them in at Settings > API key: the Console has no balance API.' }) : null,
+      apiSpent > 0 ? h('div', { class: 'usage-reset', text: `${formatCost(apiSpent)} spent in this HQ run, as Claude Code reports it.` }) : null));
   }
   if (usage.error) parts.push(h('div', { class: 'usage-note error', text: usage.error }));
   const updated = usage.loading ? 'Updating…' : usage.fetchedAt ? `Updated ${timeAgo(usage.fetchedAt)}` : '';
@@ -5527,6 +5578,9 @@ function sanitizeSettings(x) {
     codexPath: typeof v.codexPath === 'string' ? v.codexPath.trim().slice(0, 500) : '',
     autoCopy: v.autoCopy !== false,
     weeklyBar: v.weeklyBar !== false,
+    // The API key's credit balance and expiry, typed in from the Console (no API reports them).
+    apiCreditLeft: Number.isFinite(v.apiCreditLeft) && v.apiCreditLeft >= 0 ? v.apiCreditLeft : null,
+    apiCreditExpires: typeof v.apiCreditExpires === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v.apiCreditExpires) ? v.apiCreditExpires : '',
     // The eye button's level new sessions start at: 1 everything, 2 no tool calls, 3 replies only.
     defaultDetail: [1, 2, 3].includes(v.defaultDetail) ? v.defaultDetail : 2,
     // How the header buttons show: always, fading in as the pointer nears, or only while the header is hovered.
@@ -5861,6 +5915,12 @@ function renderAppearanceSettings(row, toggle, select) {
     build.appIcon == null ? null : row('App icon', "A PNG or ICO shown on the window and taskbar instead of HQ's own.", appIconControl()),
     h('div', { class: 'settings-section', text: 'Top bar' }),
     row('Weekly usage bar', 'A thin bar along the bottom of the usage button showing the weekly limit.', toggle(app.settings.weeklyBar, v => changeSetting('weeklyBar', v))),
+    row('API key balance', 'Credits left on the key, from the Console (Billing > Promotional credits), shown in the usage popup. Update it when it changes.',
+      h('div', { class: 'api-key' },
+        (() => { const i = h('input', { type: 'number', min: '0', step: '0.01', placeholder: 'USD left', value: app.settings.apiCreditLeft ?? '' });
+          i.addEventListener('change', () => { const n = parseFloat(i.value); changeSetting('apiCreditLeft', Number.isFinite(n) && n >= 0 ? n : null); }); return i; })(),
+        (() => { const i = h('input', { type: 'date', title: 'Expires on', value: app.settings.apiCreditExpires });
+          i.addEventListener('change', () => changeSetting('apiCreditExpires', i.value)); return i; })())),
     h('div', { class: 'settings-section', text: 'Sessions' }),
     row('Show in new sessions', 'How much of the chat a new session shows. The eye button on a session still changes it for that session.',
       select(String(app.settings.defaultDetail), [['1', 'Everything (replies, thinking, narration, tools)'], ['2', 'Replies, thinking and narration'], ['3', 'Replies only']],
