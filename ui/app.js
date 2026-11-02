@@ -52,17 +52,17 @@ const ALL_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 const BUSY_VERBS = ['Cooking', 'Locking in', 'Vibe coding', 'Aura farming', 'Manifesting', 'Speedrunning', 'Main charactering',
   'Big braining', 'Rizzing up the compiler', 'Sending it', 'Yapping internally', 'Touching grass (briefly)', 'Lowkey grinding',
   'Highkey grinding', 'Gatekeeping bugs', 'Glazing the codebase', 'Rawdogging the stack', 'Delulu debugging',
-  'Doomscrolling the docs', 'Entering goblin mode', 'Clauding', 'Letting it cook', 'Mewing', 'No-capping', 'Slaying',
-  'Understanding the assignment', 'Living rent free in RAM', 'Being so real', 'Eating (no crumbs)',
-  'Giving it main quest energy', 'Pulling an all-nighter', 'Spilling the tea', 'Running it back', 'Hitting the griddy',
+  'Doomscrolling the docs', 'Entering goblin mode', 'Clauding', 'Letting it cook', 'Mewing', 'No-capping',
+  'Understanding the assignment', 'Living rent free in RAM', 'Being so real',
+  'Giving it main quest energy', 'Pulling an all-nighter', 'Running it back', 'Hitting the griddy',
   'Pondering', 'Ruminating', 'Noodling', 'Percolating', 'Marinating', 'Simmering', 'Brewing', 'Fermenting', 'Steeping',
   'Kneading the dough', 'Proofing', 'Whisking', 'Flambéing', 'Seasoning to taste', 'Reducing the sauce', 'Plating up',
   'Consulting the rubber duck', 'Asking the rubber duck nicely', 'Bribing the linter', 'Negotiating with the borrow checker',
   'Appeasing the type system', 'Reticulating splines', 'Herding cats', 'Wrangling semicolons', 'Untangling spaghetti',
   'Polishing pixels', 'Counting brackets', 'Balancing parentheses', 'Chasing a null', 'Hunting heisenbugs',
   'Interrogating the stack trace', 'Reading the fine print', 'Grepping the universe', 'Spelunking the call graph',
-  'Defragmenting thoughts', 'Compiling vibes', 'Refactoring reality', 'Bikeshedding (efficiently)', 'Yak shaving',
-  'Shaving the yak closer', 'Summoning the daemon', 'Feeding the hamsters', 'Spinning up the hamster wheel',
+  'Defragmenting thoughts', 'Compiling vibes', 'Refactoring reality', 'Bikeshedding (efficiently)',
+  'Summoning the daemon', 'Feeding the hamsters', 'Spinning up the hamster wheel',
   'Warming up the GPUs', 'Cranking the flux capacitor', 'Calibrating the vibes', 'Aligning the chakras of the repo',
   'Channeling the senior dev', 'Doing the thing', 'Thinking really hard', 'Thinking even harder', 'Galaxy braining',
   'Connecting the dots', 'Following the white rabbit', 'Taking the red pill', 'Entering the matrix', 'Hacking the mainframe',
@@ -75,10 +75,10 @@ const BUSY_VERBS = ['Cooking', 'Locking in', 'Vibe coding', 'Aura farming', 'Man
   'Respawning', 'Unlocking achievements', 'Collecting the infinity stones', 'Assembling', 'Transforming',
   'Charging the kamehameha', 'Going super saiyan', 'Using the force', 'Consulting the oracle', 'Reading the tea leaves',
   'Gazing into the crystal ball', 'Divining', 'Conjuring', 'Enchanting', 'Transmuting', 'Alchemizing', 'Spellcasting',
-  'Brewing a potion', 'Moonwalking', 'Breakdancing', 'Doing the worm', 'Vogueing', 'Jazz-handing', 'Tap dancing',
+  'Brewing a potion', 'Moonwalking', 'Breakdancing', 'Doing the worm', 'Jazz-handing', 'Tap dancing',
   'Beatboxing', 'Freestyling', 'Dropping bars', 'Mixing the beat', 'Tuning the guitar', 'Composing', 'Orchestrating',
   'Conducting', 'Improvising', 'Riffing', 'Jamming', 'Vibing', 'Grooving', 'Boogieing', 'Skedaddling', 'Moseying',
-  'Sashaying', 'Galumphing', 'Frolicking', 'Gallivanting', 'Meandering', 'Wandering', 'Exploring', 'Charting the map',
+  'Galumphing', 'Frolicking', 'Gallivanting', 'Meandering', 'Wandering', 'Exploring', 'Charting the map',
   'Navigating', 'Setting sail', 'Raising the anchor', 'Catching the wind', 'Riding the wave', 'Surfing the stack',
   'Diving deep', 'Coming up for air', 'Climbing the tree', 'Walking the AST', 'Traversing the graph', 'Sorting it out',
   'Binary searching', 'Hashing it out', 'Caching in', 'Flushing buffers', 'Garbage collecting', 'Allocating brain cells',
@@ -102,7 +102,85 @@ const BUSY_VERBS = ['Cooking', 'Locking in', 'Vibe coding', 'Aura farming', 'Man
   'Squinting at the logs', 'Tracing the breadcrumbs', 'Following the money', 'Sniffing out bugs', 'Squashing bugs',
   'Swatting flies', 'Debugging with print', 'Adding console.log', 'Removing console.log', 'Committing to the bit',
   'Rebasing feelings', 'Cherry-picking ideas', 'Merging thoughts', 'Resolving conflicts', 'Stashing worries',
-  'Pushing through', 'Pulling it together', 'Forking the timeline', 'Branching out', 'Tagging the release (mentally)'];
+  'Pushing through', 'Pulling it together', 'Forking the timeline', 'Branching out', 'Tagging the release (mentally)',
+  'Cooking (allegedly)', 'Grinding in silence', 'Moving in silence', 'Going feral', 'Being him', 'In my coding era',
+  'In its debugging era', 'Rotting productively', 'Brain rotting (responsibly)', 'Skibidi-ing the bugs away',
+  'Ohio-proofing the code',
+  'Mogging the competition', 'Looksmaxxing the UI', 'Codemaxxing', 'Sleepmaxxing (not really)', 'Tokenmaxxing',
+  'Contextmaxxing', 'Aura maxxing', 'Losing aura points (temporarily)', 'Gaining aura', '+1000 aura',
+  'Fanum taxing your tokens', 'Sigma grinding', 'On that grindset', 'Rizzing up the API', 'Bussin through the backlog',
+  'Ratio-ing the bugs', 'Ghosting the errors', 'Soft launching a fix', 'Hard launching a fix', 'Lowkey cooking',
+  'Lowkey panicking (jk)', 'Not panicking', 'Deep in the sauce', 'Getting the sauce', 'Drip-checking the code',
+  'Fit-checking the functions', 'Stan-ing your codebase', 'Feeling the vibes', 'Vibe-shifting', 'Big vibe energy',
+  'Delulu but productive', 'It is what it is-ing', 'Bet', 'Say less', 'On god', 'Fr fr', 'No cap, working',
+  'Valid-ating', 'Gaslighting the compiler', 'Gatekeeping, girlbossing, coding', 'Pick-me-ing the right function',
+  'Living in the terminal', 'Touching zero grass', 'Not touching grass today', 'Copium huffing', 'Hopium loading',
+  'Big W incoming', 'Avoiding the L', 'Taking the W', "Farming W's", 'Clutching up', 'Going sweaty mode', 'Tryharding',
+  'Speedrunning the backlog', 'Speedrunning a bug fix', 'No-scoping the bug', '360 no-scoping', 'Camping the error',
+  'Respawning with full health', 'Pressing F for the old code', 'GG-ing the tests', 'Gitting gud', 'Diffing hard',
+  'Merge-conflict therapy', 'Rage-quitting (not really)', 'Touching the stack', 'Main quest only, no side quests',
+  'Doing a side quest', 'Skipping the cutscene', 'Reading the patch notes', 'Nerfing the bugs', 'Buffing the code',
+  'Min-maxing', 'Cheese-ing the boss fight', 'Unlocking the hidden ending', 'Grabbing the loot', 'Opening a loot box',
+  'Rolling a nat 20', 'Rolling a nat 1 (rerolling)', 'Checking the leaderboard', 'Going AFK (but working)',
+  'Being a 10x dev (for 10 seconds)', 'Pretending to be a senior', 'Impostor syndrome-ing',
+  'Copy-pasting from the future', 'Writing code that slaps', 'Making it make sense', 'Making it pop',
+  'Adding the drip', 'Putting respect on its name', 'Not the vibe, retrying', 'Running on vibes and caffeine',
+  'Running on three energy drinks', 'Chugging a Monster', 'Pulling a Red Bull all-nighter', 'Ordering takeaways',
+  'Waiting for the Uber Eats', 'Doing a TikTok dance', 'Watching one more YouTube tutorial',
+  'Doomscrolling Stack Overflow', 'Liking its own commits', 'Posting a story about it', 'Going viral (internally)',
+  'Making the reel', 'Editing the vlog', 'Recording a podcast about it', 'Subscribing to the bug',
+  'Hitting the bell icon', 'Smashing that like button', 'Unboxing the codebase', 'Reacting to the code',
+  'Duetting the diff', 'Getting ratioed by the linter', 'Arguing with the linter', 'Winning the argument',
+  'Losing the argument', 'Filing a complaint with the compiler', 'Speaking to the manager (the compiler)',
+  'Writing a strongly worded comment', 'Leaving a passive-aggressive TODO', 'Deleting the TODO',
+  'Pretending the TODO never existed', 'Blaming the intern', 'Blaming DNS', 'It was DNS', 'Blaming cosmic rays',
+  'Blaming Mercury retrograde', 'Checking the horoscope', 'Consulting the group chat', 'Leaving the group chat',
+  'Muting the group chat', 'Sliding into the DMs (of the API)', 'Left on read by the API', 'Double texting the server',
+  'Waiting for the server to text back', 'Situationship with the database', 'Breaking up with the bug',
+  'Moving on from the bug', 'Not over the bug yet', 'Therapy session with the stack trace',
+  'Setting boundaries with the codebase', 'Protecting its peace', 'Romanticising the refactor',
+  'Main character refactor', 'Hot girl walking (around the repo)', 'Taking a hot lap', 'Victory lap pending',
+  'Warming up', 'Stretching first', 'Hydrating', 'Doing a lil dance', 'Doing a lil treat', 'Treating itself',
+  'Feral coding', 'Unhinged coding', 'Chaotic good coding', 'Lawful neutral coding', 'Big brain time',
+  'Smol brain moment (recovering)', 'Thinking in 4K', 'Thinking in 8K', 'Rendering thoughts in HD', 'Loading the lore',
+  'Reading the lore', 'Building lore', 'Adding to the lore', 'Plot twisting', 'Character developing',
+  'Arc in progress', 'Redemption arc', 'Villain arc (for bugs)', 'Training montage', 'Cue the montage music',
+  'Entering the chat', 'Leaving the chat (briefly)', 'Logging on', 'Popping off', 'Going crazy, going stupid',
+  'Built like a compiler', 'Built different (again)', 'Sending it (again)', 'Locked in (deeper)', 'Fully locked in',
+  'Ultra locked in', 'Ascending', 'Transcending', 'Achieving enlightenment', 'Reaching nirvana',
+  'Becoming one with the code', 'Communing with the codebase', 'Whispering to the server', 'Sweet-talking the API',
+  'Flirting with the database', 'Charming the CI pipeline', 'Bribing CI with cookies', 'Praying to the CI gods',
+  'Lighting a candle for the build', 'Knocking on wood', 'Crossing fingers', 'Manifesting green checks',
+  'Manifesting zero warnings', 'Vision-boarding the fix', 'Journaling about the bug', 'Meditating on the problem',
+  'Box breathing', 'Doing yoga with the code', 'Downward-dogging the stack', 'Pumping iron (and code)',
+  'Skipping leg day', 'Hitting a PR (personal record)', 'Spotting the bug', 'Bulking the feature', 'Cutting the bloat',
+  'Shredding the dead code', 'Gains loading', 'Carbo-loading', 'Making a smoothie', 'Ordering a flat white',
+  'Oat-milking it', 'Avocado toasting', 'Matcha-ing', 'Boba-ing', 'Air-frying the build', 'Instant-potting',
+  'Sous-viding the logic', 'Deep-frying the bugs', 'Roasting the code (lovingly)', 'Seasoning the code',
+  'Letting it rest', 'Taste-testing', 'Gordon Ramsay-ing the code', 'Calling the code an idiot sandwich',
+  'Masterchef-ing', 'Bake-off-ing', 'Doing a wheelie', 'Kickflipping', 'Ollie-ing over the bug',
+  'Parkouring through the code', 'Wall-running', 'Dabbing (ironically)', 'Flossing (the dance)', 'Hitting the woah',
+  'Shmoney dancing', 'Renegade-ing', 'Rickrolling the bugs', 'Never gonna give you up', 'Vibing to lo-fi beats',
+  'Lo-fi coding to study to', 'Queueing the playlist', 'Skipping the ad', 'Buffering (affectionately)',
+  'Plugging in the aux', 'Turning up the bass', 'Dropping the beat', 'Bringing the beat back', 'Spinning the decks',
+  'Raving in the RAM', 'Moshing with the modules', 'Crowd-surfing the call stack', 'Encore incoming',
+  'Making a braai plan', 'Lekker-ing it up', 'Shot-ing (thanks, bru)', 'Howzit-ing the server',
+  'Robot-ing (traffic lights)', 'Load-shedding proofing', 'Running on the backup inverter', 'Checking EskomSePush',
+  'Sharp-fiving the fix', 'Doing a mission, bru', 'Taking the gap', 'Graft mode on', 'Hustling like a taxi driver',
+  'Ja-nee-ing', 'Ag shame-ing the bug', 'Yoh-ing at the code', 'Hayibo-ing', 'Gooi-ing some code',
+  'Skrik-ing at the errors', 'Vasbyt-ing', 'Bakkie-loading the files', 'Chilling like a villain', 'Lekker lekker',
+  'Making a potjie', 'Stirring the potjie', 'Ordering a Steers burger', "Grabbing a Nando's", 'Biltong snacking',
+  'Rusk dunking', 'Koeksister breaking', 'Bunny chow-ing', 'Vetkoek-ing', 'Asking ChatGPT (jk)', 'Not asking ChatGPT',
+  'Being better than autocomplete', 'Out-thinking autocomplete', 'Tab-tab-tabbing', 'Ctrl+S-ing compulsively',
+  'Ctrl+Z-ing the past', 'Alt-tabbing to the docs', 'Closing 47 tabs', 'Opening 48 tabs',
+  'Clearing the cache (and the mind)', 'rm -rf-ing doubts', 'sudo-ing with confidence', 'npm install-ing patience',
+  'Waiting for node_modules to finish', 'Downloading the internet (node_modules)', 'Hello world-ing', 'Fizzbuzzing',
+  'Leetcode grinding', 'Whiteboarding', 'Drawing boxes and arrows', 'Architecting', 'Over-engineering (then not)',
+  'Under-engineering (then fixing)', 'DRY-ing off', 'YAGNI-ing', 'SOLID-ifying',
+  'Making it idempotent', 'Making it async', 'Awaiting greatness', 'Promise-ing it resolves', 'Unwrapping carefully',
+  'Avoiding unwrap()', 'Handling the edge case', 'Living on the edge (case)', 'Off-by-one-ing (fixed)',
+  'Naming things (hardest part)', 'Renaming things again', 'Choosing a variable name', 'Calling it temp2',
+  'Regretting temp2'];
 const BUSY_ROTATE_MS = 9000;
 const busyDeck = [];
 
@@ -232,7 +310,9 @@ class Cell {
     this.wmArmed = false;          // waiting mode: while Claude works, a calm progress view stands in for the chat
     this.wmWorked = false;         // work has been seen since arming (an idle cell arms and waits for it)
     this.wmView = false;           // the waiting view is on screen now (the chat is display:none)
+    this.wmNews = false;           // the agent replied there while background work went on (badged instead of the green border)
     this.wmTimer = 0;              // one timeout: finishes waiting mode once the cell has stayed idle
+    this.wmDoneOpen = false;       // the waiting view shows its completed tasks (folded away by default)
     this.wmStick = true;           // stickToBottom, kept while the chat is hidden
     this.taskLine = '';            // "3/7": the task list at a glance, in the header
     this.sideTaskLine = '';        // the same without the live tool name, for the sidebar (which a change rebuilds)
@@ -255,6 +335,8 @@ class Cell {
     this.resumeMark = null;        // set as an update starts installing: { queued } for a working cell, which the restart saves
     this.busyWord = '';            // the verb shown above the prompt box this turn
     this.lastReply = '';
+    this.lastSaid = null;          // the agent's latest top-level text { text, at }, shown faded in the waiting view
+    this.lastSaidOpen = false;     // that text is expanded past its three lines
     this.color = projectColor(cwd);
     this.attachments = [];         // images waiting to be sent: { mediaType, data, url }
     this.turnTexts = [];           // top-level text items since the last tool call in this turn
@@ -331,14 +413,12 @@ class Cell {
     this.detailBtn = el.querySelector('.act-detail');
     this.progressBtn = el.querySelector('.act-progress');
     this.progressEl = el.querySelector('.progress-panel');
-    this.headBar = el.querySelector('.head-progress');
-    this.taskEl = el.querySelector('.cell-tasks');
+    this.taskEl = this.progressBtn.querySelector('.btn-count');
     this.waitBtn = el.querySelector('.act-waiting');
     this.waitEl = el.querySelector('.waiting-view');
     this.waitBody = el.querySelector('.wv-body');
     this.loader = null;            // the waiting view's current loader, a fresh one each time the view opens
     this.taskBtn = el.querySelector('.act-tasklist');
-    this.bgEl = el.querySelector('.bg-tasks');
     this.stateEl = el.querySelector('.cell-state');
     this.codeBtn = el.querySelector('.act-code');
     this.collapseBtn = el.querySelector('.act-collapse');
@@ -399,6 +479,9 @@ class Cell {
     this.detailBtn.addEventListener('click', () => this.setDetail(this.detail % 3 + 1));
     this.progressBtn.addEventListener('click', () => this.setProgressView(!this.progressView));
     this.waitBtn.addEventListener('click', () => this.setWaitingMode(!this.wmArmed));
+    wireButtonDrag(el.querySelector('.cell-head'));
+    const moreBtn = el.querySelector('.act-more');
+    moreBtn.addEventListener('click', e => { e.stopPropagation(); openMenu(moreBtn, this, menuEl => buildMoreMenu(menuEl, this)); });
     this.taskBtn.addEventListener('click', () => this.setAskTasks(!this.askTasks));
     el.querySelector('.act-max').addEventListener('click', () => toggleMaximize(this));
     el.querySelector('.act-close').addEventListener('click', e => this.requestClose(e.currentTarget));
@@ -633,7 +716,7 @@ class Cell {
   applyDetail() {
     for (const n of [1, 2, 3]) this.el.classList.toggle(`detail-${n}`, this.detail === n);
     const [icon, now, next] = DETAIL_LEVELS[this.detail];
-    this.detailBtn.classList.toggle('on', this.detail !== 2); // lit when off the default
+    this.detailBtn.classList.toggle('on', this.detail !== app.settings.defaultDetail); // lit when off the default
     this.detailBtn.querySelector('.codicon').className = `codicon codicon-${icon}`;
     this.detailBtn.title = `Showing ${now}. Click to show ${next}.`;
   }
@@ -799,6 +882,7 @@ class Cell {
   startTurn() {
     this.nextBusyWord();
     this.turnStart = Date.now();
+    this.wmNews = false;
     this.limitHit = false;
     this.turnTools = 0;
     this.currentTool = null;
@@ -960,12 +1044,18 @@ class Cell {
     const active = list.filter(t => t.status === 'in_progress').length;
     const taskPct = list.length ? Math.round(((done + active / 2) / list.length) * 100) : 0;
     const running = this.status === 'running';
-    // A thin bar along the header, so progress shows in the grid without opening the panel.
-    const headBar = live && (running || taskPct < 100);
-    this.headBar.classList.toggle('hidden', !headBar);
-    if (headBar) this.headBar.style.setProperty('--pct', `${taskPct}%`);
-    this.drawTaskLine(list, headBar, done);
+    // The progress button shows "3/7" in place of its icon while a task list is under way.
+    this.drawTaskLine(list, live && (running || taskPct < 100), done);
     this.syncProgressTimer();
+    const answer = this.statusAnswer;
+    const agent = this.agent;
+    const estimate = answer && answer.percent != null && this.turnStart && answer.at >= this.turnStart ? answer.percent : null;
+    const pct = live ? taskPct : estimate;
+    this.trackPct(pct, live ? Date.now() : answer && answer.at);
+    // The waiting-mode header: a ring fills with the percentage, and a chip flags a reply made while work goes on.
+    this.el.classList.toggle('has-pct', pct != null);
+    if (pct != null) this.el.style.setProperty('--ring', `${pct}%`);
+    this.el.classList.toggle('wm-news', this.wmView && this.wmNews);
     const asWaiting = this.wmView; // the waiting view takes the panel's place (the chat is hidden under both)
     if (!this.progressView && !asWaiting) return;
 
@@ -975,12 +1065,9 @@ class Cell {
       : this.bgTasks.length ? ['Background work running', 'bg']
       : this.status === 'exited' ? ['Stopped', 'exited']
       : ['Idle', ''];
-    const answer = this.statusAnswer;
-    const agent = this.agent;
-    const estimate = answer && answer.percent != null && this.turnStart && answer.at >= this.turnStart ? answer.percent : null;
-    const pct = live ? taskPct : estimate;
-    const barLabel = live ? `${taskPct}%  ·  ${done} of ${list.length} tasks done`
-      : estimate != null ? `About ${estimate}%  ·  ${agent}'s estimate`
+    const timing = pct != null ? this.pctTiming(pct) : '';
+    const barLabel = live ? `${taskPct}%  ·  ${done} of ${list.length} tasks done${timing}`
+      : estimate != null ? `About ${estimate}%  ·  ${agent}'s estimate${timing}`
       : running ? 'No task list. Ask for a sitrep to get a rough percentage.' : '';
 
     const ask = h('button', { class: 'btn pv-ask', disabled: this.proc == null || (answer && answer.asking),
@@ -989,15 +1076,14 @@ class Cell {
     ask.addEventListener('click', () => this.askStatus());
 
     const turnActive = (running || waiting) && this.turnStart;
+    // The waiting view keeps only the sitrep button here: its loader and busy word already say it is working.
     const head = h('div', { class: 'pv-head' },
-      h('span', { class: `pv-state ${stateCls}` }, h('span', { class: 'pv-dot' }), state),
-      turnActive ? h('span', { class: 'pv-elapsed', text: formatDuration(Date.now() - this.turnStart) }) : null,
-      turnActive && this.turnTools ? h('span', { text: `${this.turnTools} tool call${this.turnTools === 1 ? '' : 's'}` }) : null,
+      asWaiting ? null : h('span', { class: `pv-state ${stateCls}` }, h('span', { class: 'pv-dot' }), state),
+      turnActive && !asWaiting ? h('span', { class: 'pv-elapsed', text: formatDuration(Date.now() - this.turnStart) }) : null,
+      turnActive && !asWaiting && this.turnTools ? h('span', { text: `${this.turnTools} tool call${this.turnTools === 1 ? '' : 's'}` }) : null,
       h('span', { class: 'spacer' }),
       ask,
-      asWaiting
-        ? h('button', { class: 'icon-btn pv-close', title: 'Show the chat (turns waiting mode off)', onclick: () => this.setWaitingMode(false) }, icon('comment'))
-        : h('button', { class: 'icon-btn pv-close', title: 'Close', onclick: () => this.setProgressView(false) }, icon('close')));
+      asWaiting ? null : h('button', { class: 'icon-btn pv-close', title: 'Close', onclick: () => this.setProgressView(false) }, icon('close')));
 
     let bar = null;
     if (pct != null || (running && !asWaiting)) { // the waiting view's loader stands in for the indeterminate bar
@@ -1008,50 +1094,87 @@ class Cell {
     }
 
     let now = null;
-    if (waiting) now = h('div', { class: 'pv-now' }, icon('bell'), `${agent} needs your answer or permission below.`);
+    if (asWaiting) now = null; // the tool line is noise there; the agent's latest message says what it is doing
+    else if (waiting) now = h('div', { class: 'pv-now' }, icon('bell'), `${agent} needs your answer or permission below.`);
     else if (running) {
       const t = this.currentTool;
       now = h('div', { class: 'pv-now' }, icon('debug-stackframe'),
         t ? [h('span', { class: 'tname', text: t.name }), h('span', { class: 'targ', text: t.summary })] : h('span', { text: 'Thinking or writing' }));
     }
 
+    // The agent's latest words, faded and clamped to three lines; a click shows all of it.
+    const said = asWaiting && this.lastSaid;
+    const saidEl = said ? h('div', { class: `wv-said${this.lastSaidOpen ? ' open' : ''}${this.wmNews ? ' news' : ''}`,
+      title: this.lastSaidOpen ? 'Click to shorten' : `${agent}'s latest message. Click to show all of it.`,
+      onclick: () => { if (!getSelection().toString()) { this.lastSaidOpen = !this.lastSaidOpen; this.wmNews = false; this.renderProgress(); } } },
+    this.wmNews ? h('span', { class: 'wv-news', text: `${agent} replied · still working in the background` }) : null,
+    h('span', { class: 'wv-said-text', text: said.text }), stamp(said.at)) : null;
+
     let tasks = null;
     if (list.length) {
       const iconFor = { completed: 'pass-filled', in_progress: 'loading codicon-modifier-spin', pending: 'circle-large-outline' };
-      tasks = h('div', { class: 'pv-section' },
-        h('div', { class: 'pv-title', text: this.tasksStale ? 'Previous task list' : 'Tasks' }),
-        h('ul', { class: `pv-tasks${this.tasksStale ? ' stale' : ''}` }, list.map(t => h('li', { class: t.status },
-          icon(iconFor[t.status] || 'circle-large-outline'),
-          h('span', { text: t.status === 'in_progress' && t.activeForm ? t.activeForm : t.subject }),
-        ))));
+      const item = t => h('li', { class: t.status },
+        icon(iconFor[t.status] || 'circle-large-outline'),
+        h('span', { text: t.status === 'in_progress' && t.activeForm ? t.activeForm : t.subject }));
+      const stale = this.tasksStale ? ' stale' : '';
+      const title = h('div', { class: 'pv-title', text: this.tasksStale ? 'Previous task list' : 'Tasks' });
+      // The waiting view lists what is left first and folds the finished ones away under it: long lists bury the live task.
+      const finished = asWaiting ? list.filter(t => t.status === 'completed') : [];
+      if (!finished.length) tasks = h('div', { class: 'pv-section' }, title, h('ul', { class: `pv-tasks${stale}` }, list.map(item)));
+      else {
+        const left = list.filter(t => t.status !== 'completed');
+        const open = this.wmDoneOpen;
+        tasks = h('div', { class: 'pv-section' }, title,
+          left.length ? h('ul', { class: `pv-tasks${stale}` }, left.map(item)) : null,
+          h('button', { class: `pv-fold${open ? ' open' : ''}`, title: open ? 'Hide the completed tasks' : 'Show the completed tasks',
+            onclick: () => { this.wmDoneOpen = !open; this.renderProgress(); } },
+          icon('chevron-right'), `Completed (${finished.length})`),
+          open ? h('ul', { class: `pv-tasks done${stale}` }, finished.map(item)) : null);
+      }
     }
 
-    const agents = this.bgTasks.map(t => ({ id: t.id, label: `${BG_LABELS[t.type] || 'Task'}: ${t.description}`, p: this.taskProgress.get(t.id) }));
+    const agents = this.bgTasks.map(t => ({ id: t.id, kind: BG_LABELS[t.type] || 'Task', label: t.description, p: this.taskProgress.get(t.id) }));
     for (const [id, p] of this.taskProgress) {
-      if (!this.bgTasks.some(t => t.id === id)) agents.push({ id, label: `Agent: ${p.description}`, p });
+      if (!this.bgTasks.some(t => t.id === id)) agents.push({ id, kind: 'Agent', label: p.description, p });
     }
     const agentsEl = agents.length ? h('div', { class: 'pv-section' },
       h('div', { class: 'pv-title', text: 'Agents and shells' }),
-      h('ul', { class: 'pv-agents' }, agents.map(({ id, label, p }) => {
+      h('ul', { class: 'pv-agents' }, agents.map(({ id, kind, label, p }) => {
         const detail = p ? [p.lastTool && `last: ${p.lastTool}`, p.toolUses != null && `${p.toolUses} tool uses`,
           p.durationMs != null && formatDuration(p.durationMs)].filter(Boolean).join('  ·  ') : '';
         const stopping = this.stoppingTasks.has(String(id));
         const stop = h('button', { class: 'icon-btn pv-stop', disabled: stopping || this.proc == null,
-          title: stopping ? 'Stopping…' : 'Stop this agent or shell', onclick: () => this.stopTask(id) }, icon(stopping ? 'loading codicon-modifier-spin' : 'debug-stop'));
-        return h('li', null, h('span', { class: 'codicon codicon-loading codicon-modifier-spin' }),
-          h('div', { class: 'pv-agent-main' }, h('div', { text: label }), detail ? h('div', { class: 'desc', text: detail }) : null,
-            p && p.summary ? h('div', { class: 'desc', text: p.summary }) : null), stop);
+          title: stopping ? 'Stopping…' : `Stop this ${kind.toLowerCase()}`, onclick: () => this.stopTask(id) }, icon(stopping ? 'loading codicon-modifier-spin' : 'debug-stop'));
+        return h('li', { class: `kind-${kind.toLowerCase()}` }, icon(kind === 'Shell' ? 'terminal' : kind === 'Monitor' ? 'eye' : 'hubot'),
+          h('div', { class: 'pv-agent-main' },
+            h('div', { class: 'pv-agent-name', title: label }, h('span', { class: 'pv-kind', text: kind }), h('span', { class: 'pv-agent-label', text: label })),
+            detail ? h('div', { class: 'desc', text: detail }) : null,
+            p && p.summary ? h('div', { class: 'desc summary', text: p.summary }) : null), stop);
       }))) : null;
 
     const answerEl = answer && answer.at ? h('div', { class: 'pv-section' },
       h('div', { class: 'pv-title' }, `${agent} says`, stamp(answer.at)),
       h('div', { class: `pv-answer${answer.error ? ' error' : ''}`, text: answer.text })) : null;
 
-    const empty = !bar && !now && !tasks && !agentsEl
+    const empty = !bar && !now && !tasks && !agentsEl && !(asWaiting && (running || saidEl))
       ? h('div', { class: 'pv-empty', text: 'Nothing is running. Progress shows here while Claude works.' }) : null;
 
-    const parts = asWaiting ? [bar, head, now, tasks, agentsEl, answerEl, empty] : [head, bar, now, tasks, agentsEl, answerEl, empty];
+    const parts = asWaiting ? [bar, head, now, saidEl, tasks, agentsEl, answerEl, empty] : [head, bar, now, tasks, agentsEl, answerEl, empty];
     (asWaiting ? this.waitBody : this.progressEl).replaceChildren(...parts.filter(Boolean));
+  }
+
+  /** Remembers when the percentage last moved, for pctTiming's "updated" time; a new turn starts over. */
+  trackPct(pct, at) {
+    if (pct == null || !at) return;
+    const t = this.pctTrack;
+    if (!t || t.turn !== this.turnStart || pct !== t.pct) this.pctTrack = { turn: this.turnStart, pct, at };
+  }
+
+  /** "  ·  updated 13:44": when the percentage last moved. */
+  pctTiming(pct) {
+    const t = this.pctTrack;
+    if (!t || t.pct !== pct) return '';
+    return `  ·  updated ${new Date(t.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
   }
 
   /** "3/7" for the header, "3/7 · Creating b.txt" for the sessions list; touches the DOM only when it changes. */
@@ -1067,8 +1190,8 @@ class Cell {
     if (line !== this.taskLine) {
       this.taskLine = line;
       this.taskEl.textContent = line;
-      this.taskEl.title = line ? `Tasks done: ${line}` : '';
-      this.taskEl.classList.toggle('hidden', !line);
+      this.progressBtn.classList.toggle('has-count', !!line);
+      this.progressBtn.setAttribute('aria-label', line ? `Tasks done: ${line}` : 'Progress');
     }
     if (side !== this.sideTaskLine) {
       this.sideTaskLine = side;
@@ -1131,6 +1254,11 @@ class Cell {
       [this.wmTop, this.wmStick] = this.collapsed && this.savedScroll ? this.savedScroll : [this.msgs.scrollTop, this.stickToBottom];
     }
     this.wmView = view;
+    if (!view) {
+      this.wmNews = false;
+      // refreshState held the green border back while the view showed background work; it calls here, so set it directly.
+      this.el.classList.toggle('unread', this.unread && this.pending.size === 0);
+    }
     this.el.classList.toggle('wm-on', view);
     if (!view && !this.collapsed) {
       if (this.live) this.scheduleLiveRender(); // text that streamed in while hidden was not drawn
@@ -1526,15 +1654,10 @@ class Cell {
     el.classList.toggle('state-waiting', waiting);
     el.classList.toggle('state-exited', this.status === 'exited');
     el.classList.toggle('state-bg', this.bgTasks.length > 0 && this.status !== 'running' && !waiting);
-    el.classList.toggle('unread', this.unread && !waiting);
+    // A reply while waiting mode still shows background work is most likely a progress note: the waiting view badges it instead.
+    el.classList.toggle('unread', this.unread && !waiting && !(this.wmView && this.bgTasks.length));
     this.stopBtn.classList.toggle('hidden', this.status !== 'running' && !waiting);
-    this.bgEl.classList.toggle('hidden', !this.bgTasks.length);
     this.stateEl.textContent = stateOf(this)[1]; // shown while collapsed, where the chat cannot say it
-    if (this.bgTasks.length) {
-      this.bgEl.querySelector('.bg-count').textContent = String(this.bgTasks.length);
-      const lines = this.bgTasks.map(t => `${BG_LABELS[t.type] || 'Task'}: ${t.description}`);
-      this.bgEl.title = ['Running in the background:', ...lines].join('\n');
-    }
     this.syncWaiting();
     this.renderProgress();
     this.renderContext(); // the button waits while a turn runs
@@ -1548,6 +1671,7 @@ class Cell {
 
   setBackground(tasks) {
     this.bgTasks = tasks;
+    if (!tasks.length) this.wmNews = false; // "still working in the background" is no longer true
     this.pruneTaskProgress();
     this.refreshState();
   }
@@ -1733,8 +1857,9 @@ class Cell {
       this.renderAttachments();
     }
     this.stickToBottom = true;
-    // HQ's own prompt shows as a notice instead, and names nothing.
+    // HQ's own prompt shows as a notice instead, and names nothing; one an agent sent through HQ's tools shows as what it said.
     if (prompt == null) draft.bubble = this.append(userBubble(text, images.map(i => i.url), Date.now()));
+    else if (isMcpMessage(text)) this.append(mcpBubble(text, Date.now()));
     if (prompt == null && !this.aiTitle && !this.customTitle && text && this.promptText.length < 2000) {
       this.promptText = `${this.promptText}\n${text}`.trim().slice(0, 2000);
       draft.addedPrompt = true;
@@ -1923,7 +2048,7 @@ class Cell {
     for (const id of [...this.pending.keys()]) this.dropPrompt(id);
     Object.assign(this, {
       sessionId: null, fork: false, bridgeSessionId: null, aiTitle: false, renamePending: false, titleTries: 0,
-      titleAsked: '', promptText: '', sentPrompts: [], lastReply: '', replyLog: [], mcpExpect: false, turnTexts: [], tasksStale: false, lastDuration: '',
+      titleAsked: '', promptText: '', sentPrompts: [], lastReply: '', lastSaid: null, lastSaidOpen: false, wmNews: false, replyLog: [], mcpExpect: false, turnTexts: [], tasksStale: false, lastDuration: '',
       historyStart: 0, historyPending: false, statusAnswer: null, live: null, promptWritten: false, lastSent: null,
       remoteAsked: false, currentTool: null, turnStart: null, turnTools: 0, resumeWarning: null,
     });
@@ -2158,6 +2283,11 @@ class Cell {
             item.dataset.ts = ts;
             this.turnTexts.push(item);
           }
+        }
+        if (!parent && !this.replayingEarlier && block.text.trim()) {
+          this.lastSaid = { text: block.text.trim().slice(-2000), at: Number(ts) };
+          this.lastSaidOpen = false;
+          if (this.wmView) this.renderProgress();
         }
       } else if (block.type === 'thinking') {
         if (!block.thinking) continue;
@@ -2431,7 +2561,8 @@ class Cell {
       this.closeTurn(true);
       this.sealTasks(); // a replay has no turn start, so each prompt closes the list before it
       const text = texts.join('\n');
-      this.append(userBubble(text, images, Date.parse(m.timestamp), omitted));
+      const viaHq = texts.length === 1 && !images.length && !omitted && isMcpMessage(text);
+      this.append(viaHq ? mcpBubble(text, Date.parse(m.timestamp)) : userBubble(text, images, Date.parse(m.timestamp), omitted));
       if (!this.title) this.title = firstLine(text, 90) || 'Image';
     } else if (!replay && !parent && !m.isSynthetic && this.remoteState === 'on') {
       // A prompt typed on the phone or on claude.ai/code arrives like this; HQ's own prompts were drawn when sent.
@@ -2472,6 +2603,7 @@ class Cell {
     this.renderMeta();
     this.setStatus('idle');
     if (!local) {
+      if (this.wmView && this.bgTasks.length) this.wmNews = true;
       this.markUnread();
       notifyTurnDone(this, m);
     }
@@ -3923,7 +4055,11 @@ function refreshMenu() {
 
 /** Opens above the anchor (the composer sits at the bottom of a cell), or below when there is no room. */
 function positionMenu() {
-  const r = menuState.anchor.getBoundingClientRect();
+  // A header button kept under "…" is display:none; its own menu (AFK, VS Code) opens at the "…" button.
+  let anchor = menuState.anchor;
+  const head = anchor.closest('.cell-head');
+  if (!anchor.getClientRects().length && head) anchor = head.querySelector('.act-more') || anchor;
+  const r = anchor.getBoundingClientRect();
   const width = menu.offsetWidth;
   const height = menu.offsetHeight;
   const left = Math.max(8, Math.min(r.left, window.innerWidth - width - 8));
@@ -3972,6 +4108,8 @@ const projectKey = path => normPath(path).toLowerCase();
  * and the Ctrl+1..9 keys show sessions grouped by project, projects in the order first opened.
  */
 function addCell(opts, { restore = false, batch = false, background = false } = {}) {
+  // A new cell starts at the eye button's level picked in Settings; a restored one keeps its own.
+  if (!restore && opts.detail == null) opts = { ...opts, detail: app.settings.defaultDetail };
   const cell = new Cell(opts);
   placeCell(cell);
   // A batch (the restore at startup) lays the board out once, when it is done.
@@ -4987,16 +5125,24 @@ function resetText(ms) {
   return `Resets in ${untilText(ms)} · ${sameDay ? time : `${d.toLocaleDateString([], { weekday: 'short' })} ${time}`}`;
 }
 
+/** The limit the usage button shows: the 5-hour window, or the weekly one on plans with no 5-hour limit (20x, Ultra). */
+function primaryUsageRow() {
+  const rows = (usage.data && usage.data.rows) || [];
+  return rows.find(r => r.key === 'five_hour') || rows.find(r => r.key === 'seven_day') || null;
+}
+
 function renderUsage() {
-  const five = usage.data && usage.data.rows.find(r => r.key === 'five_hour');
+  const main = primaryUsageRow();
+  const weeklyOnly = !!main && main.key === 'seven_day';
   const text = usagePill.querySelector('.usage-text');
-  usagePill.classList.toggle('empty', !five);
+  usagePill.classList.toggle('empty', !main);
   usagePill.classList.toggle('loading', !!usage.loading);
-  if (five) {
+  if (main) {
     // A window that has already reset shows 0% until the next refresh brings the new numbers.
-    const expired = five.resetsAt && five.resetsAt < Date.now();
-    const percent = expired ? 0 : five.percent;
-    text.textContent = expired || !five.resetsAt ? `${percent}%` : `${percent}% · ${untilText(five.resetsAt)}`;
+    const expired = main.resetsAt && main.resetsAt < Date.now();
+    const percent = expired ? 0 : main.percent;
+    const label = weeklyOnly ? `Week ${percent}%` : `${percent}%`;
+    text.textContent = expired || !main.resetsAt ? label : `${label} · ${untilText(main.resetsAt)}`;
     usagePill.style.background = heatCss(percent);
     usagePill.style.color = heatText(percent);
   } else {
@@ -5007,7 +5153,7 @@ function renderUsage() {
   // The weekly limit as a thin bar along the bottom, on the pill's colour scale.
   const week = usage.data && usage.data.rows.find(r => r.key === 'seven_day');
   const weekBar = usagePill.querySelector('.usage-week');
-  const showWeek = !!(five && week && app.settings.weeklyBar);
+  const showWeek = !!(main && !weeklyOnly && week && app.settings.weeklyBar);
   weekBar.classList.toggle('hidden', !showWeek);
   if (showWeek) {
     const percent = week.resetsAt && week.resetsAt < Date.now() ? 0 : week.percent;
@@ -5015,7 +5161,7 @@ function renderUsage() {
     weekBar.firstElementChild.style.backgroundColor = heatCss(percent);
     usagePill.title = `Plan usage · weekly ${percent}%`;
   } else {
-    usagePill.title = 'Plan usage';
+    usagePill.title = weeklyOnly ? 'Plan usage · weekly limit (this plan has no 5-hour limit)' : 'Plan usage';
   }
   if (!usagePop.classList.contains('hidden')) renderUsagePop();
 }
@@ -5080,10 +5226,10 @@ usagePill.addEventListener('blur', hideUsagePop);
 usagePop.addEventListener('mouseenter', () => clearTimeout(usageHideTimer));
 usagePop.addEventListener('mouseleave', hideUsagePop);
 usagePill.addEventListener('click', () => refreshUsage());
-// Keeps the countdown current, and fetches fresh numbers once the 5-hour window resets.
+// Keeps the countdown current, and fetches fresh numbers once the shown window resets.
 setInterval(() => {
-  const five = usage.data && usage.data.rows.find(r => r.key === 'five_hour');
-  if (five && five.resetsAt && five.resetsAt < Date.now() && Date.now() - usage.fetchedAt > 60000) refreshUsage();
+  const main = primaryUsageRow();
+  if (main && main.resetsAt && main.resetsAt < Date.now() && Date.now() - usage.fetchedAt > 60000) refreshUsage();
   else renderUsage();
 }, 30000);
 
@@ -5350,6 +5496,11 @@ const CUSTOM_COLORS = [['--accent', 'Accent'], ['--link', 'Links'], ['--claude',
 // The cell header's buttons that can be hidden: [class, label].
 const HEAD_BUTTONS = [['act-afk', 'AFK'], ['act-handoff', 'Handoff'], ['act-detail', 'Detail level'], ['act-progress', 'Progress'], ['act-waiting', 'Waiting mode'], ['act-code', 'VS Code'],
   ['act-terminal', 'Terminal'], ['act-reveal', FILE_MANAGER], ['act-collapse', 'Collapse'], ['act-max', 'Maximize'], ['act-close', 'Close']];
+const DEFAULT_PINNED = ['act-waiting', 'act-progress', 'act-collapse', 'act-close'];
+/** Buttons a collapsed cell hides (style.css, .cell.collapsed); its "…" menu leaves them out too. */
+const COLLAPSED_HIDES = ['act-detail', 'act-handoff', 'act-progress', 'act-waiting', 'act-code', 'act-reveal', 'act-max'];
+/** The header's window buttons: "…" sits just before the first of them. */
+const WINDOW_BUTTONS = ['act-collapse', 'act-max', 'act-close'];
 const HEX = /^#[0-9a-f]{6}$/i;
 const DEFAULT_MAX_AGENTS = 2;
 const MAX_AGENTS_CAP = 50;
@@ -5376,9 +5527,15 @@ function sanitizeSettings(x) {
     codexPath: typeof v.codexPath === 'string' ? v.codexPath.trim().slice(0, 500) : '',
     autoCopy: v.autoCopy !== false,
     weeklyBar: v.weeklyBar !== false,
+    // The eye button's level new sessions start at: 1 everything, 2 no tool calls, 3 replies only.
+    defaultDetail: [1, 2, 3].includes(v.defaultDetail) ? v.defaultDetail : 2,
     // How the header buttons show: always, fading in as the pointer nears, or only while the header is hovered.
     buttonReveal: ['always', 'near', 'hover'].includes(v.buttonReveal) ? v.buttonReveal : v.fadeButtons === true ? 'near' : 'always',
-    hiddenButtons: Array.isArray(v.hiddenButtons) ? HEAD_BUTTONS.map(([b]) => b).filter(b => v.hiddenButtons.includes(b)) : [],
+    // The buttons shown in the header; the rest live in its "…" menu.
+    pinnedButtons: HEAD_BUTTONS.map(([b]) => b).filter(b => (Array.isArray(v.pinnedButtons) ? v.pinnedButtons : DEFAULT_PINNED).includes(b)),
+    // The header buttons' order, dragged into place in any cell and shared by all; unknown names dropped, new buttons appended.
+    buttonOrder: [...new Set([...(Array.isArray(v.buttonOrder) ? v.buttonOrder : []), ...HEAD_BUTTONS.map(([b]) => b)])]
+      .filter(b => HEAD_BUTTONS.some(([k]) => k === b)),
     colors,
     mcp: v.mcp !== false, // HQ's MCP server for new sessions (mcp.js)
     mcpSpawn: v.mcpSpawn !== false, // agents may start sessions
@@ -5404,7 +5561,7 @@ function applySettings() {
 /** Theme, custom colours, hidden header buttons and the fade. Cheap, so a colour picker can call it while it is dragged. */
 function applyAppearance() {
   const root = document.documentElement;
-  const { theme, colors, hiddenButtons, buttonReveal } = app.settings;
+  const { theme, colors, pinnedButtons, buttonOrder, buttonReveal } = app.settings;
   if (theme === 'auto') delete root.dataset.theme;
   else root.dataset.theme = theme;
   const custom = colors[activeTheme()] || {};
@@ -5417,13 +5574,109 @@ function applyAppearance() {
   else root.style.removeProperty('--accent-hover');
   let style = document.getElementById('appearance-style');
   if (!style) style = document.head.appendChild(h('style', { id: 'appearance-style' }));
-  style.textContent = hiddenButtons.map(b => `.cell-head > .${b} { display: none; }`).join('\n');
+  // CSS order places the buttons, so every cell follows a drag or a pin without touching its DOM.
+  // Buttons take odd places; "…" takes the even one before the first window button.
+  const shown = buttonOrder.filter(b => pinnedButtons.includes(b));
+  const firstWindow = shown.findIndex(b => WINDOW_BUTTONS.includes(b));
+  style.textContent = [...buttonOrder.filter(b => !pinnedButtons.includes(b)).map(b => `.cell-head > .${b} { display: none; }`),
+    ...shown.map((b, i) => `.cell-head > .${b} { order: ${2 * i + 1}; }`),
+    `.cell-head > .act-more { order: ${2 * (firstWindow < 0 ? shown.length : firstWindow)}; }`].join('\n');
   document.body.classList.toggle('fade-buttons', buttonReveal === 'near');
   document.body.classList.toggle('hover-buttons', buttonReveal === 'hover');
   if (buttonReveal !== 'near') clearButtonFade();
   renderUsage();
 }
 lightQuery.addEventListener('change', () => { if (app.settings.theme === 'auto') { applyAppearance(); if (!settingsPanel.classList.contains('hidden')) renderSettings(); } });
+
+/**
+ * Lets a header button be dragged along the header to a new place. The order is a setting, so
+ * the move shows in every cell at once (applyAppearance turns it into CSS order).
+ */
+function wireButtonDrag(head) {
+  const TYPE = 'application/x-hq-button';
+  const nameOf = btn => HEAD_BUTTONS.map(([b]) => b).find(b => btn.classList.contains(b));
+  let marked = null;
+  const unmark = () => { if (marked) marked.classList.remove('drop-before', 'drop-after', 'drop-into'); marked = null; };
+  // The button under the pointer, and whether the drop lands after it (its right half).
+  const spot = e => {
+    const btn = e.target.closest && e.target.closest('.cell-head > .icon-btn');
+    if (btn && btn.classList.contains('act-more')) return { btn, more: true };
+    if (!btn || !nameOf(btn)) return null;
+    const r = btn.getBoundingClientRect();
+    return { btn, after: e.clientX > r.left + r.width / 2 };
+  };
+  for (const [b] of HEAD_BUTTONS) {
+    const btn = head.querySelector(`:scope > .${b}`);
+    if (!btn) continue;
+    btn.draggable = true;
+    btn.addEventListener('dragstart', e => {
+      e.dataTransfer.setData(TYPE, b);
+      e.dataTransfer.effectAllowed = 'move';
+    });
+    btn.addEventListener('dragend', unmark);
+  }
+  head.addEventListener('dragover', e => {
+    if (!e.dataTransfer.types.includes(TYPE)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const s = spot(e);
+    if (!s) return;
+    if (marked !== s.btn) unmark();
+    marked = s.btn;
+    s.btn.classList.toggle('drop-before', !s.more && !s.after);
+    s.btn.classList.toggle('drop-after', !s.more && s.after);
+    s.btn.classList.toggle('drop-into', !!s.more);
+  });
+  head.addEventListener('dragleave', e => { if (!head.contains(e.relatedTarget)) unmark(); });
+  head.addEventListener('drop', e => {
+    const moved = e.dataTransfer.getData(TYPE);
+    const s = spot(e);
+    unmark();
+    // The data can come from outside HQ, and the name ends up in a CSS rule: only a known button may move.
+    if (!moved || !s || !HEAD_BUTTONS.some(([k]) => k === moved)) return;
+    e.preventDefault();
+    if (s.more) { changeSetting('pinnedButtons', app.settings.pinnedButtons.filter(b => b !== moved)); return; } // onto "…": put away
+    const target = nameOf(s.btn);
+    if (target === moved) return;
+    const order = app.settings.buttonOrder.filter(b => b !== moved);
+    order.splice(order.indexOf(target) + (s.after ? 1 : 0), 0, moved);
+    changeSetting('buttonOrder', order);
+  });
+}
+
+/** The header's "…" menu: every button that is not pinned to the header, in the dragged order. */
+function buildMoreMenu(menuEl, cell) {
+  const more = menuState.anchor;
+  const { pinnedButtons, buttonOrder } = app.settings;
+  const items = buttonOrder.filter(b => !pinnedButtons.includes(b) && !(cell.collapsed && COLLAPSED_HIDES.includes(b))).map(b => {
+    const btn = cell.el.querySelector(`.cell-head > .${b}`);
+    const label = (HEAD_BUTTONS.find(([k]) => k === b) || [])[1] || b;
+    const confirm = btn.classList.contains('confirm'); // Close on a busy cell asks for a second click
+    const glyph = btn.firstElementChild ? btn.firstElementChild.cloneNode(true) : icon('circle-small');
+    const pin = h('button', { class: 'icon-btn more-pin', title: `Pin ${label} to the header (all sessions)` }, icon('pin'));
+    pin.addEventListener('click', e => {
+      e.stopPropagation();
+      changeSetting('pinnedButtons', [...pinnedButtons, b]);
+      refreshMenu();
+    });
+    const item = h('div', { class: `menu-item more-item${btn.classList.contains('on') ? ' on' : ''}`, role: 'menuitem', tabindex: '0' },
+      h('span', { class: 'more-glyph' }, glyph),
+      h('span', { class: 'menu-main' }, h('span', { class: 'name', text: label }),
+        confirm ? h('span', { class: 'desc error', text: btn.title }) : null),
+      pin);
+    const run = () => {
+      btn.click(); // the hidden button keeps every handler, so the menu runs exactly what the header would
+      if (menuState.anchor !== more) return; // it opened a menu of its own (AFK, VS Code), or closed the cell
+      if (btn.classList.contains('confirm')) refreshMenu();
+      else closeMenu();
+    };
+    item.addEventListener('click', run);
+    item.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); run(); } });
+    return item;
+  });
+  menuEl.append(h('div', { class: 'menu-title', text: 'More' }),
+    ...(items.length ? items : [h('div', { class: 'menu-empty', text: 'Every button is pinned to the header.' })]));
+}
 
 function changeSetting(key, value) {
   app.settings = { ...app.settings, [key]: value };
@@ -5590,11 +5843,11 @@ function renderAppearanceSettings(row, toggle, select) {
   };
   const resetAll = h('button', { class: 'link-btn', text: 'Reset all', disabled: !Object.keys(custom).length });
   resetAll.addEventListener('click', () => { changeSetting('colors', Object.fromEntries(Object.entries(app.settings.colors).filter(([t]) => t !== theme))); renderSettings(); });
-  const buttons = h('div', { class: 'button-checks' }, HEAD_BUTTONS.map(([cls, label]) => {
+  const buttons = h('div', { class: 'button-checks' }, app.settings.buttonOrder.map(b => HEAD_BUTTONS.find(([k]) => k === b)).map(([cls, label]) => {
     const box = h('input', { type: 'checkbox' });
-    box.checked = !app.settings.hiddenButtons.includes(cls);
-    box.addEventListener('change', () => changeSetting('hiddenButtons',
-      box.checked ? app.settings.hiddenButtons.filter(b => b !== cls) : [...app.settings.hiddenButtons, cls]));
+    box.checked = app.settings.pinnedButtons.includes(cls);
+    box.addEventListener('change', () => changeSetting('pinnedButtons',
+      box.checked ? [...app.settings.pinnedButtons, cls] : app.settings.pinnedButtons.filter(b => b !== cls)));
     return h('label', null, box, label);
   }));
   const themeName = (THEMES.find(([t]) => t === theme) || [])[1] || theme;
@@ -5609,11 +5862,14 @@ function renderAppearanceSettings(row, toggle, select) {
     h('div', { class: 'settings-section', text: 'Top bar' }),
     row('Weekly usage bar', 'A thin bar along the bottom of the usage button showing the weekly limit.', toggle(app.settings.weeklyBar, v => changeSetting('weeklyBar', v))),
     h('div', { class: 'settings-section', text: 'Sessions' }),
-    row('Copy on select', 'Selecting text in a chat copies it, as in a terminal.', toggle(app.settings.autoCopy, v => changeSetting('autoCopy', v))),
+    row('Show in new sessions', 'How much of the chat a new session shows. The eye button on a session still changes it for that session.',
+      select(String(app.settings.defaultDetail), [['1', 'Everything (replies, thinking, narration, tools)'], ['2', 'Replies, thinking and narration'], ['3', 'Replies only']],
+        v => { changeSetting('defaultDetail', Number(v)); for (const c of app.cells) c.applyDetail(); })),
+    row('Copy on select','Selecting text in a chat copies it, as in a terminal.', toggle(app.settings.autoCopy, v => changeSetting('autoCopy', v))),
     row('Header buttons show', 'Fade in: faint until the pointer comes near. On hover: hidden until the pointer is over the header.',
       select(app.settings.buttonReveal, [['always', 'Always'], ['near', 'Fade in near the pointer'], ['hover', 'Only on hover']], v => changeSetting('buttonReveal', v))),
     h('div', { class: 'setting column' }, h('div', { class: 'setting-main' }, h('span', { class: 'name', text: 'Header buttons' }),
-      h('span', { class: 'desc', text: 'Unticked buttons are hidden; their shortcuts still work.' })), buttons),
+      h('span', { class: 'desc', text: 'Ticked buttons sit in the header; the rest are under its "…" button. Drag a header button to move it, or onto "…" to put it away.' })), buttons),
   ];
 }
 
@@ -5960,7 +6216,7 @@ function flushState() {
       aiTitle: c.aiTitle || undefined,
       customTitle: c.customTitle || undefined,
       renamePending: c.renamePending || undefined,
-      detail: c.detail === 2 ? undefined : c.detail, // 2 (no tool calls) is the default
+      detail: c.detail, // saved always: a missing level restores as 2, whatever the default for new sessions is now
       progress: c.progressView || undefined,
       fork: c.fork || undefined,
       collapsed: c.collapsed || undefined,

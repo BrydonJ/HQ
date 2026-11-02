@@ -208,6 +208,25 @@ function mcpSend(cell, text) {
   cell.submit(text);
 }
 
+/**
+ * A message HQ passed to a session for an agent (spawn_session, send_message, schedule_message),
+ * drawn in the chat with who sent it, so the user sees what one agent asked another.
+ */
+function isMcpMessage(text) {
+  // AFK and the task-list hint share the "(HQ:" start but are HQ's own, not an agent's.
+  return text.startsWith(MCP_PREFIX) && !text.startsWith(AFK_PREFIX) && !text.startsWith(TASK_HINT_PREFIX);
+}
+
+function mcpBubble(text, ms) {
+  const m = /^\(HQ: ([\s\S]*?)\)\n\n([\s\S]*)$/.exec(text);
+  const head = m ? m[1] : '';
+  const who = /session "[^"\n]*" \([^)\n]*\)|session \S+(?= scheduled)|an agent outside HQ|you scheduled earlier/.exec(head);
+  const bubble = userBubble(m ? m[2] : text, [], ms);
+  bubble.classList.add('hq-msg');
+  bubble.querySelector('.bubble').prepend(h('span', { class: 'remote-tag', text: who ? `Via HQ · ${who[0]}` : 'Via HQ', title: head }));
+  return bubble;
+}
+
 /** Called by the cell when a turn ends or its process stops. */
 function mcpTurnEnded(cell) {
   cell.mcpExpect = false;
