@@ -35,6 +35,8 @@ function cloudDecorate(cell) {
   cell.modeSel.replaceChildren(h('option', { value: 'bypassPermissions', text: 'Runs without asking (cloud sandbox)' }));
   cell.permissionMode = 'bypassPermissions';
   cell.modeSel.disabled = true;
+  for (const sel of ['.act-terminal', '.act-reveal']) el.querySelector(sel).classList.add('hidden'); // no folder of yours
+  cell.codeBtn.classList.add('hidden');
   cell.mcpBtn.classList.add('hidden');
   cell.taskBtn.classList.add('hidden'); // the cloud agent has no task-list tools
   cell.input.placeholder = 'Ask the cloud agent…  (Enter to send, Shift+Enter for new line)';
