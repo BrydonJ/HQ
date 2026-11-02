@@ -5221,7 +5221,7 @@ function renderUsagePop() {
       usedPct != null ? h('div', { class: 'usage-bar' }, h('span', { style: `width:${Math.max(0, Math.min(100, usedPct))}%;background:${heatCss(usedPct)}` })) : null,
       c.resetsAt ? h('div', { class: 'usage-reset', text: c.resetsAt < Date.now() ? 'Reset' : resetText(c.resetsAt) }) : null));
   }
-  {
+  if (app.apiKeyHint || apiSpent > 0 || app.settings.apiCreditLeft != null || app.settings.apiCreditExpires) {
     const left = app.settings.apiCreditLeft;
     const expires = app.settings.apiCreditExpires ? new Date(`${app.settings.apiCreditExpires}T23:59:59Z`).getTime() : null;
     const days = expires ? Math.ceil((expires - Date.now()) / 86400000) : null;
@@ -5231,7 +5231,7 @@ function renderUsagePop() {
       h('div', { class: 'usage-line' }, h('span', { text: 'Balance' }),
         h('span', { class: 'usage-pct', text: left == null ? 'not set' : formatCost(left) })),
       h('div', { class: 'usage-reset', text: expires == null ? 'Expiry not set' : gone ? `Expired ${app.settings.apiCreditExpires}` : `Expires ${app.settings.apiCreditExpires} (${days} day${days === 1 ? '' : 's'})` }),
-      left == null && expires == null ? h('div', { class: 'usage-reset', text: 'Type them in at Settings > API key: the Console has no balance API.' }) : null,
+      left == null && expires == null ? h('div', { class: 'usage-reset', text: 'Type them in under Settings > Sessions: the Console has no balance API.' }) : null,
       apiSpent > 0 ? h('div', { class: 'usage-reset', text: `${formatCost(apiSpent)} spent in this HQ run, as Claude Code reports it.` }) : null));
   }
   if (usage.error) parts.push(h('div', { class: 'usage-note error', text: usage.error }));
