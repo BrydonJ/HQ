@@ -178,3 +178,101 @@
 .wv-loader svg .xeno-heart{animation:v3-crystal-heart var(--v3-d-2-4) ease-in-out infinite}
 @keyframes v3-crystal-heart{0%,100%{transform:scale(.35);opacity:.2}55%{transform:scale(1.14);opacity:1}}
 
+
+/* v4 space loaders: transform, opacity and stroke-dashoffset only. */
+.wv-loader svg .n-vb{transform-box:view-box;transform-origin:50% 50%}
+.wv-loader svg .n-fb{transform-box:fill-box;transform-origin:center}
+@keyframes n-spin{to{transform:rotate(360deg)}}
+@keyframes n-throb{0%,100%{transform:scale(.8);opacity:.7}50%{transform:scale(1.15);opacity:1}}
+@keyframes n-breathe{0%,100%{transform:scale(.92)}50%{transform:scale(1.08)}}
+@keyframes n-blink{0%,100%{opacity:.25}50%{opacity:1}}
+.wv-loader svg .n-throb{animation:n-throb 1.4s ease-in-out infinite}
+.wv-loader svg .n-blink{animation:n-blink 1.1s ease-in-out infinite}
+/* Pulsar Beacon */
+.wv-loader svg .n-pulsar{animation:n-spin 1.4s linear infinite}
+.wv-loader svg .n-pulsar-core{animation:n-throb .7s ease-in-out infinite}
+/* Einstein Ring */
+.wv-loader svg .n-lens-a{animation:n-spin 2.6s linear infinite}
+.wv-loader svg .n-lens-b{animation:n-spin 1.9s linear infinite reverse}
+/* Solar Flare */
+.wv-loader svg .n-flare{stroke-dasharray:42;animation:n-flare 2.4s ease-in-out infinite}
+.wv-loader svg .n-flare-2{animation-delay:-.8s}
+.wv-loader svg .n-glow{animation:n-breathe 2.4s ease-in-out infinite}
+@keyframes n-flare{0%{stroke-dashoffset:42}50%{stroke-dashoffset:0}100%{stroke-dashoffset:-42}}
+/* Docking Sequence */
+.wv-loader svg .n-dock{animation:n-dock 2.8s cubic-bezier(.45,0,.25,1) infinite}
+.wv-loader svg .n-dock-light{animation:n-dock-light 2.8s ease-in-out infinite}
+@keyframes n-dock{0%,100%{transform:translateX(-6px)}45%,72%{transform:translateX(2px)}}
+@keyframes n-dock-light{0%,42%,78%,100%{opacity:.2}50%,70%{opacity:1}}
+/* Ring Station */
+.wv-loader svg .n-station{animation:n-spin 6s linear infinite}
+/* Tethered Astronaut */
+.wv-loader svg .n-tether{transform-box:view-box;transform-origin:6px 8px;animation:n-pend 3.2s ease-in-out infinite}
+@keyframes n-pend{0%,100%{transform:rotate(-9deg)}50%{transform:rotate(7deg)}}
+/* Lagrange Points */
+.wv-loader svg .n-lframe{animation:n-spin 9s linear infinite}
+.wv-loader svg .n-lp{animation:n-lp 1.5s ease-in-out infinite}
+@keyframes n-lp{0%,100%{transform:scale(.6);opacity:.2}50%{transform:scale(1.5);opacity:1}}
+/* Ion Drive */
+.wv-loader svg .n-ion{animation:n-ion 1.2s ease-out infinite}
+.wv-loader svg .n-hover{animation:n-hover 2.4s ease-in-out infinite}
+@keyframes n-ion{0%{transform:translateX(0) scale(.5);opacity:0}15%{opacity:1}100%{transform:translateX(-17px) scale(1.5,1.3);opacity:0}}
+@keyframes n-hover{0%,100%{transform:translateY(-1px)}50%{transform:translateY(1px)}}
+/* Parallax Starfield */
+.wv-loader svg .n-par{animation:n-par 4.8s linear infinite}
+.wv-loader svg .n-par-mid{animation-duration:2.6s}
+.wv-loader svg .n-par-near{animation-duration:1.3s}
+@keyframes n-par{to{transform:translateX(-40px)}}
+/* Polar Aurora */
+.wv-loader svg .n-aur{transform-box:fill-box;transform-origin:50% 100%;animation:n-aur 2s ease-in-out infinite}
+@keyframes n-aur{0%,100%{transform:scaleY(.55) skewX(-6deg);opacity:.35}50%{transform:scaleY(1) skewX(6deg);opacity:.95}}
+/* Quasar Jets */
+.wv-loader svg .n-jet-up{transform-box:fill-box;transform-origin:50% 100%;animation:n-jet .9s ease-in-out infinite alternate}
+.wv-loader svg .n-jet-dn{transform-box:fill-box;transform-origin:50% 0;animation:n-jet .9s ease-in-out infinite alternate;animation-delay:-.45s}
+.wv-loader svg .n-qflow{stroke-dasharray:3 3;animation:n-qflow .8s linear infinite}
+@keyframes n-jet{from{transform:scaleY(.4);opacity:.4}to{transform:scaleY(1);opacity:1}}
+@keyframes n-qflow{to{stroke-dashoffset:-6}}
+/* Solar Sail */
+.wv-loader svg .n-sail{animation:n-sail 3.2s ease-in-out infinite}
+.wv-loader svg .n-photon{animation:n-photon 1.6s ease-in infinite}
+@keyframes n-sail{0%,100%{transform:perspective(100px) rotateY(-40deg)}50%{transform:perspective(100px) rotateY(40deg)}}
+@keyframes n-photon{0%{transform:translate(-12px,-12px);opacity:0}25%{opacity:1}85%{transform:translate(0,0);opacity:1}100%{transform:translate(0,0) scale(2);opacity:0}}
+/* Galaxy Merger */
+.wv-loader svg .n-merge-l{animation:n-merge-l 3s cubic-bezier(.5,0,.6,1) infinite}
+.wv-loader svg .n-merge-r{animation:n-merge-r 3s cubic-bezier(.5,0,.6,1) infinite}
+.wv-loader svg .n-swirl{animation:n-spin 1.6s linear infinite}
+.wv-loader svg .n-merge-core{animation:n-merge-core 3s ease-out infinite}
+@keyframes n-merge-l{0%{transform:scale(1) translate(-2px,-6px);opacity:0}12%{opacity:1}58%{transform:scale(.5) translate(12px,0);opacity:1}68%,100%{transform:scale(.3) translate(12px,0);opacity:0}}
+@keyframes n-merge-r{0%{transform:scale(1) translate(2px,6px);opacity:0}12%{opacity:1}58%{transform:scale(.5) translate(-12px,0);opacity:1}68%,100%{transform:scale(.3) translate(-12px,0);opacity:0}}
+@keyframes n-merge-core{0%,55%{transform:scale(.2);opacity:0}68%{transform:scale(1.2);opacity:1}100%{transform:scale(1.7);opacity:0}}
+/* Lunar Rotation */
+.wv-loader svg .n-craters{animation:n-craters 6s linear infinite}
+@keyframes n-craters{to{transform:translateX(28px)}}
+/* Deep Space Network */
+.wv-loader svg .n-dsn{transform-box:view-box;transform-origin:18px 24px;animation:n-dsn 3.4s ease-in-out infinite}
+.wv-loader svg .n-inbound{animation:n-inbound 1.5s ease-out infinite}
+@keyframes n-dsn{0%,100%{transform:rotate(-8deg)}50%{transform:rotate(6deg)}}
+@keyframes n-inbound{0%{transform:translate(5px,-5px);opacity:0}40%{opacity:1}100%{transform:translate(-5px,5px);opacity:0}}
+/* Exoplanet Transit */
+.wv-loader svg .n-tplanet{animation:n-tplanet 3s linear infinite}
+.wv-loader svg .n-tstar{animation:n-tstar 3s ease-in-out infinite}
+.wv-loader svg .n-curve{stroke-dasharray:38;animation:n-curve 3s linear infinite}
+@keyframes n-tplanet{from{transform:translateX(-17px)}to{transform:translateX(17px)}}
+@keyframes n-tstar{0%,20%,80%,100%{opacity:1}28%,72%{opacity:.62}}
+@keyframes n-curve{0%{stroke-dashoffset:38;opacity:1}94%{stroke-dashoffset:0;opacity:1}100%{stroke-dashoffset:0;opacity:0}}
+/* Cosmic Ray Tracks */
+.wv-loader svg .n-ray{stroke-dasharray:35;animation:n-ray 2.1s ease-out infinite}
+.wv-loader svg .n-hit{animation:n-hit 2.1s ease-out infinite}
+@keyframes n-ray{0%{stroke-dashoffset:35;opacity:1}35%,70%{stroke-dashoffset:0;opacity:1}100%{stroke-dashoffset:0;opacity:0}}
+@keyframes n-hit{0%,30%{transform:scale(.3);opacity:0}38%{transform:scale(1.6);opacity:1}70%{transform:scale(1);opacity:.8}100%{transform:scale(1);opacity:0}}
+/* Dyson Swarm */
+.wv-loader svg .n-orb{animation:n-spin 2.2s linear infinite}
+/* Gravity Well */
+.wv-loader svg .n-well{transform-box:fill-box;transform-origin:50% 0;animation:n-well 2.4s ease-in-out infinite}
+.wv-loader svg .n-sink{animation:n-sink 2.4s ease-in-out infinite}
+@keyframes n-well{0%,100%{transform:scaleY(.82)}50%{transform:scaleY(1.08)}}
+@keyframes n-sink{0%,100%{transform:translateY(-1px)}50%{transform:translateY(3px)}}
+/* Panel Deploy */
+.wv-loader svg .n-panel-l{transform-box:fill-box;transform-origin:100% 50%;animation:n-panel 3s ease-in-out infinite}
+.wv-loader svg .n-panel-r{transform-box:fill-box;transform-origin:0 50%;animation:n-panel 3s ease-in-out infinite}
+@keyframes n-panel{0%,8%,100%{transform:scaleX(.08);opacity:.5}40%,72%{transform:scaleX(1);opacity:1}}
