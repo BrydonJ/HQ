@@ -25,6 +25,8 @@ tauri-plugin-notification = "2"
 tauri-plugin-updater = { version = "2", default-features = false, features = ["native-tls", "system-proxy"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Cloud cells (src/cloud.rs) talk to Anthropic's Managed Agents API. Already in the tree through the updater, with the system TLS.
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "native-tls"] }
 # Already in the tree through serde_json and tauri; used for fast byte searches in transcripts.
 memchr = "2"
 tauri-plugin-single-instance = "2"

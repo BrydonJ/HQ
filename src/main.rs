@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod cloud;
 #[cfg(feature = "codex")]
 mod codex;
 #[cfg(debug_assertions)]
@@ -28,7 +29,7 @@ use tauri_plugin_opener::OpenerExt;
 
 /// Every message on `on_event` is a JSON array of the session's stdout lines (as objects), and
 /// the last element of the last array is the `hq_exit` object. `backend` picks the agent:
-/// `claude` (the default) or, when built in, `codex` or `hermes`.
+/// `claude` (the default), `cloud` (Managed Agents, on the saved API key) or, when built in, `codex` or `hermes`.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn spawn_session(
@@ -57,6 +58,7 @@ async fn spawn_session(
         Some("codex") => codex::spawn(&app, opts, on_event),
         #[cfg(feature = "hermes")]
         Some("hermes") => hermes::spawn(&app, opts, on_event),
+        Some("cloud") => cloud::spawn(&app, opts, on_event),
         Some(other) => Err(format!("This build of HQ has no {other} support")),
     })
     .await
@@ -648,7 +650,7 @@ struct Profile(Option<String>);
 /// Async because finding Hermes can wait on the macOS login-shell PATH (see `macos::path`).
 #[tauri::command]
 async fn build_info(app: AppHandle, profile: State<'_, Profile>) -> Result<BuildInfo, String> {
-    let mut backends = vec!["claude"];
+    let mut backends = vec!["claude", "cloud"];
     #[cfg(feature = "codex")]
     backends.push("codex");
     // Hermes is offered only where it is installed, so no one without it sees it in the UI.

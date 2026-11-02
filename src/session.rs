@@ -51,7 +51,10 @@ const TASK_PROMPT: &str = "You are running inside HQ, a dashboard where the user
 pub struct Session {
     /// Feeds the thread that owns claude's stdin. Dropping the sender closes the pipe.
     input: Mutex<Option<mpsc::Sender<String>>>,
-    child: Arc<Mutex<Child>>,
+    /// None for a cloud session (cloud.rs), which runs no process here.
+    child: Option<Arc<Mutex<Child>>>,
+    /// Ends what a cloud session has open; run once, when the session is killed.
+    on_kill: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(windows)]
     _job: Option<job::Job>,
     /// The child leads a process group of its own (see `hide_console`); this is its ID.
@@ -372,7 +375,8 @@ impl Sessions {
         let child = Arc::new(Mutex::new(child));
         let session = Arc::new(Session {
             input: Mutex::new(input),
-            child: child.clone(),
+            child: Some(child.clone()),
+            on_kill: Mutex::new(None),
             #[cfg(windows)]
             _job: job,
             #[cfg(unix)]
@@ -382,7 +386,37 @@ impl Sessions {
 
         let tail = Arc::new(Mutex::new(VecDeque::<String>::new()));
         spawn_stderr_reader(stderr, tail.clone());
-        spawn_stdout_reader(app.clone(), id, stdout, child, tail, events);
+        spawn_stdout_reader(app.clone(), id, stdout, events, move || {
+            let code = wait_for_exit(&child);
+            let stderr: Vec<String> = tail.lock().unwrap().iter().cloned().collect();
+            (code, stderr)
+        });
+        id
+    }
+
+    /// Tracks a session that runs on Anthropic's servers rather than in a process here: `input`
+    /// and `stdout` are the translator's ends, as for `register`, and `on_kill` runs when the
+    /// session is closed. It ends when `stdout` does.
+    pub(crate) fn register_remote(
+        &self,
+        app: &AppHandle,
+        input: mpsc::Sender<String>,
+        stdout: impl Read + Send + 'static,
+        events: Channel<InvokeResponseBody>,
+        on_kill: impl FnOnce() + Send + 'static,
+    ) -> u64 {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+        let session = Arc::new(Session {
+            input: Mutex::new(Some(input)),
+            child: None,
+            on_kill: Mutex::new(Some(Box::new(on_kill))),
+            #[cfg(windows)]
+            _job: None,
+            #[cfg(unix)]
+            pgid: 0,
+        });
+        self.map.lock().unwrap().insert(id, session);
+        spawn_stdout_reader(app.clone(), id, stdout, events, || (Some(0), Vec::new()));
         id
     }
 
@@ -402,8 +436,12 @@ impl Sessions {
         let Some(session) = self.map.lock().unwrap().remove(&id) else { return };
         // Ends the writer thread, which closes claude's stdin.
         session.input.lock().unwrap().take();
+        if let Some(stop) = session.on_kill.lock().unwrap().take() {
+            stop();
+        }
+        let Some(child) = &session.child else { return };
         // The reader polls and never holds the child lock for long, so this does not wait.
-        let mut child = session.child.lock().unwrap();
+        let mut child = child.lock().unwrap();
         // Ends the shells and tools claude started too. Before the kill, under the lock the reaper
         // takes: while claude is unreaped its group ID cannot have been reused. (Already reaped, the
         // group is ended by `wait_for_exit`, and this repeat takes the same pid-wrap race it accepts.)
@@ -518,9 +556,9 @@ fn spawn_stdout_reader(
     app: AppHandle,
     id: u64,
     stdout: impl Read + Send + 'static,
-    child: Arc<Mutex<Child>>,
-    tail: Arc<Mutex<VecDeque<String>>>,
     events: Channel<InvokeResponseBody>,
+    // Run once stdout ends: waits for the process (if any) and returns its exit code and last stderr lines.
+    exit: impl FnOnce() -> (Option<i32>, Vec<String>) + Send + 'static,
 ) {
     let (tx, rx) = mpsc::channel::<Outgoing>();
     std::thread::spawn(move || run_batcher(rx, events));
@@ -540,8 +578,7 @@ fn spawn_stdout_reader(
                 }
             }
         }
-        let code = wait_for_exit(&child);
-        let stderr: Vec<String> = tail.lock().unwrap().iter().cloned().collect();
+        let (code, stderr) = exit();
         let _ = tx.send(Outgoing::Exit(json!({ "type": "hq_exit", "code": code, "stderr": stderr }).to_string()));
         app.state::<Sessions>().map.lock().unwrap().remove(&id);
         crate::mcp::release(id);
