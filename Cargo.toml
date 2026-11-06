@@ -5,10 +5,11 @@ description = "Lightweight grid of Claude Code chat sessions across any folders"
 edition = "2021"
 
 [features]
-default = ["hermes", "codex"]
+default = ["hermes"]
 # Hermes Agent cells (src/hermes.rs). Costs nothing at runtime until a Hermes cell starts.
 hermes = []
-# Codex cells (src/codex.rs). Costs nothing at runtime until a Codex cell starts.
+# Codex cells (src/codex.rs). Off by default since 2026-11-05: Codex support is ending. Without it
+# HQ refuses to start a Codex session and the UI offers none (`build_info` leaves it out).
 codex = []
 
 [build-dependencies]
@@ -24,12 +25,14 @@ tauri-plugin-notification = "2"
 # and macOS updates are .app.tar.gz, read with flate2 and tar, which the plugin always builds there.
 tauri-plugin-updater = { version = "2", default-features = false, features = ["native-tls", "system-proxy"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 # Cloud cells (src/cloud.rs) talk to Anthropic's Managed Agents API. Already in the tree through the updater, with the system TLS.
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "native-tls"] }
 # Already in the tree through serde_json and tauri; used for fast byte searches in transcripts.
 memchr = "2"
 tauri-plugin-single-instance = "2"
+# The session host's handshake (host.rs). Already in the tree through tauri's build.
+sha2 = "0.10"
 
 # Process-group kills: the Unix counterpart of the Windows job object (src/session.rs).
 [target.'cfg(unix)'.dependencies]

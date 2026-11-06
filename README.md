@@ -69,10 +69,17 @@ An installed copy of HQ updates itself:
 
 - It checks for a new release 20 seconds after it starts, then every 4 hours.
 - It downloads the new installer in the background and checks its signature.
-- It installs when nothing would be lost: no session is working or waiting on you, no draft
-  or unseen reply is left, and there has been no mouse or key input for 2 minutes (15 while
-  HQ is the active window). HQ then restarts with the same board. Sessions resume when you
-  next send them a message.
+- It installs when nothing would be lost: no draft or unseen reply is left, and there has been
+  no mouse or key input for 2 minutes (15 while HQ is the active window). HQ then restarts
+  with the same board.
+- Claude Code and Hermes sessions keep running through the restart: turns in flight, background
+  shells and servers, and HQ's MCP tools all carry on, and each cell reconnects to its session
+  when HQ is back. They run in the **session host**, a small background copy of HQ
+  (`~/.hq/bin/hq-session-host-*`) that the installer does not stop. It waits up to 30 minutes
+  for HQ to come back after an update and 15 after a crash, then ends its sessions. Quitting HQ
+  ends them at once. Its log is in `~/.hq/hosts/host.log`; set `HQ_NO_HOST=1` to run sessions
+  inside HQ as before. Codex and cloud sessions still stop, so HQ waits while one of those is
+  working, and resumes it when it next gets a message.
 - Until then, an **Update** button in the top bar installs it at once. If you close HQ
   first, the update installs as HQ closes.
 
@@ -139,7 +146,8 @@ What differs from Windows:
   `claude`, `codex` and `hermes` are found from there; Settings still lets you point to the
   first two.
 - Closing a cell (or quitting HQ) ends its `claude` and everything it started, through a
-  process group in place of the Windows job object. If HQ itself is killed, they are not ended.
+  process group in place of the Windows job object. The session host (see updates) gets its own
+  session, so a Terminal closing does not end it.
 - The dev copy has no DevTools port. Use Safari's Develop menu to inspect it.
 
 Build on a Mac with `./build-mac.sh` (universal build, output under
@@ -287,8 +295,8 @@ the repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the contents of the updater 
   - Pulsing amber glow: Claude is waiting on you (a permission, a question or a plan).
   - Green glow: the session finished while you were looking elsewhere.
   - Spinner badge with a count, and a hollow status dot: background agents or shells that
-    Claude started are still running. Hover the badge to see them. Closing the cell, or an
-    update restart, would stop them, so HQ treats the cell as busy until they finish.
+    Claude started are still running. Hover the badge to see them. Closing the cell would stop
+    them; an update restart does not (see the session host, above).
   - The top bar shows the totals. The taskbar button flashes when HQ is in the background.
 - **Session names:** the cell header shows the session's name after the project name.
   - Claude names a new session a few seconds after its first prompt, as the VS Code extension
@@ -416,6 +424,25 @@ the repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the contents of the updater 
     that session waiting for you even while the rest of HQ is AFK.
   - AFK, and what was done while it lasted, is kept in the board, so a restart (or an update)
     loses neither.
+- **Approval reviewer:** off by default, and for Claude and Hermes sessions only (on Hermes it
+  only reviews plain file edits that give a full path; everything else stays with you). Turn it on for one
+  session with **Review approvals** in its **More** menu, or tick **Review approvals while away**
+  in the AFK menu, which lasts as long as that AFK and skips sessions set to **Never AFK** and
+  sessions an agent started. It can only be set here: not from the command line, and not by an agent.
+  - A permission card you leave for a minute counts down ("Reviewing in 0:42"), then goes to a
+    separate Claude call (Haiku, with no tools, using your Claude login, so it counts towards your
+    plan). Answer the card yourself at any time and the review is dropped.
+  - The reviewer can only approve or leave the card for you; it never refuses. An approval answers
+    **Yes** for that one request, never for the whole session, and shows in the chat. If it leaves
+    the card, the chat says why and HQ asks for your attention again. While AFK, the card is then
+    deferred as usual, and approvals are listed in the **While you were away** card.
+  - It judges the raw command, not the agent's description of it. Some requests always stay with
+    you without asking the model: pushes and other outward-facing commands, recursive deletes,
+    `sudo`, MCP tools and web fetches, anything naming a credential file, anything touching git
+    config or files such as `.claude`, `.git`, `.husky` or `CLAUDE.md` (where an approval could
+    outlast the one request), and any path outside the session's folder. Any error or timeout also
+    leaves the card with you, and so does starting to type in the card.
+  - Questions and plans are never reviewed, and an edit over 200 lines stays with you.
 - Keys:
   - Esc: stop the focused session. If Claude has not stopped 10 seconds later, the chat offers
     **Force stop**, which ends the process; the session resumes when you next send a message.
@@ -472,6 +499,10 @@ a Claude plan). Pick **Cloud** in the new-session switch before choosing a folde
   session cannot be resumed in HQ afterwards.
 
 ### Codex cells
+
+Codex is switched off in HQ's builds since 2026-11-05, because its support is ending: the picker
+offers no Codex, and HQ refuses to start a Codex session. What follows applies only to a copy
+built with `--features codex`.
 
 A cell can run [Codex](https://developers.openai.com/codex) (OpenAI's coding agent) instead of
 Claude Code. Pick **Codex** in the switch at the top of the new-session picker; the switch stays
@@ -604,7 +635,7 @@ src/store.rs     board.json persistence, transcript loading (newest part, backwa
                  session list, search inside transcripts, VS Code and workspace lookup
 src/codex.rs     Codex cells: runs `codex app-server` and translates it to and from the stream-json
                  lines the UI speaks; a shared helper reads history, sessions and models; runs
-                 `codex update`. Built with the `codex` Cargo feature (on by default)
+                 `codex update`. Built only with the `codex` Cargo feature (off by default)
 src/hermes.rs    Hermes cells: runs `hermes acp` and translates ACP to and from the stream-json
                  lines the UI speaks; HQ's copy of each Hermes conversation. Built with the
                  `hermes` Cargo feature (on by default; `--no-default-features` leaves it out)

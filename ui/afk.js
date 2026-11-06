@@ -17,6 +17,9 @@
 // Each thing HQ did is noted in the chat, and listed in a card once the session is no longer AFK.
 // Every agent's prompts arrive as Claude's can_use_tool (codex.rs and hermes.rs translate them),
 // so nothing here depends on the backend except where noted.
+//
+// The approval reviewer lives here too, as it shares the card's countdown and answers in AFK's
+// place: see "approval reviewer" below.
 
 const AFK_PREFIX = '(HQ: AFK';           // starts every message HQ sends for AFK, so a transcript can leave them out
 const AFK_GRACE_MS = 60 * 1000;          // a prompt is left this long for the user first
@@ -79,7 +82,9 @@ function afkAnswerText(until) {
 /** A saved AFK setting: { until (ms, or null for no set time), since }, or null. */
 function sanitizeAfk(a) {
   if (!a || typeof a !== 'object' || !(a.until == null || Number.isFinite(a.until))) return null;
-  return { until: a.until ?? null, since: Number.isFinite(a.since) ? a.since : Date.now() };
+  const out = { until: a.until ?? null, since: Number.isFinite(a.since) ? a.since : Date.now() };
+  if (a.review === true) out.review = true; // "Review approvals while away"
+  return out;
 }
 
 /** A cell's own setting: null follows HQ, false keeps it out of AFK, otherwise its own AFK. */
@@ -102,8 +107,9 @@ function afkUntil(cell) {
 }
 
 /** `until`: ms, Infinity for no set time, 0 to end it. `cell` null: all of HQ. */
-function setAfk(cell, until) {
+function setAfk(cell, until, review = false) {
   const value = until ? { until: until === Infinity ? null : until, since: Date.now() } : null;
+  if (value && review) value.review = true;
   if (cell) cell.afk = value;
   else app.afk = value;
   syncAfk();
@@ -128,6 +134,7 @@ function syncAfk() {
     if (on && !cell.afkOn) afkStart(cell);
     else if (!on && cell.afkOn) afkEnd(cell);
     else if (!on && cell.afkLog.length && !cell.afkDigested) afkDigest(cell); // ended while HQ was closed
+    reviewSync(cell);
     cell.renderAfk();
   }
   const any = !!app.afk || app.cells.some(c => c.afk);
@@ -190,21 +197,30 @@ const AFK_ACTIONS = { question: 'Answering for you', plan: 'Holding the plan', p
 
 /** A prompt arrived (onControlRequest): answered after the grace period if the user has not. The card counts it down. */
 function afkWatch(cell, requestId, card) {
+  if (reviewDue(cell, requestId, card)) return reviewWatch(cell, requestId, card); // one countdown, not two
   if (!cell.afkOn) return;
-  const due = Date.now() + AFK_GRACE_MS;
+  const count = promptCountdown(card, Date.now() + AFK_GRACE_MS, `AFK: ${AFK_ACTIONS[card.dataset.kind] || 'Deferring'} in `, 'You are AFK. Answer it yourself before then to keep it.');
+  card.afkCount = count.el;
+  card.afkTick = count.tick;
+  card.afkTimer = setTimeout(() => afkHandle(cell, requestId, card), AFK_GRACE_MS);
+}
+
+/** The text and draining bar a card counts down with, already on the card. `due` may be less than a full grace period off. */
+function promptCountdown(card, due, label, title) {
   const text = h('span', { class: 'afk-count-text' });
   const bar = h('div', { class: 'afk-count-bar' });
   bar.style.animationDuration = `${AFK_GRACE_MS}ms`;
-  card.afkCount = h('div', { class: 'afk-count', title: 'You are AFK. Answer it yourself before then to keep it.' },
+  bar.style.animationDelay = `${Math.min(0, due - Date.now() - AFK_GRACE_MS)}ms`;
+  const el = h('div', { class: 'afk-count', title },
     h('div', { class: 'afk-count-row' }, icon('watch'), text), h('div', { class: 'afk-count-track' }, bar));
-  const tick = () => {
+  const update = () => {
     const s = Math.max(0, Math.ceil((due - Date.now()) / 1000));
-    text.textContent = `AFK: ${AFK_ACTIONS[card.dataset.kind] || 'Deferring'} in ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+    text.textContent = `${label}${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
   };
-  tick();
-  card.afkTick = setInterval(tick, 1000);
-  card.prepend(card.afkCount);
-  card.afkTimer = setTimeout(() => afkHandle(cell, requestId, card), AFK_GRACE_MS);
+  update();
+  const tick = setInterval(update, 1000);
+  card.prepend(el);
+  return { el, tick };
 }
 
 /** Stops a prompt's AFK countdown: it was answered, AFK ended, or HQ answers it now. */
@@ -220,6 +236,7 @@ async function afkHandle(cell, requestId, card) {
   afkUnwatch(card);
   const live = () => afkUntil(cell) && cell.pending.get(requestId) === card && !cell.closing;
   if (!live()) return;
+  if (reviewDue(cell, requestId, card)) return reviewWatch(cell, requestId, card); // deferred only if the reviewer escalates
   // HQ's own cards (mcp.js) are not the agent's requests: they finish themselves.
   if (String(requestId).startsWith('mcp-')) {
     if (card.onAfk) card.onAfk();
@@ -261,6 +278,137 @@ function afkToolText(cell, req) {
   const name = req.display_name || req.tool_name || 'a tool';
   const detail = input.command || (input.file_path && relPath(input.file_path, cell.cwd)) || req.description || '';
   return detail ? `${name}: ${firstLine(String(detail), 140)}` : name;
+}
+
+// ---------- approval reviewer ----------
+//
+// Opt-in per session: `cell.review`, or "Review approvals while away" on the AFK that covers it
+// (`review` on that AFK object, so it ends with that AFK and skips sessions opted out of it). Set
+// from the UI only: spawn_session and the command line build their options without it, so no agent
+// can turn it on. A permission card that has waited AFK_GRACE_MS goes to src/review.rs, which can
+// only approve or escalate. Approve answers "Yes", once. Escalate leaves the card, and AFK's
+// deferral then happens if the session is AFK.
+//
+// card.reviewState: unset, 'waiting' (counting down), 'running' or 'done' (the reviewer answered,
+// so it is not asked again). A restart redraws the card, so a replayed card is reviewed afresh.
+
+function reviewBackend(cell) {
+  return cell.backend === 'claude' || cell.backend === 'hermes';
+}
+
+function reviewOn(cell) {
+  if (!reviewBackend(cell)) return false;
+  if (cell.review) return true;
+  // An agent picks the folder of a session it starts (with spawn_session, or by running hq.exe), and
+  // the path rule trusts that folder, so HQ's AFK does not reach those sessions. The user can still
+  // turn it on for one of them.
+  if ((cell.spawnedBy || cell.launched) && !cell.afk) return false;
+  const away = afkUntil(cell) ? cell.afk || app.afk : null;
+  return !!(away && away.review);
+}
+
+function reviewable(cell, requestId, card) {
+  return reviewBackend(cell) && card.dataset.kind === 'permission' && !String(requestId).startsWith('mcp-');
+}
+
+/** Whether this card is the reviewer's to take next (or already is). */
+function reviewDue(cell, requestId, card) {
+  return reviewOn(cell) && reviewable(cell, requestId, card) && card.reviewState !== 'done';
+}
+
+/** Counts a card down to its review, from when it arrived: it never goes sooner than AFK_GRACE_MS after that. */
+function reviewWatch(cell, requestId, card) {
+  // A replayed card waits for armPrompt, once the replay has drawn the rest of the session.
+  if (card.reviewState || card.replayed) return;
+  afkUnwatch(card);
+  card.reviewState = 'waiting';
+  const due = (card.armedAt || Date.now()) + AFK_GRACE_MS;
+  const count = promptCountdown(card, due, 'Reviewing in ', 'A reviewer looks at this then. Answer it yourself before then to keep it.');
+  card.reviewCount = count.el;
+  card.reviewTick = count.tick;
+  card.reviewTimer = setTimeout(() => reviewRun(cell, requestId, card), Math.max(0, due - Date.now()));
+}
+
+function reviewClearCount(card) {
+  clearTimeout(card.reviewTimer);
+  clearInterval(card.reviewTick);
+  if (card.reviewCount) card.reviewCount.remove();
+  card.reviewCount = null;
+}
+
+/** Stops a card's review: it was answered, or review was turned off. Says whether one was under way. */
+function reviewUnwatch(card) {
+  const active = card.reviewState === 'waiting' || card.reviewState === 'running';
+  reviewClearCount(card);
+  card.reviewRun = null; // a reply still on its way is ignored
+  if (active) card.reviewState = null;
+  return active;
+}
+
+/** Brings each waiting card in line with whether the session reviews now. Safe to run at any time. */
+function reviewSync(cell) {
+  for (const [requestId, card] of [...cell.pending]) {
+    if (!reviewable(cell, requestId, card)) continue;
+    if (reviewDue(cell, requestId, card)) reviewWatch(cell, requestId, card);
+    else if (!reviewOn(cell) && reviewUnwatch(card) && cell.afkOn) afkWatch(cell, requestId, card);
+  }
+}
+
+function setCellReview(cell, on) {
+  cell.review = on;
+  syncAfk();
+  saveState();
+}
+
+/** Takes a card back from a review that cannot finish; if AFK covers it, AFK's own countdown takes over. */
+function reviewDrop(cell, requestId, card) {
+  reviewUnwatch(card);
+  // Not while review is still on: afkWatch would hand it straight back, in a loop.
+  if (!reviewOn(cell) && cell.afkOn && cell.pending.get(requestId) === card && !cell.closing) afkWatch(cell, requestId, card);
+}
+
+async function reviewRun(cell, requestId, card) {
+  reviewClearCount(card);
+  const run = card.reviewRun = {};
+  card.reviewState = 'running';
+  // The user, a control_cancel_request or a closed cell may get there first, at any point.
+  const live = () => card.reviewRun === run && cell.pending.get(requestId) === card && !cell.closing
+    && app.cells.includes(cell) && cell.proc != null && reviewOn(cell);
+  if (!live()) { reviewDrop(cell, requestId, card); return; }
+  card.reviewCount = h('div', { class: 'afk-count', title: 'A reviewer is looking at this. You can still answer it yourself.' },
+    h('div', { class: 'afk-count-row' }, icon('sync'), h('span', { class: 'afk-count-text', text: 'Reviewing…' })));
+  card.prepend(card.reviewCount);
+  const req = card.afkReq || {};
+  const typing = { approve: false, reason: 'you started typing an answer' };
+  // Someone typing in the card is answering it, and may be about to say no.
+  const answering = () => card.feedback && (card.feedback.value.trim() || document.activeElement === card.feedback);
+  let verdict;
+  try {
+    verdict = answering() ? typing : await invoke('review_approval', { req: {
+      requestId, toolName: req.tool_name, input: req.input || {}, cwd: cell.cwd, backend: cell.backend, lastUserMessage: cell.lastUserText || '', hermesPlainEdit: req.hermes_plain_edit === true,
+    } });
+  } catch (err) {
+    verdict = { approve: false, reason: `the review failed: ${err}` };
+  }
+  if (!live()) {
+    if (card.reviewRun === run) reviewDrop(cell, requestId, card); // still on the card (its process ended, say): don't leave it saying "Reviewing…"
+    return;
+  }
+  reviewClearCount(card);
+  card.reviewRun = null;
+  card.reviewState = 'done';
+  if (verdict && verdict.approve === true && answering()) verdict = typing;
+  // The whole command: this is the record of what ran with nobody asked.
+  const what = req.input && req.input.command ? `${req.display_name || req.tool_name}: ${req.input.command}` : afkToolText(cell, req);
+  if (verdict && verdict.approve === true) {
+    cell.answer(requestId, { behavior: 'allow', updatedInput: req.input || {} }); // once: never updatedPermissions
+    cell.notice(`Reviewer approved ${what} (${verdict.reason})`);
+    if (cell.afkOn) afkRecord(cell, 'approved', what); // outside AFK a log entry would raise a "while you were away" card
+    return;
+  }
+  cell.notice(`Reviewer left ${what} for you (${verdict ? verdict.reason : 'no answer'})`);
+  invoke('request_attention').catch(() => {});
+  if (cell.afkOn) afkHandle(cell, requestId, card);
 }
 
 // ---------- turns ----------
@@ -306,6 +454,7 @@ function afkUserSent(cell) {
 
 const AFK_KINDS = {
   permission: ['Deferred', 'circle-slash'],
+  approved: ['Approved by the reviewer', 'pass'],
   question: ['Answered for you', 'question'],
   plan: ['Plan held', 'checklist'],
   nudge: ['Asked to carry on', 'debug-continue'],
@@ -368,10 +517,28 @@ function buildAfkMenu(menuEl, cell) {
     menuEl.append(h('div', { class: 'menu-note', text: 'Sessions carry on without you: questions get "your call", plans are held and other approvals are deferred. Each waits a minute for you first.' }));
   }
   if (own) menuEl.append(item("I'm back", cell ? 'End AFK for this session' : 'End AFK for every session', () => setAfk(cell, 0), 'debug-stop'));
+  // Kept on the AFK itself, so it ends with it. Before AFK starts it waits here for the choice below.
+  let review = !!(own && own.review);
+  if (cell && cell.afk !== false && !own && app.afk) {
+    if (app.afk.review && reviewOn(cell)) menuEl.append(h('div', { class: 'menu-note', text: 'Approvals are reviewed while away (all of HQ).' }));
+  } else if (cell ? reviewBackend(cell) && cell.afk !== false : true) {
+    const box = h('input', { type: 'checkbox' });
+    box.checked = review;
+    box.addEventListener('change', () => {
+      review = box.checked;
+      if (!own) return;
+      if (review) own.review = true;
+      else delete own.review;
+      syncAfk();
+      saveState();
+    });
+    menuEl.append(h('label', { class: 'menu-item', title: 'A permission that has waited a minute goes to a separate Claude call first. It can approve it once or leave it for you; it never refuses.' }, box,
+      h('span', { class: 'menu-main' }, h('span', { class: 'name', text: 'Review approvals while away' }), h('span', { class: 'desc', text: 'Harmless ones go ahead; the rest are deferred' }))));
+  }
   menuEl.append(h('div', { class: 'menu-title', text: own ? 'Change to' : 'Away for' }));
   for (const [minutes, label] of AFK_DURATIONS) {
     const at = Date.now() + minutes * 60 * 1000;
-    menuEl.append(item(label, `Until ${afkClock(at)}`, () => setAfk(cell, Date.now() + minutes * 60 * 1000), 'watch'));
+    menuEl.append(item(label, `Until ${afkClock(at)}`, () => setAfk(cell, Date.now() + minutes * 60 * 1000, review), 'watch'));
   }
   const time = h('input', { type: 'time', class: 'afk-time-input', title: 'Back at' });
   const setAt = () => {
@@ -381,12 +548,12 @@ function buildAfkMenu(menuEl, cell) {
     d.setHours(Number(m[1]), Number(m[2]), 0, 0);
     if (d.getTime() <= Date.now()) d.setDate(d.getDate() + 1); // an earlier time means tomorrow
     closeMenu();
-    setAfk(cell, d.getTime());
+    setAfk(cell, d.getTime(), review);
   };
   time.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); setAt(); } });
   menuEl.append(h('div', { class: 'menu-item afk-at' }, icon('calendar'), h('span', { class: 'menu-main' }, h('span', { class: 'name', text: 'Back at' })), time,
     h('button', { class: 'btn', text: 'Set', onclick: setAt })));
-  menuEl.append(item('Until I am back', 'No set time', () => setAfk(cell, Infinity), 'coffee'));
+  menuEl.append(item('Until I am back', 'No set time', () => setAfk(cell, Infinity, review), 'coffee'));
   if (cell) {
     menuEl.append(h('div', { class: 'menu-title', text: 'This session' }));
     menuEl.append(item('Follow HQ', app.afk ? 'AFK while HQ is' : 'AFK only when HQ is', () => setAfkOptOut(cell, false), cell.afk == null ? 'check' : 'blank', cell.afk == null));

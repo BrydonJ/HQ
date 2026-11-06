@@ -2125,6 +2125,7 @@ mod live {
             max_agents: None,
             api_key: false,
             mcp: false,
+            cell_key: None,
         };
         let mut cmd = app_server();
         cmd.current_dir(&work).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());

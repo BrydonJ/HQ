@@ -40,7 +40,7 @@ const TASK_PROMPT: &str = "(HQ: track this work with your todo tool when it has 
 /// The `hermes` executable: `HQ_HERMES` when set, otherwise whatever is on PATH. Windows installs
 /// of Hermes 0.22 ship only `hermes.cmd`, which `Command` never finds by bare name (it only
 /// tries `.exe`), so PATH is searched here.
-fn hermes_program() -> PathBuf {
+pub(crate) fn hermes_program() -> PathBuf {
     if let Some(p) = std::env::var_os("HQ_HERMES").filter(|p| !p.is_empty()) {
         return p.into();
     }
@@ -93,18 +93,42 @@ pub fn spawn(app: &AppHandle, opts: SpawnOptions, events: Channel<InvokeResponse
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     hide_console(&mut cmd);
-    let mut child = cmd.spawn().map_err(|e| {
-        format!("Could not start `{} acp` ({e}). Is Hermes Agent installed and on PATH?", hermes_program().display())
-    })?;
+    let failed = |e: &dyn std::fmt::Display| format!("Could not start `{} acp` ({e}). Is Hermes Agent installed and on PATH?", hermes_program().display());
+    // HQ's MCP server, through the stdio bridge: ACP agents must take a command, HTTP is optional.
+    let grant = if opts.mcp { crate::mcp::Grant::issue() } else { None };
+    let mcp_servers = Value::Array(grant.iter().map(|g| g.acp_server()).collect());
+    // A session host runs it, translator and all, so it outlives HQ (host.rs).
+    if let Some(conn) = app.state::<crate::hostlink::Link>().primary(app) {
+        let meta = json!({
+            "cellKey": opts.cell_key,
+            "backend": "hermes",
+            "mcpToken": grant.as_ref().map(|g| g.token().to_owned()),
+            "mcpPort": crate::mcp::port(),
+        });
+        let mut msg = crate::hostlink::spawn_message("hermes", &cmd, meta);
+        msg["hermes"] = json!({ "opts": opts, "mirror": mirror.to_string_lossy(), "mcpServers": mcp_servers });
+        match app.state::<Sessions>().spawn_hosted(&conn, msg, events.clone()) {
+            Ok(id) => {
+                if let Some(grant) = grant {
+                    grant.bind(id);
+                }
+                // It may have ended already: its token goes now.
+                if !app.state::<Sessions>().tracks(id) {
+                    crate::mcp::release(id);
+                }
+                return Ok(id);
+            }
+            Err(crate::session::HostError::Spawn(e)) => return Err(failed(&e)),
+            Err(crate::session::HostError::Link) => {} // run it here instead
+        }
+    }
+    let mut child = cmd.spawn().map_err(|e| failed(&e))?;
     let pipes = (child.stdin.take(), child.stdout.take(), child.stderr.take());
     let (Some(stdin), Some(stdout), Some(stderr)) = pipes else {
         crate::session::kill_group(child.id());
         let _ = child.kill();
         return Err("hermes pipes unavailable".into());
     };
-    // HQ's MCP server, through the stdio bridge: ACP agents must take a command, HTTP is optional.
-    let grant = if opts.mcp { crate::mcp::Grant::issue() } else { None };
-    let mcp_servers = Value::Array(grant.iter().map(|g| g.acp_server()).collect());
     match translate(stdin, stdout, mirror, opts, mcp_servers) {
         Ok((input, lines)) => {
             let id = app.state::<Sessions>().register(app, child, Some(input), lines, stderr, events);
@@ -184,7 +208,7 @@ fn discard_lost_turn(session: &str, cwd: &str) -> Result<(), String> {
 
 /// Starts the translator between Hermes' pipes and the frontend. Returns where the frontend's
 /// lines go in, and the pipe its Claude-shaped lines come out of.
-fn translate(stdin: ChildStdin, stdout: impl Read + Send + 'static, mirror: PathBuf, opts: SpawnOptions, mcp_servers: Value) -> Result<(mpsc::Sender<String>, PipeReader), String> {
+pub(crate) fn translate(stdin: ChildStdin, stdout: impl Read + Send + 'static, mirror: PathBuf, opts: SpawnOptions, mcp_servers: Value) -> Result<(mpsc::Sender<String>, PipeReader), String> {
     let (lines, writer) = std::io::pipe().map_err(|e| e.to_string())?;
     let (events_tx, events_rx) = mpsc::channel::<Event>();
     let bridge_tx = events_tx.clone();
@@ -930,6 +954,9 @@ impl Bridge {
             // The card reads "Allow Write?  <path>" or "Allow Bash?  <what Hermes says it does>".
             "description": title.strip_prefix("Approve edit: ").unwrap_or(title), "tool_use_id": tool["toolCallId"],
         });
+        if plain_edit(tool) {
+            request["hermes_plain_edit"] = json!(true);
+        }
         // "Allow for session" becomes the card's second choice.
         if options.iter().any(|(o, _)| o == "allow_session") {
             request["permission_suggestions"] = json!([{ "type": "addRules", "rules": [{ "toolName": name }], "destination": "session" }]);
@@ -1477,6 +1504,60 @@ fn tool_use(call: &Value) -> (String, Value) {
     (name.to_owned(), input)
 }
 
+/// Whether the reviewer (review.rs) may judge this request. Only a plain edit qualifies. Every other
+/// request arrives as `kind: execute` with the same options, whether it is a real command or a
+/// sentence dressed as one (consent for an MCP tool, a standing event trigger or a saved payment
+/// card, a Python script, a computer-use summary), so HQ cannot tell them apart.
+///
+/// The path must be one the agent gave in full: Hermes resolves the path it shows from its own
+/// folder, and the path it writes from the terminal's, so after a `cd` a relative path shows one
+/// file and writes another. See also `is_patch`. Not covered: on a Mac with Hermes' ssh or docker
+/// terminal backend, an absolute path is written remotely or in the container, not on this machine.
+fn plain_edit(call: &Value) -> bool {
+    let Some(content) = call["content"].as_array() else { return false };
+    let raw = &call["rawInput"];
+    let diffs: Vec<&Value> = content.iter().filter(|c| c["type"] == "diff").collect();
+    let ([diff], true) = (diffs.as_slice(), content.len() == 1) else { return false };
+    let tool_known = raw["tool"] == "write_file" || raw["tool"] == "patch";
+    match (diff["path"].as_str(), raw["arguments"]["path"].as_str()) {
+        (Some(shown), Some(given)) => tool_known && !is_patch(call) && is_absolute(given) && same_path(shown, given),
+        _ => false,
+    }
+}
+
+fn is_absolute(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    if cfg!(windows) {
+        bytes.len() > 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && matches!(bytes[2], b'/' | b'\\')
+    } else {
+        path.starts_with('/')
+    }
+}
+
+fn same_path(a: &str, b: &str) -> bool {
+    let plain = |p: &str| if cfg!(windows) { p.replace('\\', "/").to_lowercase() } else { p.to_owned() };
+    plain(a) == plain(b)
+}
+
+/// A V4A patch names its own files, and Hermes lists them for approval with a stricter pattern than
+/// the one that applies the patch: `***Add File: x` is applied but not listed. So the path shown
+/// cannot be trusted for a patch.
+fn is_patch(call: &Value) -> bool {
+    if call["rawInput"]["arguments"]["mode"] == "patch" || call["rawInput"]["mode"] == "patch" {
+        return true;
+    }
+    call["content"].as_array().is_some_and(|content| {
+        content.iter().filter(|c| c["type"] == "diff").any(|diff| {
+            diff["newText"].as_str().is_some_and(|text| {
+                text.lines().any(|line| {
+                    let line = line.trim_start();
+                    line.starts_with("***") && (line.contains("File:") || line.contains("Begin Patch"))
+                })
+            })
+        })
+    })
+}
+
 /// A finished tool call's output as plain text.
 fn tool_text(update: &Value) -> String {
     let mut parts = Vec::new();
@@ -1636,6 +1717,92 @@ fn now_iso() -> String {
 mod tests {
     use super::*;
 
+    /// A path that is absolute on this machine, as the agent would give it.
+    fn full_path(name: &str) -> String {
+        if cfg!(windows) { format!("F:/proj/{name}") } else { format!("/proj/{name}") }
+    }
+
+    /// The shape of `build_acp_edit_tool_call` in Hermes' edit_approval.py.
+    fn edit_call(tool: &str, given: &str, shown: &str, text: &str) -> Value {
+        json!({ "title": "Approve edit", "kind": "edit",
+            "content": [{ "type": "diff", "path": shown, "newText": text }],
+            "rawInput": { "tool": tool, "arguments": { "path": given } } })
+    }
+
+    #[test]
+    fn only_a_plain_edit_is_fit_for_the_reviewer() {
+        let path = full_path("a.rs");
+        assert!(plain_edit(&edit_call("write_file", &path, &path, "b")));
+        assert!(plain_edit(&edit_call("patch", &path, &path, "b")));
+        for call in [
+            json!({ "title": "x", "kind": "execute", "rawInput": { "command": "ls" } }),
+            json!({ "title": "terminal: ls", "kind": "execute" }),
+            json!({ "title": "Subscribe to MCP event", "kind": "execute", "rawInput": { "command": "Subscribe to MCP event 'x'?" } }),
+            json!({ "title": "read: a", "rawInput": { "path": "a" } }),
+            json!({ "title": "x", "content": [{ "type": "diff", "path": path, "newText": "b" }] }),
+        ] {
+            assert!(!plain_edit(&call), "{call}");
+        }
+    }
+
+    #[test]
+    fn a_path_hermes_resolved_for_itself_is_not_trusted() {
+        let shown = full_path("a.rs");
+        // After `cd ../other`, Hermes shows this and writes somewhere else.
+        assert!(!plain_edit(&edit_call("write_file", "a.rs", &shown, "b")));
+        assert!(!plain_edit(&edit_call("write_file", "./a.rs", &shown, "b")));
+        assert!(!plain_edit(&edit_call("write_file", "~/a.rs", &shown, "b")));
+        assert!(!plain_edit(&edit_call("write_file", &full_path("other.rs"), &shown, "b")));
+        assert!(!plain_edit(&edit_call("other_tool", &shown, &shown, "b")));
+    }
+
+    #[test]
+    fn an_edit_beside_other_content_is_not_plain() {
+        let path = full_path("a.rs");
+        let mut call = edit_call("write_file", &path, &path, "b");
+        call["content"].as_array_mut().unwrap().push(json!({ "type": "content", "content": { "type": "text", "text": "x" } }));
+        assert!(!plain_edit(&call));
+    }
+
+    #[test]
+    fn a_patch_is_never_reviewable_as_the_path_it_shows() {
+        let path = full_path("a.rs");
+        for text in ["*** Begin Patch\n*** Update File: a\n", "@@\n-x\n+y\n***Add File: C:/x.bat\n+calc\n", "  ***  Delete File: b\n"] {
+            assert!(!plain_edit(&edit_call("patch", &path, &path, text)), "{text}");
+        }
+        let mut by_mode = edit_call("patch", &path, &path, "b");
+        by_mode["rawInput"]["arguments"]["mode"] = json!("patch");
+        assert!(!plain_edit(&by_mode));
+        assert!(plain_edit(&edit_call("write_file", &path, &path, "*** a heading\nFile: b\n")));
+    }
+
+    #[test]
+    fn the_request_marks_only_a_plain_edit() {
+        let (mut child, mut hermes, input, rx) = scripted();
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": 0, "result": {} }));
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": 1, "result": { "sessionId": "s1" } }));
+        let options = json!([{ "optionId": "allow_once", "kind": "allow_once" }, { "optionId": "deny", "kind": "reject_once" }]);
+        let path = full_path("a.rs");
+        let ask = |id: u32, call: Value| json!({ "jsonrpc": "2.0", "id": id, "method": "session/request_permission", "params": { "sessionId": "s1", "options": options, "toolCall": call } });
+        hermes_says(&mut hermes, ask(50, edit_call("write_file", &path, &path, "b")));
+        let edit = next_matching(&rx, "the edit's card", |v| v["type"] == "control_request");
+        assert_eq!(edit["request"]["hermes_plain_edit"], true);
+        hermes_says(&mut hermes, ask(51, json!({ "title": "x", "kind": "execute", "rawInput": { "command": "ls" } })));
+        let command = next_matching(&rx, "the command's card", |v| v["type"] == "control_request");
+        assert!(command["request"].get("hermes_plain_edit").is_none());
+        drop(hermes);
+        drop(input);
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// What Hermes sends for a patch of several files; review.rs must see the list as a list.
+    #[test]
+    fn a_multi_file_patch_keeps_hermes_comma_joined_path() {
+        let (_, input) = tool_use(&json!({ "title": "patch", "content": [{ "type": "diff", "path": "a.rs, b.rs", "newText": "x" }] }));
+        assert_eq!(input["file_path"], "a.rs, b.rs");
+    }
+
     /// A translator on a scripted Hermes: what the test writes is Hermes' output, and what the
     /// translator sends Hermes goes to a process that only reads it.
     fn scripted() -> (Child, PipeWriter, mpsc::Sender<String>, mpsc::Receiver<Value>) {
@@ -1652,6 +1819,7 @@ mod tests {
             max_agents: None,
             api_key: false,
             mcp: false,
+            cell_key: None,
         };
         let mut sink = if cfg!(windows) { Command::new("findstr") } else { Command::new("cat") };
         if cfg!(windows) {
@@ -1961,6 +2129,7 @@ mod live {
             max_agents: None,
             api_key: false,
             mcp: false,
+            cell_key: None,
         };
         let mut cmd = Command::new(hermes_program());
         cmd.arg("acp").current_dir(&dir).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());

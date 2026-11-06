@@ -1,9 +1,10 @@
 //! Self-update from signed releases (tauri-plugin-updater).
 //!
-//! The frontend decides when to install: installing ends every running `claude`, so it waits
-//! until no session is busy. The download happens up front, so the install itself is quick.
+//! The frontend decides when to install. Sessions a session host runs (host.rs) carry on through
+//! it; the rest end, so it waits until those are not busy. The download happens up front, so the install itself is quick.
 //! Only an installed copy updates itself; a dev build or a copied exe is left alone.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use serde::Serialize;
@@ -11,6 +12,13 @@ use tauri::{AppHandle, Manager};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 use crate::session::Sessions;
+
+/// Set once HQ is closing to install an update, when sessions must be left to the hosts.
+static UPDATING: AtomicBool = AtomicBool::new(false);
+
+pub fn updating() -> bool {
+    UPDATING.load(Ordering::Relaxed)
+}
 
 /// A verified download waiting to be installed.
 #[derive(Default)]
@@ -89,10 +97,20 @@ pub fn install(app: &AppHandle, restart: bool) -> Result<(), String> {
     let Some((update, bytes)) = app.state::<PendingUpdate>().0.lock().unwrap().take() else {
         return Err("No update has been downloaded.".into());
     };
-    app.state::<Sessions>().kill_all();
+    // Sessions run by a session host (host.rs) carry on and wait for the new HQ; the rest end.
+    // Quitting with an update waiting (`restart` false) has ended them all already.
+    if restart {
+        UPDATING.store(true, Ordering::Relaxed);
+    }
+    app.state::<Sessions>().detach_for_update(app);
     // Installing exits HQ without the usual exit event, so queued saves are flushed here.
     crate::store::flush_state();
-    update.restart_after_install(restart).install(bytes).map_err(|e| e.to_string())?;
+    if let Err(e) = update.restart_after_install(restart).install(bytes) {
+        // HQ stays open: a quit must end the sessions again, and a crash wait only the usual time.
+        UPDATING.store(false, Ordering::Relaxed);
+        app.state::<Sessions>().cancel_detach(app);
+        return Err(e.to_string());
+    }
     // Only reached on platforms where installing does not exit the app.
     if restart {
         app.restart();
