@@ -321,7 +321,9 @@ class Cell {
     this.wmWorked = false;         // work has been seen since arming (an idle cell arms and waits for it)
     this.wmView = false;           // the waiting view is on screen now (the chat is display:none)
     this.wmNews = false;           // the agent replied there while background work went on (badged instead of the green border)
-    this.wmTimer = 0;              // one timeout: finishes waiting mode once the cell has stayed idle
+    this.wmTimer = 0;              // one timeout: marks the view done once the cell has stayed idle
+    this.wmDone = false;           // nothing is happening any more: the view shows Done (waiting mode stays on)
+    this.lastTurnOk = false;       // the last turn ended cleanly, so idle can count as done
     this.wmDoneOpen = false;       // the waiting view shows its completed tasks (folded away by default)
     this.wmStick = true;           // stickToBottom, kept while the chat is hidden
     this.taskLine = '';            // "3/7": the task list at a glance, in the header
@@ -865,6 +867,7 @@ class Cell {
   syncWaitingBusy() {
     const el = this.el.querySelector('.wv-busy');
     if (!el) return;
+    if (this.wmDone) { el.textContent = 'Done'; return; }
     if (!this.busyWord && this.bgTasks.length) this.busyWord = nextBusyVerb('');
     el.textContent = this.busyWord.replace(/(…|\.\.\.)$/, '');
   }
@@ -1105,7 +1108,7 @@ class Cell {
       turnActive && !asWaiting ? h('span', { class: 'pv-elapsed', text: formatDuration(Date.now() - this.turnStart) }) : null,
       turnActive && !asWaiting && this.turnTools ? h('span', { text: `${this.turnTools} tool call${this.turnTools === 1 ? '' : 's'}` }) : null,
       h('span', { class: 'spacer' }),
-      ask,
+      asWaiting && this.wmDone ? h('button', { class: 'btn pv-ask', title: 'Turn waiting mode off and show the chat', onclick: () => this.setWaitingMode(false) }, icon('comment-discussion'), 'Show chat') : ask,
       asWaiting ? null : h('button', { class: 'icon-btn pv-close', title: 'Close', onclick: () => this.setProgressView(false) }, icon('close')));
 
     let bar = null;
@@ -1179,7 +1182,7 @@ class Cell {
       h('div', { class: 'pv-title' }, `${agent} says`, stamp(answer.at)),
       h('div', { class: `pv-answer${answer.error ? ' error' : ''}`, text: answer.text })) : null;
 
-    const empty = !bar && !now && !tasks && !agentsEl && !(asWaiting && (running || saidEl))
+    const empty = !bar && !now && !tasks && !agentsEl && !(asWaiting && (running || saidEl || this.wmDone))
       ? h('div', { class: 'pv-empty', text: 'Nothing is running. Progress shows here while Claude works.' }) : null;
 
     const parts = asWaiting ? [bar, head, now, saidEl, tasks, agentsEl, answerEl, empty] : [head, bar, now, tasks, agentsEl, answerEl, empty];
@@ -1241,9 +1244,11 @@ class Cell {
    * Decides what the cell shows; runs on every state change (refreshState), never on a timer
    * except the single timeout below. The waiting view stands in for the chat while Claude works
    * (a turn, a background agent or shell). A question for the user shows the chat, which has its
-   * context. Idle is not finished: a background task's notification often starts a new turn, so
-   * waiting mode ends only after the cell stays idle, with nothing in the background or pending,
-   * for WAIT_SETTLE_MS; any state change in between starts that count over.
+   * context. Only the user's click turns waiting mode off. Idle is not finished: a background
+   * task's notification often starts a new turn, so the view says Done only after the cell stays
+   * idle, with nothing in the background, pending or scheduled, for WAIT_SETTLE_MS; new work takes
+   * Done away again. A turn that failed or was stopped, an exit or a usage limit is not done: the
+   * chat shows, which says what happened, and the view comes back with the next work.
    */
   syncWaiting() {
     if (this.closing) return;
@@ -1253,16 +1258,32 @@ class Cell {
       if (this.status === 'running' || this.bgTasks.length > 0) {
         this.wmWorked = true;
         view = true;
-      } else if (this.wmWorked) {
+      } else if (this.wmWorked && this.lastTurnOk && this.status !== 'exited' && !this.limitHit && !this.limitResume) {
         view = true;
         settling = true;
       }
     }
-    if (settling && this.wmTimer) return; // still idle: a refresh with no new work (a focus, say) does not extend the wait
+    if (!settling) this.setWmDone(false);
+    if (settling && (this.wmTimer || this.wmDone)) return; // still idle: a refresh with no new work (a focus, say) does not extend the wait
     clearTimeout(this.wmTimer);
     this.wmTimer = 0;
-    if (settling) this.wmTimer = setTimeout(() => { this.wmTimer = 0; this.setWaitingMode(false); }, WAIT_SETTLE_MS);
+    if (settling) {
+      this.wmTimer = setTimeout(() => {
+        this.wmTimer = 0;
+        if (mcp.schedule.some(s => s.to === this.hqId)) this.syncWaiting(); // a message is due to wake it: start the timeout again and look later
+        else this.setWmDone(true);
+      }, WAIT_SETTLE_MS);
+    }
     this.setWmView(view);
+  }
+
+  setWmDone(done) {
+    if (done === this.wmDone) return;
+    this.wmDone = done;
+    if (done) this.wmNews = false; // "still working in the background" no longer holds
+    this.el.classList.toggle('wm-done', done);
+    this.syncWaitingBusy();
+    this.renderProgress();
   }
 
   setWmView(view) {
@@ -1666,6 +1687,7 @@ class Cell {
 
   setStatus(status) {
     if (status === 'running' && this.status !== 'running') this.startTurn();
+    if (status === 'running') this.lastTurnOk = false;
     this.status = status;
     this.refreshState();
   }
@@ -2002,7 +2024,6 @@ class Cell {
     const images = prompt == null ? this.attachments : [];
     if (!text && !images.length) return;
     if (this.limitResume) this.setLimitResume(false); // sent now, by the user or by checkLimitResumes
-    if (this.wmView && prompt == null) this.setWaitingMode(false); // sending is the user coming back (an armed idle cell keeps waiting for the work)
     // /clear (and its aliases) is answered here: Claude's own /clear would change the session
     // behind HQ's back. The cell starts a new session; the old one stays on disk for Resume.
     const clear = prompt == null && !images.length && /^\/(?:clear|reset|new)(?:\s+([\s\S]*))?$/.exec(text);
@@ -2220,7 +2241,7 @@ class Cell {
     for (const id of [...this.pending.keys()]) this.dropPrompt(id);
     Object.assign(this, {
       sessionId: null, fork: false, bridgeSessionId: null, aiTitle: false, renamePending: false, titleTries: 0,
-      titleAsked: '', promptText: '', sentPrompts: [], lastUserText: '', lastReply: '', lastSaid: null, lastSaidOpen: false, wmNews: false, replyLog: [], mcpExpect: false, turnTexts: [], tasksStale: false, lastDuration: '',
+      titleAsked: '', promptText: '', sentPrompts: [], lastUserText: '', lastReply: '', lastSaid: null, lastSaidOpen: false, wmNews: false, wmWorked: false, lastTurnOk: false, replyLog: [], mcpExpect: false, turnTexts: [], tasksStale: false, lastDuration: '',
       historyStart: 0, historyUntil: null, historyPending: false, statusAnswer: null, live: null, promptWritten: false, lastSent: null,
       remoteAsked: false, currentTool: null, turnStart: null, turnTools: 0, resumeWarning: null,
     });
@@ -2763,6 +2784,7 @@ class Cell {
     this.clearForceNote();
     this.finishLive();
     this.closeTurn(m.subtype === 'success' && !m.is_error);
+    this.lastTurnOk = m.subtype === 'success' && !m.is_error;
     this.settleTools();
     this.pruneTaskProgress();
     for (const id of [...this.pending.keys()]) this.dropPrompt(id); // a finished turn has nothing left to approve
