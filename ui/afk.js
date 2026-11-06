@@ -385,7 +385,7 @@ async function reviewRun(cell, requestId, card) {
   let verdict;
   try {
     verdict = answering() ? typing : await invoke('review_approval', { req: {
-      requestId, toolName: req.tool_name, input: req.input || {}, cwd: cell.cwd, backend: cell.backend, lastUserMessage: cell.lastUserText || '', hermesPlainEdit: req.hermes_plain_edit === true,
+      requestId, toolName: req.tool_name, input: req.input || {}, cwd: cell.cwd, backend: cell.backend, lastUserMessage: cell.lastUserText || '', hermesReviewable: req.hermes_reviewable === true, hermesFlag: typeof req.hermes_flag === 'string' ? req.hermes_flag : '',
     } });
   } catch (err) {
     verdict = { approve: false, reason: `the review failed: ${err}` };

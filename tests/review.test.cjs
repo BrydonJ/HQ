@@ -115,7 +115,7 @@ test('an approve answers Yes once, says so, and sends no session rule', async ()
   t.arm(cell, 'r1', c);
   await t.tick(GRACE);
   const { req } = t.reviews[0];
-  assert.deepEqual({ ...req, input: { ...req.input } }, { requestId: 'r1', toolName: 'Bash', input: { command: 'cargo test' }, cwd: '/repo', backend: 'claude', lastUserMessage: 'run the tests', hermesPlainEdit: false });
+  assert.deepEqual({ ...req, input: { ...req.input } }, { requestId: 'r1', toolName: 'Bash', input: { command: 'cargo test' }, cwd: '/repo', backend: 'claude', lastUserMessage: 'run the tests', hermesReviewable: false, hermesFlag: '' });
   t.reviews[0].resolve(APPROVE);
   await t.tick(0);
   assert.equal(cell.answers.length, 1);
@@ -270,12 +270,13 @@ test('a review that cannot finish hands the card back to AFK', async () => {
   assert.match(text(c), /AFK: Deferring in/);
 });
 
-test('a Hermes plain edit is passed on as one', async () => {
+test('what hermes.rs marks is passed on', async () => {
   const t = harness(), cell = t.make({ review: true, backend: 'hermes' });
-  const c = t.card(cell, 'r1', 'permission', { tool_name: 'Bash', input: { command: 'x' }, hermes_plain_edit: true });
+  const c = t.card(cell, 'r1', 'permission', { tool_name: 'Bash', input: { command: 'x' }, hermes_reviewable: true, hermes_flag: 'recursive delete' });
   t.arm(cell, 'r1', c);
   await t.tick(GRACE);
-  assert.equal(t.reviews[0].req.hermesPlainEdit, true);
+  assert.equal(t.reviews[0].req.hermesReviewable, true);
+  assert.equal(t.reviews[0].req.hermesFlag, 'recursive delete');
 });
 
 test('a closed or stopped session is not answered', async () => {

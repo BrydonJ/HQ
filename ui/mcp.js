@@ -107,11 +107,6 @@ function mcpSpawnMode(caller, agent, asked) {
   return mode;
 }
 
-/** True when Claude itself asks the user before the caller's gated tools run (see mcp.rs). */
-function mcpCallerAsks(caller) {
-  return !caller.external && caller.backend === 'claude' && ['default', 'acceptEdits', 'plan'].includes(caller.permissionMode);
-}
-
 /**
  * Shows a card built by `build(finish)` in `cell` and resolves with what it is finished with. The
  * card is HQ's own (its request id starts with "mcp-", which afk.js only finishes with `onAway`), and
@@ -321,8 +316,9 @@ const MCP_TOOLS = {
     const cell = mcpTarget(a.session, caller);
     if (cell.missing) fail(`Session ${cell.hqId}'s folder is missing, so it cannot run.`);
     const text = mcpString(a.message, 'message');
-    // A session the caller did not start may run freer than the caller, so the user says yes in its cell.
-    if (!mcpOwns(caller, cell) && !mcpCallerAsks(caller)) {
+    // Sessions inside HQ message each other freely, by the user's choice, even though the target may
+    // run freer than the caller. An agent outside HQ still needs a yes for a session it did not start.
+    if (caller.external && !mcpOwns(caller, cell)) {
       if (!(await mcpConfirmMessage(caller, cell, text, callId))) {
         fail(`The user did not let you message ${cell.hqId}. Message only sessions you started, or ask the user.`);
       }

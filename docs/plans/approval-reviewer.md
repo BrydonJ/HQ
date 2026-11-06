@@ -176,14 +176,17 @@ Reviews run one at a time (a mutex), so a burst of cards cannot start a dozen pr
   - The path rule covers every tool with a common path field, reads included.
   - Added hard rules: `mcp__*` tools and WebFetch; `dangerouslyDisableSandbox`; git config and
     `git -c`; several paths in one field.
-  - On Hermes only plain single-file edits are reviewed; every other request stays a card, so the
-    plan's "harmless command approved unattended" holds on Claude and not on Hermes. Hermes gives
-    HQ the same options for a real command, a consent sentence (MCP tools, standing event triggers,
-    saved payment cards), a Python script and a computer-use summary, so telling them apart would
-    be a denylist tracking Hermes releases. Live, the one shell command that reached a card went to
-    the user anyway, so this costs little. V4A patches are excluded too, as their listed paths cannot
-    be trusted, and so are edits whose path the agent gave as relative, since Hermes shows one
-    folder's file and writes another's after a `cd`. The mark is positive, so a lost field fails safe. This needed a small `hermes.rs` change, against the plan's "no change". Typing in the card's feedback box stops the approve.
+  - On Hermes only two kinds of request are reviewed, marked positively by `hermes.rs` so a lost
+    field fails safe (a small change, against the plan's "no change"):
+    - A real terminal command: word for word what the open terminal call is running, offering
+      "always". Hermes gives HQ the same `execute` shape for consent sentences (MCP tools, standing
+      event triggers, saved payment cards), Python scripts, computer-use summaries and Smart DENY
+      overrides; none of them match both. A command Hermes redacted no longer matches. Once a
+      session has delegated, its commands stay with the user: a child's gate could carry the text of
+      the parent's open terminal call.
+    - A plain edit: one diff whose path the agent gave in full, not a V4A patch. A patch's listed
+      paths cannot be trusted, and after a `cd` a relative path shows one file and writes another.
+    The model also gets Hermes' detector wording, on real commands only.
   - HQ-wide AFK does not extend the reviewer to sessions an agent started or a command line opened,
     as whoever did so picks the folder the path rule trusts. The per-session toggle still works on
     them. A folder that is a drive root or holds the home folder has no "inside" at all.
@@ -210,16 +213,20 @@ Reviews run one at a time (a mutex), so a burst of cards cannot start a dozen pr
   outside it and `git reset --hard` left as cards with the right reasons; answering during the
   countdown and typing in the card both stop it; AFK with the option approves one, defers the
   other and lists both in the digest; a card waiting through a restart comes back and is approved.
+  Why shell matters: HQ's saved Hermes chats show 28 commands lost to `BLOCKED: Command timed out
+  without user response`, nearly all shell (`cp`, `date`, `printf`, `python scripts/...`). Most
+  flagged commands never reach a card: Hermes approves them itself. Haiku, given ten commands modelled
+  on the stalled ones (their full text is not saved), approved log reads, a local commit, a read-only
+  one-liner and a write inside the project, and left scripts it cannot see inside, paths outside the
+  folder and force-kills. So expect some of these to go ahead and the rest to keep waiting.
   On Claude, the local settings let the test commands through with no card, so that branch was
   checked by injecting cards into a live cell: `cargo build` approved, `git push` left, with no
-  `updatedPermissions`. Learned: this Hermes setup ran `rm -r` and `chmod 777` itself with no card,
-  so few shell commands reach the reviewer there, and it helps mostly with edits. Two early cards
-  were answered by a real click on Yes, not by the reviewer; about ten later cards had no such
-  click, and no code clicks that button.
+  `updatedPermissions`. Two early cards were answered by the user's own click on Yes, not by the
+  reviewer.
 
 ## Release note (draft, for `release.ps1 -Notes`)
 
 - Adds the approval reviewer, off by default. Turn it on per session from the **More** menu, or
   while AFK from the AFK menu. A permission you leave for a minute goes to a separate Haiku call
   with no tools, which can approve it once or leave it for you, and never refuses. It uses your
-  Claude plan. In Hermes sessions it only reviews plain file edits.
+  Claude plan. In Hermes sessions it reviews real terminal commands and plain file edits.

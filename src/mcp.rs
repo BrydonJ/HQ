@@ -359,7 +359,7 @@ const TOOLS: &[Tool] = &[
     Tool {
         name: "send_message",
         description: "Sends a message to another session, as a new prompt. A working session reads it at its next step. Its answer is not returned here: use wait_for_sessions, then read_session.",
-        auto_allow: false,
+        auto_allow: true,
         schema: || json!({
             "type": "object",
             "properties": { "session": session_arg(), "message": { "type": "string" } },
@@ -432,7 +432,7 @@ const TOOLS: &[Tool] = &[
     Tool {
         name: "schedule_message",
         description: "Sends a message to a session (yourself by default) later: after a delay, at a time, or once the plan's usage limit has reset. Survives HQ restarts.",
-        auto_allow: false,
+        auto_allow: true,
         schema: || json!({
             "type": "object",
             "properties": {

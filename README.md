@@ -425,7 +425,8 @@ the repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the contents of the updater 
   - AFK, and what was done while it lasted, is kept in the board, so a restart (or an update)
     loses neither.
 - **Approval reviewer:** off by default, and for Claude and Hermes sessions only (on Hermes it
-  only reviews plain file edits that give a full path; everything else stays with you). Turn it on for one
+  reviews real terminal commands and plain file edits that give a full path; anything else stays
+  with you). Turn it on for one
   session with **Review approvals** in its **More** menu, or tick **Review approvals while away**
   in the AFK menu, which lasts as long as that AFK and skips sessions set to **Never AFK** and
   sessions an agent started. It can only be set here: not from the command line, and not by an agent.
@@ -583,7 +584,9 @@ the board: start a Codex session for one part of a job, wait for it, read its an
 - **Sessions:** `list_sessions`, `spawn_session` (Claude, Codex or Hermes, in any folder,
   optionally in a new git worktree beside the repository), `send_message`, `read_session` (the
   full text of its latest replies and its task list), `wait_for_sessions`, `interrupt_session`,
-  `close_session`, `set_session_model` and `collapse_session`.
+  `close_session`, `set_session_model` and `collapse_session`. Sessions inside HQ message each
+  other with no approval, even a session that runs with fewer prompts than the sender; an agent
+  outside HQ still needs your yes for a session it did not start.
 - **Coordination:** shared notes (`note_set`, `note_get`, `note_delete`) kept across restarts;
   advisory file claims (`claim_files`, `release_files`, `list_claims`) held until released or
   the session's cell closes; `schedule_message` (after a delay, at a time, or once the plan's
