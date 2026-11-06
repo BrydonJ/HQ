@@ -88,10 +88,46 @@ button, input, select, textarea { font: inherit; color: inherit; }
 #workspace { display: flex; flex: 1; min-height: 0; }
 #board { position: relative; display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
 #toggle-sidebar.on { color: var(--fg-strong); }
-#grid { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 6px; padding: 6px; }
+#grid { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 6px; }
 #grid.all-collapsed::before { content: "Every session is collapsed. Click one below to open it."; margin: auto; color: var(--fg-faint); }
-.row { display: flex; gap: 6px; flex: 1; min-height: 0; }
-#grid.maximized .row:not(.has-max), #grid.maximized .cell:not(.max) { display: none; }
+/* Sizes are flex-grow weights set by layout.js; a basis of 0 makes them exact shares. */
+.row { display: flex; flex: 1 1 0; min-height: 0; }
+/* The spotlight: the main pane, then a strip of the other sessions down the right. */
+#grid.spotlight { flex-direction: row; }
+.spot-main { display: flex; flex-direction: column; flex: 1 1 0; min-width: 0; min-height: 0; }
+.spot-strip { display: flex; flex-direction: column; flex: 1 1 0; min-width: 0; min-height: 0; }
+#grid.maximized > :not(.has-max), #grid.maximized .row:not(.has-max), #grid.maximized .cell:not(.max), #grid.maximized .split { display: none; }
+/* Alone on the board, the maximized cell and the boxes around it take all of it, whatever their weights. */
+#grid.maximized .has-max, #grid.maximized .cell.max { flex-grow: 1 !important; }
+
+/* Splitters fill the 6px gaps between cells and rows: drag to resize, double-click to even out.
+   The line shows only once the pointer has rested on the gap, so passing over it stays quiet. */
+.split { position: relative; flex: none; z-index: 1; touch-action: none; }
+.split-x { width: 6px; cursor: col-resize; }
+.split-y { height: 6px; cursor: row-resize; }
+.split::after {
+  content: ""; position: absolute; border-radius: 1px; background: var(--accent); pointer-events: none;
+  opacity: 0; transition: opacity 0.15s ease, transform 0.2s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.split-x::after { top: 10px; bottom: 10px; left: 2px; width: 2px; transform: scaleY(0.4); }
+.split-y::after { left: 10px; right: 10px; top: 2px; height: 2px; transform: scaleX(0.4); }
+.split:hover::after { opacity: 0.55; transform: none; transition-delay: 0.12s; }
+.split.active::after { opacity: 1; transform: none; transition-delay: 0s; }
+body.resizing-x, body.resizing-x * { cursor: col-resize !important; user-select: none !important; }
+body.resizing-y, body.resizing-y * { cursor: row-resize !important; user-select: none !important; }
+
+/* A cell picked up by its header floats over the board; the outline marks where it lands. */
+.cell.lifted { z-index: 30; box-shadow: 0 18px 44px rgba(0, 0, 0, 0.5), 0 0 0 1px var(--proj, var(--accent)); }
+body.cell-dragging, body.cell-dragging * { cursor: grabbing !important; user-select: none !important; }
+.drop-slot {
+  position: absolute; left: 0; top: 0; z-index: 25; pointer-events: none; border-radius: 6px;
+  border: 1.5px dashed color-mix(in srgb, var(--accent) 70%, transparent);
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  opacity: 0; transition: opacity 0.18s ease;
+}
+.drop-slot.on { opacity: 1; }
+.drop-slot.smooth { transition: opacity 0.18s ease, transform 0.24s cubic-bezier(0.2, 0.8, 0.2, 1), width 0.24s cubic-bezier(0.2, 0.8, 0.2, 1), height 0.24s cubic-bezier(0.2, 0.8, 0.2, 1); }
+@media (prefers-reduced-motion: reduce) { .drop-slot, .drop-slot.smooth, .split::after { transition: none; } }
 
 /* An id, not .empty: the usage pill also uses an "empty" class, and this rule turned it into a
    full-window overlay. z-index lifts it above the (empty) grid so its button takes clicks. */
@@ -220,6 +256,18 @@ body:not(.fade-buttons):not(.hover-buttons) .cell.wm-on .cell-head:hover > .icon
 /* Icons the codicon font lacks (the waiting mode hourglass), drawn to match its 16px glyphs. */
 .svg-icon { width: 16px; height: 16px; display: block; }
 .act-detail.on, .act-progress.on, .act-waiting.on, .act-tasklist.on { color: var(--link); }
+.act-spot.on { color: var(--waiting); }
+.act-group.on { color: var(--group); }
+/* One ring around a whole group, in its colour (its first session's project colour), drawn in the
+   gaps outside the cells by layout.js (placeRings), so there is no line between cells of a group. */
+.group-ring {
+  position: absolute; left: 0; top: 0; pointer-events: none; box-sizing: border-box;
+  border: 2px solid var(--group); border-radius: 9px; opacity: 0; transition: opacity 0.2s ease;
+}
+.group-ring.on { opacity: 1; }
+.group-ring.smooth { transition: opacity 0.2s ease, transform 0.24s cubic-bezier(0.2, 0.8, 0.2, 1), width 0.24s cubic-bezier(0.2, 0.8, 0.2, 1), height 0.24s cubic-bezier(0.2, 0.8, 0.2, 1); }
+@media (prefers-reduced-motion: reduce) { .group-ring, .group-ring.smooth { transition: none; } }
+.group-swatch { display: grid; place-items: center; width: 16px; flex: none; color: var(--group, var(--fg-muted)); }
 .act-afk.on { color: var(--waiting); }
 .act-afk.never { color: var(--fg-faint); text-decoration: line-through; }
 /* The task list at a glance ("3/7") on the progress button, in place of its icon while a list is under way. */
@@ -250,7 +298,7 @@ body:not(.fade-buttons):not(.hover-buttons) .cell.wm-on .cell-head:hover > .icon
 #dock .cell { flex: 0 1 300px; min-width: 190px; }
 .cell.collapsed .stage, .cell.collapsed .prompts, .cell.collapsed .prompts-bar, .cell.collapsed .composer, .cell.collapsed .cell-path,
 .cell.collapsed .act-detail, .cell.collapsed .act-handoff, .cell.collapsed .act-progress, .cell.collapsed .act-waiting, .cell.collapsed .waiting-view, .cell.collapsed .act-code, .cell.collapsed .act-reveal,
-.cell.collapsed .act-max { display: none; }
+.cell.collapsed .act-spot, .cell.collapsed .act-max { display: none; }
 .cell.collapsed .cell-head { border-bottom: 0; cursor: pointer; }
 .cell:not(.collapsed) .cell-project { cursor: pointer; }
 .cell.collapsed .cell-title { flex: 1 1 0; cursor: pointer; }

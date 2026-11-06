@@ -280,7 +280,7 @@ class Cell {
   constructor({ cwd, sessionId = null, permissionMode = 'default', model = null, effort = null, title = '', aiTitle = false,
     customTitle = null, renamePending = false, detail, clean, progress = false, fork = false, collapsed = false,
     missing = false, remote = null, bridgeSessionId = null, draft = '', backend = 'claude', resumeAfterUpdate = false, resumeQueued = null, api = false, apiKey = false, afk = null, afkLog = null, review = false, launched = false,
-    hqId = null, spawnedBy = null, depth = 0, hosted = null }) {
+    hqId = null, spawnedBy = null, depth = 0, hosted = null, spot = false, group = null, flexW = 1, flexH = 1 }) {
     this.cwd = cwd;
     // A session a session host kept running while HQ restarted: { id, startedMs }. reattach() connects to it.
     this.hosted = hosted;
@@ -330,6 +330,10 @@ class Cell {
     this.sideTaskLine = '';        // the same without the live tool name, for the sidebar (which a change rebuilds)
     this.askTasks = false;         // the composer's task-list toggle: asks for a list on the next prompt only
     this.collapsed = !!collapsed;  // only the header shows, in the dock under the grid
+    this.spot = !!spot;            // in the spotlight: the main pane, with the other sessions in a strip beside it (layout.js)
+    this.group = typeof group === 'string' && /^g[0-9a-z]{1,8}$/.test(group) ? group : null; // cells in a group sit together
+    this.flexW = sanitizeWeight(flexW); // its share of a row's width, dragged with a splitter
+    this.flexH = sanitizeWeight(flexH); // its share of the spotlight strip's height
     this.savedScroll = null;       // [scrollTop, stickToBottom] from when the chat was collapsed
     this.expandedAt = 0;
     this.missing = !!missing;      // the folder was gone at startup: the cell stays, with its composer off
@@ -442,6 +446,8 @@ class Cell {
     this.remoteBtn = el.querySelector('.act-remote');
     this.missingBar = el.querySelector('.missing-bar');
     this.afkBtn = el.querySelector('.act-afk');
+    this.spotBtn = el.querySelector('.act-spot');
+    this.groupBtn = el.querySelector('.act-group');
 
     el.style.setProperty('--proj', this.color);
     for (const name of el.querySelectorAll('.proj-name, .cell-project .sweep-name')) name.textContent = baseName(this.cwd) || this.cwd;
@@ -456,6 +462,8 @@ class Cell {
     this.applyWaitingMode();
     this.setAskTasks(false);
     this.applyCollapsed();
+    this.applySpot();
+    this.applyGroup();
     this.applyMissing();
     this.stateEl.textContent = stateOf(this)[1];
     this.renderCodeButton();
@@ -499,6 +507,9 @@ class Cell {
     moreBtn.addEventListener('click', e => { e.stopPropagation(); openMenu(moreBtn, this, menuEl => buildMoreMenu(menuEl, this)); });
     this.taskBtn.addEventListener('click', () => this.setAskTasks(!this.askTasks));
     el.querySelector('.act-max').addEventListener('click', () => toggleMaximize(this));
+    this.spotBtn.addEventListener('click', () => toggleSpot(this));
+    this.groupBtn.addEventListener('click', e => { e.stopPropagation(); openMenu(this.groupBtn, this, menuEl => buildGroupMenu(menuEl, this)); });
+    wireCellDrag(this);
     el.querySelector('.act-close').addEventListener('click', e => this.requestClose(e.currentTarget));
     el.querySelector('.act-terminal').addEventListener('click', () => invoke('open_terminal', { path: this.cwd }).catch(err => this.notice(String(err), true)));
     el.querySelector('.act-reveal').addEventListener('click', () => invoke('reveal_folder', { path: this.cwd }).catch(err => this.notice(String(err), true)));
@@ -789,6 +800,23 @@ class Cell {
     this.el.classList.toggle('collapsed', this.collapsed);
     this.collapseBtn.querySelector('.codicon').className = `codicon codicon-${this.collapsed ? 'chrome-restore' : 'chrome-minimize'}`;
     this.collapseBtn.title = keyLabel(this.collapsed ? 'Expand (Ctrl+Shift+M)' : 'Collapse to the dock (Ctrl+Shift+M)');
+  }
+
+  /** The star button: lit while the session is in the spotlight's main pane. */
+  applySpot() {
+    this.el.classList.toggle('spot', this.spot);
+    this.spotBtn.classList.toggle('on', this.spot);
+    this.spotBtn.querySelector('.codicon').className = `codicon codicon-${this.spot ? 'star-full' : 'star-empty'}`;
+    this.spotBtn.title = this.spot ? 'Leave the spotlight' : 'Spotlight: give this session the main pane';
+  }
+
+  /** A group's cells are ringed in the group's colour (style.css, .cell.grouped). */
+  applyGroup() {
+    this.el.classList.toggle('grouped', !!this.group);
+    if (this.group) this.el.style.setProperty('--group', groupColor(this.group));
+    else this.el.style.removeProperty('--group');
+    this.groupBtn.classList.toggle('on', !!this.group);
+    this.groupBtn.title = this.group ? 'Group: move to another or leave' : 'Group with another session';
   }
 
   // ---------- VS Code ----------
@@ -4345,7 +4373,16 @@ function addCell(opts, { restore = false, batch = false, background = false } = 
   // A new cell starts at the eye button's level picked in Settings; a restored one keeps its own.
   if (!restore && opts.detail == null) opts = { ...opts, detail: app.settings.defaultDetail };
   const cell = new Cell(opts);
-  placeCell(cell);
+  // A session another session started joins its group, made now if it has none, so related work sits together.
+  const starter = !restore && cell.spawnedBy && !cell.group ? app.cells.find(c => c.hqId === cell.spawnedBy) : null;
+  if (starter) {
+    if (!starter.group) { starter.group = newGroupId(); starter.applyGroup(); }
+    cell.group = starter.group;
+    cell.applyGroup();
+  }
+  // The startup restore keeps the saved order, which the user may have dragged away from project order.
+  if (batch) app.cells.push(cell);
+  else placeCell(cell);
   // A batch (the restore at startup) lays the board out once, when it is done.
   if (!batch) layout();
   // `background`: a session an agent started (mcp.js) must not take the user's keyboard.
@@ -4366,14 +4403,18 @@ function addCell(opts, { restore = false, batch = false, background = false } = 
   return cell;
 }
 
-/** Puts a cell right after the last open cell of its project, so projects stay grouped in first-opened order. */
+/**
+ * Puts a cell right after the last cell of its group, or else of its project, so projects stay
+ * together in first-opened order; groups (layout.js) are never split.
+ */
 function placeCell(cell) {
   const i = app.cells.indexOf(cell);
   if (i >= 0) app.cells.splice(i, 1);
   const key = projectKey(cell.cwd);
-  const last = app.cells.findLastIndex(c => projectKey(c.cwd) === key);
+  const last = cell.group ? app.cells.findLastIndex(c => c.group === cell.group) : app.cells.findLastIndex(c => projectKey(c.cwd) === key);
   if (last >= 0) app.cells.splice(last + 1, 0, cell);
   else app.cells.push(cell);
+  keepGroupsTogether();
 }
 
 /** Opens a new session with the permission mode, model and effort the user picked last. */
@@ -4452,6 +4493,7 @@ function setProjectColor(path, color) {
     c.color = projectColor(c.cwd);
     c.el.style.setProperty('--proj', c.color);
   }
+  for (const c of app.cells) if (c.group) c.applyGroup(); // a group wears its first session's project colour
   renderSidebar();
   saveState();
 }
@@ -4464,6 +4506,7 @@ function closeCell(cell) {
   const i = app.cells.indexOf(cell);
   if (i >= 0) app.cells.splice(i, 1);
   cell.el.remove();
+  tidyGroups();
   if (app.maximized === cell) app.maximized = null;
   if (app.focused === cell) {
     app.focused = null;
@@ -4532,72 +4575,6 @@ function collapseCell(cell, on) {
   if (next) focusCell(next, true);
 }
 
-/**
- * Picks how many rows to use so cells stay as close to square as possible, then fills the
- * rows left to right. Rows can hold different counts, so there are never empty slots.
- */
-function chooseRows(n, width, height) {
-  let best = 1;
-  let bestScore = Infinity;
-  for (let rows = 1; rows <= n; rows++) {
-    const perRow = distribute(n, rows);
-    const cellH = height / rows;
-    let score = 0;
-    for (const count of perRow) {
-      const cellW = width / count;
-      score += count * Math.abs(Math.log(cellW / cellH));
-      if (cellW < 380) score += count * 2; // chat becomes unreadable when too narrow
-      if (cellH < 260) score += count * 2;
-    }
-    score /= n;
-    if (score < bestScore - 1e-9) { bestScore = score; best = rows; }
-  }
-  return best;
-}
-
-function distribute(n, rows) {
-  const base = Math.floor(n / rows);
-  const extra = n % rows;
-  return Array.from({ length: rows }, (_, i) => base + (i < extra ? 1 : 0));
-}
-
-function layout() {
-  $('#empty').classList.toggle('hidden', app.cells.length > 0);
-  grid.classList.toggle('maximized', !!app.maximized);
-
-  // Collapsed cells sit in the dock as bare headers; the grid lays out the rest.
-  const shown = app.cells.filter(c => !c.collapsed);
-  const docked = app.cells.filter(c => c.collapsed).map(c => c.el);
-  if (dock.children.length !== docked.length || docked.some((el, i) => dock.children[i] !== el)) dock.replaceChildren(...docked);
-  grid.classList.toggle('all-collapsed', !shown.length && app.cells.length > 0);
-
-  // Preserve scroll positions: re-parenting a scroller can reset it.
-  const scrolls = shown.map(c => [c, c.msgs.scrollTop, c.stickToBottom]);
-
-  const n = shown.length;
-  const rect = grid.getBoundingClientRect(); // after the dock is filled, which takes its height
-  const rowsWanted = n ? chooseRows(n, rect.width, rect.height) : 0;
-  const counts = distribute(n, rowsWanted);
-  while (grid.children.length > rowsWanted) grid.lastElementChild.remove();
-  while (grid.children.length < rowsWanted) grid.append(h('div', { class: 'row' }));
-
-  let k = 0;
-  counts.forEach((count, r) => {
-    const row = grid.children[r];
-    const want = shown.slice(k, k + count).map(c => c.el);
-    k += count;
-    const same = row.children.length === want.length && want.every((el, i) => row.children[i] === el);
-    if (!same) row.replaceChildren(...want);
-    row.classList.toggle('has-max', !!app.maximized && want.includes(app.maximized.el));
-    for (const el of want) el.classList.toggle('max', !!app.maximized && el === app.maximized.el);
-  });
-
-  // Writes only: a scrollTop past the end is clamped, so scrollHeight is not read once per cell.
-  for (const [c, top, stick] of scrolls) {
-    c.msgs.scrollTop = stick ? 1e9 : top;
-  }
-  if (menuState.anchor) refreshMenu();
-}
 
 function updateSummary() {
   let waiting = 0, running = 0, done = 0, background = 0;
@@ -5752,10 +5729,10 @@ const CUSTOM_COLORS = [['--accent', 'Accent'], ['--link', 'Links'], ['--claude',
   ['--hl-keyword', 'Code: keywords'], ['--hl-string', 'Code: strings'], ['--hl-function', 'Code: functions'], ['--hl-comment', 'Code: comments']];
 // The cell header's buttons that can be hidden: [class, label].
 const HEAD_BUTTONS = [['act-afk', 'AFK'], ['act-handoff', 'Handoff'], ['act-detail', 'Detail level'], ['act-progress', 'Progress'], ['act-waiting', 'Waiting mode'], ['act-code', 'VS Code'],
-  ['act-terminal', 'Terminal'], ['act-reveal', FILE_MANAGER], ['act-collapse', 'Collapse'], ['act-max', 'Maximize'], ['act-close', 'Close']];
-const DEFAULT_PINNED = ['act-waiting', 'act-progress', 'act-collapse', 'act-close'];
+  ['act-terminal', 'Terminal'], ['act-reveal', FILE_MANAGER], ['act-group', 'Group'], ['act-spot', 'Spotlight'], ['act-collapse', 'Collapse'], ['act-max', 'Maximize'], ['act-close', 'Close']];
+const DEFAULT_PINNED = ['act-waiting', 'act-progress', 'act-spot', 'act-collapse', 'act-close'];
 /** Buttons a collapsed cell hides (style.css, .cell.collapsed); its "…" menu leaves them out too. */
-const COLLAPSED_HIDES = ['act-detail', 'act-handoff', 'act-progress', 'act-waiting', 'act-code', 'act-reveal', 'act-max'];
+const COLLAPSED_HIDES = ['act-detail', 'act-handoff', 'act-progress', 'act-waiting', 'act-code', 'act-reveal', 'act-spot', 'act-max'];
 /** The header's window buttons: "…" sits just before the first of them. */
 const WINDOW_BUTTONS = ['act-collapse', 'act-max', 'act-close'];
 const HEX = /^#[0-9a-f]{6}$/i;
@@ -6405,12 +6382,13 @@ setInterval(() => {
 document.addEventListener('keydown', e => {
   const cell = app.focused;
   const typing = e.target.matches?.('input, textarea, select'); // the target is document when nothing has focus
-  // Dev builds read the UI from disk, so a reload shows edits. It also stops every claude.
+  // A reload restarts HQ's page, which stops every claude, so the webview's own F5 and Ctrl+R never
+  // reload. Dev builds read the UI from disk and keep Ctrl+R (not F5, too easy to hit) to show edits.
   // Cmd on a Mac (Ctrl+B, N, O there are text-field cursor keys), Ctrl elsewhere.
   const mod = IS_MAC ? e.metaKey : e.ctrlKey;
-  if (build.liveUi && (e.key === 'F5' || (mod && (e.key === 'r' || e.key === 'R')))) {
+  if (e.key === 'F5' || (mod && (e.key === 'r' || e.key === 'R'))) {
     e.preventDefault();
-    flushState().then(() => location.reload());
+    if (build.liveUi && e.key !== 'F5') flushState().then(() => location.reload());
     return;
   }
   if (e.key === 'Escape' && menuState.anchor) {
@@ -6466,7 +6444,7 @@ document.addEventListener('keydown', e => {
 let layoutFrame = 0;
 new ResizeObserver(() => {
   if (layoutFrame) return;
-  layoutFrame = requestAnimationFrame(() => { layoutFrame = 0; layout(); });
+  layoutFrame = requestAnimationFrame(() => { layoutFrame = 0; layout(false); });
 }).observe(board);
 
 // A file dropped outside a cell would otherwise make the webview navigate to it.
@@ -6504,6 +6482,10 @@ function flushState() {
       progress: c.progressView || undefined,
       fork: c.fork || undefined,
       collapsed: c.collapsed || undefined,
+      spot: c.spot || undefined,
+      group: c.group || undefined,
+      flexW: c.flexW !== 1 ? c.flexW : undefined,
+      flexH: c.flexH !== 1 ? c.flexH : undefined,
       remote: c.remote === true ? true : undefined,
       bridgeSessionId: c.bridgeSessionId || undefined,
       draft: c.input.value.trim() ? c.input.value : undefined,
@@ -6537,6 +6519,7 @@ function flushState() {
     mcp: mcpSaved(),
     settings: app.settings,
     sidebarOpen: app.sidebarOpen,
+    board: boardSizes,
   };
   return invoke('save_state', { json: JSON.stringify(state) }).catch(err => console.error('save failed', err));
 }
@@ -6710,6 +6693,7 @@ async function restore() {
   app.workspaces = sanitizeWorkspaces(state && state.workspaces);
   projectColorPicks = sanitizeProjectColors(state && state.projectColors);
   app.sidebarOpen = !!(state && state.sidebarOpen);
+  Object.assign(boardSizes, sanitizeBoardSizes(state && state.board));
   sidebar.classList.toggle('hidden', !app.sidebarOpen);
   $('#toggle-sidebar').classList.toggle('on', app.sidebarOpen);
   // Cells whose folder is gone stay on the board, marked, so a rename or an unplugged drive loses nothing.
@@ -6733,7 +6717,9 @@ async function restore() {
     const open = app.cells.find(c => !c.collapsed);
     if (open) focusCell(open, true);
   }
-  layout();
+  tidyGroups(); // a saved group whose other cells did not come back
+  keepGroupsTogether();
+  layout(false); // the board appears in place, without gliding
   updateSummary();
   renderSidebar();
   for (const c of app.cells) if (!c.collapsed) autoGrow(c.input); // restored drafts, now that the cells are laid out
