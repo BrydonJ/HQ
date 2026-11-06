@@ -621,7 +621,7 @@ fn open_notification_settings(app: AppHandle) -> Result<(), String> {
 }
 
 /// A freshly loaded page owns no cells, so any `claude` still running belonged to a page that
-/// was reloaded (F5 in a dev build, or WebView2 recovering from a crash) and nobody can reach it.
+/// was reloaded (Ctrl+R in a dev build, or WebView2 recovering from a crash) and nobody can reach it.
 #[tauri::command]
 fn kill_all_sessions(sessions: State<'_, Sessions>) {
     sessions.kill_local();

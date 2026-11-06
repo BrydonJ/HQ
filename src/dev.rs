@@ -31,7 +31,7 @@ pub fn prepare<R: Runtime>(context: &mut Context<R>) {
     context.set_assets(Box::new(DiskAssets { root, embedded }));
 }
 
-/// Reads each UI file from `ui/` when it is requested, so a reload (F5) shows an edit without
+/// Reads each UI file from `ui/` when it is requested, so a reload (Ctrl+R) shows an edit without
 /// a rebuild. A file missing on disk falls back to the copy embedded at compile time.
 struct DiskAssets<R: Runtime> {
     root: PathBuf,

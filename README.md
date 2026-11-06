@@ -50,7 +50,7 @@ dev.cmd   :: stops the running dev copy, builds a debug build and starts it
 
 The dev copy runs next to the installed HQ. A debug build also:
 
-- Reads `ui\` from disk, so F5 (or Ctrl+R) shows a UI edit without a rebuild. A reload stops
+- Reads `ui\` from disk, so Ctrl+R shows a UI edit (F5 is turned off) without a rebuild. A reload stops
   every `claude` in the dev copy; the cells come back from its board. Rust changes still need
   `dev.cmd`.
 - Opens DevTools on port 9223 (`HQ_DEBUG_PORT` changes it), for CDP tools such as the Chrome
