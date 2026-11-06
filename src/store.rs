@@ -427,7 +427,7 @@ impl BackwardLines {
 /// blocks, and the file bytes a Read of a PDF or picture leaves in `toolUseResult`) so they do
 /// not cross IPC. The line stays valid JSON; an image block with an empty `data` is shown as
 /// omitted.
-fn blank_base64(line: &str) -> Cow<'_, str> {
+pub(crate) fn blank_base64(line: &str) -> Cow<'_, str> {
     let first = blank_runs(line, br#""data":""#);
     let second = blank_runs(first.as_deref().unwrap_or(line), br#""base64":""#);
     match (first, second) {

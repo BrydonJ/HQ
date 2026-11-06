@@ -7,11 +7,14 @@ mod codex;
 mod dev;
 #[cfg(feature = "hermes")]
 mod hermes;
+mod host;
+mod hostlink;
 #[cfg(not(target_os = "macos"))]
 mod icon;
 #[cfg(target_os = "macos")]
 mod macos;
 mod mcp;
+mod review;
 mod secret;
 mod session;
 mod setup;
@@ -45,13 +48,14 @@ async fn spawn_session(
     api_key: Option<bool>,
     backend: Option<String>,
     mcp: Option<bool>,
+    cell_key: Option<String>,
     on_event: Channel<InvokeResponseBody>,
 ) -> Result<u64, String> {
     let fork = fork.unwrap_or(false);
     let auto_tasks = auto_tasks.unwrap_or(true);
     let api_key = api_key.unwrap_or(false);
     let mcp = mcp.unwrap_or(false);
-    let opts = SpawnOptions { cwd, resume, permission_mode, model, effort, fork, auto_tasks, max_agents, api_key, mcp };
+    let opts = SpawnOptions { cwd, resume, permission_mode, model, effort, fork, auto_tasks, max_agents, api_key, mcp, cell_key };
     tauri::async_runtime::spawn_blocking(move || match backend.as_deref() {
         None | Some("claude") => app.state::<Sessions>().spawn(&app, opts, on_event),
         #[cfg(feature = "codex")]
@@ -75,6 +79,26 @@ fn send_line(sessions: State<'_, Sessions>, id: u64, line: String) -> Result<(),
 #[tauri::command]
 fn kill_session(sessions: State<'_, Sessions>, id: u64) {
     sessions.kill(id);
+}
+
+/// Whether a session runs in a session host (host.rs), so an update does not stop it.
+#[tauri::command]
+fn session_hosted(sessions: State<'_, Sessions>, id: u64) -> bool {
+    sessions.is_hosted(id)
+}
+
+/// The sessions that session hosts (host.rs) run: those that outlived the last HQ, or this page.
+/// Each is ready for `attach_session`; one no cell claims should be killed.
+#[tauri::command]
+async fn host_sessions(app: AppHandle) -> Result<Vec<session::HostedSession>, String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<Sessions>().adopt_hosted(&app)).await.map_err(|e| e.to_string())
+}
+
+/// Connects a cell to a hosted session: `on_event` first gets an `hq_replay` message with what the
+/// host kept of it, then its lines as `spawn_session` sends them.
+#[tauri::command]
+async fn attach_session(app: AppHandle, id: u64, from_ms: Option<u64>, on_event: Channel<InvokeResponseBody>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<Sessions>().attach(id, from_ms.unwrap_or(0), on_event)).await.map_err(|e| e.to_string())?
 }
 
 /// The frontend's answer to an HQ MCP tool call (see mcp.rs).
@@ -305,6 +329,15 @@ async fn usage_report(app: AppHandle, since_ms: Option<i64>) -> Result<Vec<usage
 #[tauri::command]
 async fn probe_usage() -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(session::probe_usage).await.map_err(|e| e.to_string())?
+}
+
+/// Asks the approval reviewer (review.rs) about a waiting permission card. Never fails: anything
+/// that goes wrong comes back as an escalation, which leaves the card for the user.
+#[tauri::command]
+async fn review_approval(req: review::ReviewRequest) -> review::Verdict {
+    tauri::async_runtime::spawn_blocking(move || review::review(&req))
+        .await
+        .unwrap_or_else(|e| review::Verdict::escalate(format!("the review stopped ({e})")))
 }
 
 #[tauri::command]
@@ -591,7 +624,7 @@ fn open_notification_settings(app: AppHandle) -> Result<(), String> {
 /// was reloaded (F5 in a dev build, or WebView2 recovering from a crash) and nobody can reach it.
 #[tauri::command]
 fn kill_all_sessions(sessions: State<'_, Sessions>) {
-    sessions.kill_all();
+    sessions.kill_local();
 }
 
 /// A session that `hq.exe --new-session <folder> ...` asked for, waiting for the UI to open it.
@@ -745,6 +778,11 @@ fn main() {
         let profile = args.iter().position(|a| a == "--profile").and_then(|i| args.get(i + 1)).cloned();
         std::process::exit(mcp::run_stdio_bridge(profile));
     }
+    // The session host (host.rs), which HQ starts to run its sessions: not a second HQ either.
+    if args.get(1).map(String::as_str) == Some("--session-host") {
+        let profile = args.iter().position(|a| a == "--profile").and_then(|i| args.get(i + 1)).cloned();
+        std::process::exit(host::run(profile));
+    }
     let profile = profile();
     let mut context = tauri::generate_context!();
     if let Some(name) = &profile {
@@ -791,6 +829,7 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Sessions::default())
+        .manage(hostlink::Link::default())
         .manage(store::Index::default())
         .manage(usage::UsageIndex::default())
         .manage(update::PendingUpdate::default())
@@ -801,6 +840,9 @@ fn main() {
             spawn_session,
             send_line,
             kill_session,
+            host_sessions,
+            attach_session,
+            session_hosted,
             mcp_reply,
             create_worktree,
             install_mcp_everywhere,
@@ -833,6 +875,7 @@ fn main() {
             search_sessions,
             usage_report,
             probe_usage,
+            review_approval,
             update_claude,
             claude_status,
             install_claude,
@@ -861,14 +904,31 @@ fn main() {
             #[cfg(not(target_os = "macos"))]
             icon::apply(app.handle());
             mcp::start(app.handle(), app.state::<Profile>().0.as_deref());
+            // Finds the sessions an earlier HQ left running and starts this build's host, off the
+            // UI thread; the first spawn or `host_sessions` waits for it.
+            let (handle, profile) = (app.handle().clone(), app.state::<Profile>().0.clone());
+            // Known before init runs: a host started meanwhile must be this profile's.
+            app.state::<hostlink::Link>().set_profile(profile.clone());
+            std::thread::spawn(move || {
+                handle.state::<hostlink::Link>().init(&handle, profile);
+                // Before the page asks: the surviving sessions' HQ tool calls need their tokens now.
+                handle.state::<Sessions>().adopt_hosted(&handle);
+                mcp::hosts_adopted();
+            });
             Ok(())
         })
         .build(context)
         .expect("failed to start HQ")
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
-                app.state::<Sessions>().kill_all();
-                mcp::cleanup();
+                // Closing to install an update leaves the hosts' sessions to wait for the new HQ.
+                // (Their MCP config files stay too: the sessions still use them.)
+                if update::updating() {
+                    app.state::<Sessions>().detach_for_update(app);
+                } else {
+                    app.state::<Sessions>().kill_all(app);
+                    mcp::cleanup();
+                }
                 setup::finish_login();
                 #[cfg(feature = "codex")]
                 codex::stop_helper();

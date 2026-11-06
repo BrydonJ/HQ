@@ -279,9 +279,16 @@ const nextRequestId = () => `hq-${Date.now().toString(36)}-${++reqSeq}`;
 class Cell {
   constructor({ cwd, sessionId = null, permissionMode = 'default', model = null, effort = null, title = '', aiTitle = false,
     customTitle = null, renamePending = false, detail, clean, progress = false, fork = false, collapsed = false,
-    missing = false, remote = null, bridgeSessionId = null, draft = '', backend = 'claude', resumeAfterUpdate = false, resumeQueued = null, api = false, apiKey = false, afk = null, afkLog = null,
-    hqId = null, spawnedBy = null, depth = 0 }) {
+    missing = false, remote = null, bridgeSessionId = null, draft = '', backend = 'claude', resumeAfterUpdate = false, resumeQueued = null, api = false, apiKey = false, afk = null, afkLog = null, review = false, launched = false,
+    hqId = null, spawnedBy = null, depth = 0, hosted = null }) {
     this.cwd = cwd;
+    // A session a session host kept running while HQ restarted: { id, startedMs }. reattach() connects to it.
+    this.hosted = hosted;
+    this.procHosted = false;       // this.proc runs in a session host, so an update does not stop it
+    this.quiet = false;            // redrawing what a session did while HQ was away: no notifications, nothing sent
+    this.historyUntil = null;      // transcript lines from this time on are left out: a hosted session's replay drew them
+    this.reattachDone = null;      // settles once reattach() has drawn the replay; a send waits for it
+    this.reattaching = false;      // reattach() is drawing the transcript
     // HQ's MCP tools (mcp.js): the id they know this session by, the session that started it, and how deep that goes.
     this.hqId = typeof hqId === 'string' && /^s[0-9a-z]{4}$/.test(hqId) && !app.cells.some(c => c.hqId === hqId) ? hqId : newHqId();
     this.spawnedBy = typeof spawnedBy === 'string' ? spawnedBy : null;
@@ -368,6 +375,9 @@ class Cell {
     this.limitAutoContinue = true; // only this open chat; uncheck on its usage error to keep it stopped
     this.afk = sanitizeCellAfk(afk); // AFK for this session (afk.js): null follows HQ, false never, else { until, since }
     this.afkLog = sanitizeAfkLog(afkLog); // what HQ did while the user was away, listed once they are back
+    this.review = review === true; // the approval reviewer (afk.js); set from the UI only
+    this.launched = launched === true; // opened by a command line, which may be an agent's
+    this.lastUserText = '';        // what the user last typed here: tells the reviewer what the work is for
     this.afkOn = false;        // AFK is in force here now (syncAfk)
     this.cost = { usd: 0, tokens: 0, procUsd: 0, procTokens: 0, apiUsd: 0 }; // this HQ run's spend; proc* = last total of the current process; apiUsd = on HQ's API key
     this.apiMode = !!api && this.backend === 'claude'; // the user switched this session to HQ's API key until the plan's usage is back
@@ -673,6 +683,7 @@ class Cell {
    * both are tried again after each turn.
    */
   async syncTitle() {
+    if (this.quiet) return; // replaying: applyReplay asks once at the end
     if (this.proc == null || !this.sessionId || this.fork) return;
     if (this.renamePending) {
       const name = this.customTitle;
@@ -1707,6 +1718,7 @@ class Cell {
   }
 
   markUnread() {
+    if (this.quiet) return;
     const seen = document.hasFocus() && app.focused === this && !this.collapsed && !document.hidden;
     if (!seen) {
       this.unread = true;
@@ -1729,6 +1741,7 @@ class Cell {
         for (let attempt = 0; ; attempt++) {
           try {
             this.proc = await this.spawnProcess(onApi);
+            this.procHosted = await invoke('session_hosted', { id: this.proc }).catch(() => false);
             // The plan's prompt cache does not carry over to the key, or back. A replayed cache's credential is unknown.
             if (this.cache && this.cache.onApi != null && this.cache.onApi !== onApi) this.dropCache();
             this.procOnApi = onApi;
@@ -1780,8 +1793,148 @@ class Cell {
       maxAgents: app.settings.maxAgents, // 0 is no limit
       apiKey,
       mcp: app.settings.mcp !== false,
+      cellKey: this.hqId,
       onEvent: channel,
     });
+  }
+
+  /**
+   * Connects to the session a session host kept running while HQ restarted (or the page reloaded):
+   * draws the transcript up to when it started, then the host replays everything since, then it goes on live.
+   * Falls back to the update's resume when the host cannot be reached.
+   */
+  async reattach() {
+    const hosted = this.hosted;
+    this.hosted = null;
+    this.historyPending = false;
+    const marked = this.resumeAfterUpdate;
+    this.resumeAfterUpdate = false; // carries on by itself; no resume prompt
+    this.historyUntil = hosted.fromMs || null; // the host replays the open turn from here; the transcript draws what came before
+    this.reattaching = true;
+    // Set now: with no proc, a send while the history loads would start a second agent on the session.
+    this.proc = hosted.id;
+    this.procHosted = true;
+    this.procOnApi = this.onApiNext();
+    let done;
+    this.reattachDone = new Promise(resolve => { done = resolve; });
+    try {
+      await this.reattachInner(hosted, marked);
+    } finally {
+      this.reattachDone = null;
+      done();
+    }
+  }
+
+  async reattachInner(hosted, marked) {
+    await this.loadHistory(); // up to historyUntil, which stays: "Load earlier" must leave out the same lines
+    if (this.closing) {
+      invoke('kill_session', { id: hosted.id }).catch(() => {});
+      this.reattaching = false;
+      return;
+    }
+    const channel = new Channel();
+    channel.onmessage = batch => this.onLine(batch);
+    const replayed = new Promise(resolve => { this.replayDrawn = resolve; });
+    try {
+      await invoke('attach_session', { id: hosted.id, fromMs: hosted.fromMs || 0, onEvent: channel });
+    } catch (err) {
+      console.warn('reattach failed', err);
+      // It ended while HQ was away, or the user stopped or cleared it while the history loaded: that
+      // is its exit (which force-stop and /clear wait on), and the transcript has the rest.
+      if (/no such session|not running/.test(String(err))) {
+        const told = this.forced || this.quietExit;
+        invoke('kill_session', { id: hosted.id }).catch(() => {});
+        this.onExit({ type: 'hq_exit', code: 0, stderr: [] });
+        if (!told) await this.redrawWhole(); // a stop or a clear keeps the view as it is
+        else this.historyUntil = null;
+        this.reattaching = false;
+        if (!told) this.notice(`Session restored. ${this.agent} resumes when you send a message.`);
+        return;
+      }
+      this.proc = null;
+      this.procHosted = false;
+      invoke('kill_session', { id: hosted.id }).catch(() => {});
+      await this.redrawWhole(); // the view stops where the run began; the transcript has the rest
+      this.reattaching = false;
+      if (marked) { this.resumeAfterUpdate = true; this.resumeAfterRestart(); }
+      else this.notice(`Could not reconnect to the running session (${err}). ${this.agent} resumes when you send a message.`, true);
+      return;
+    }
+    // The replay comes down the channel after the call returns; sends wait until it is drawn.
+    await withTimeout(replayed, 15000);
+    this.replayDrawn = null;
+    this.reattaching = false;
+  }
+
+  /** Draws the transcript again in full, for a reattach that did not get the replay meant to follow the cut-off history. */
+  async redrawWhole() {
+    this.historyUntil = null;
+    if (!this.sessionId || this.closing) return;
+    for (const m of [this.tools, this.tasks, this.taskCreates, this.taskProgress, this.openTools]) m.clear();
+    this.msgs.replaceChildren();
+    this.historyStart = 0;
+    await this.loadHistory();
+  }
+
+  /** The host's record of a reattached session: what went in and out of it since it started, oldest first. */
+  applyReplay(m) {
+    this.replayQueue = [];
+    this.drawReplay(m).finally(() => {
+      const queued = this.replayQueue || [];
+      this.replayQueue = null;
+      for (const batch of queued) this.onLine(batch);
+    });
+  }
+
+  /** Draws the replay through the live handlers, in slices that give the event loop back (a long turn is thousands of lines). */
+  async drawReplay(m) {
+    const entries = Array.isArray(m.entries) ? m.entries : [];
+    if (m.truncated) this.notice('The start of this run is not shown: it was too long to keep.');
+    const seen = Number(m.seen) || 0;
+    let sliceStart = performance.now();
+    let open = false; // whether the replay ends inside a turn
+    for (const e of entries) {
+      const line = e && e.line;
+      if (!line || typeof line !== 'object') continue;
+      this.quiet = !(Number(e.seq) > seen); // what the old window never saw (a turn that ended while HQ was away) is news
+      this.stateOnly = !!e.state;
+      try {
+        if (e.in) this.replayInbound(line);
+        else this.handle(line, false);
+      } catch (err) {
+        console.error('replay failed', err, line);
+      }
+      this.stateOnly = false;
+      if (line.type === 'result') open = false;
+      else if (!e.state && (line.type === 'assistant' || line.type === 'stream_event' || (e.in && line.type === 'user'))) open = true;
+      if (this.closing) break;
+      if (performance.now() - sliceStart > 12) {
+        this.quiet = false;
+        await new Promise(resolve => setTimeout(resolve, 0));
+        sliceStart = performance.now();
+      }
+    }
+    this.quiet = false;
+    this.stateOnly = false;
+    if (!open && this.status === 'running') this.setStatus('idle'); // no turn in flight: nothing to wait for
+    if (this.replayDrawn) this.replayDrawn();
+    if (this.proc == null) return; // it ended while HQ was away; onExit said so
+    // Prompts still waiting are news again: the old window's notifications went with it.
+    for (const [id, card] of this.pending) if (card.replayed) { card.replayed = false; this.armPrompt(id, card.afkReq || {}, card); }
+    this.syncTitle();
+    this.notice(`Reconnected: ${this.agent} kept working while HQ restarted.`);
+    this.refreshApplied();
+  }
+
+  /** A line HQ had sent the session: a prompt is drawn, and an answer clears the prompt card it answered. */
+  replayInbound(line) {
+    if (line.type === 'user') {
+      this.handle(line, true);
+      this.setStatus('running');
+    } else if (line.type === 'control_response') {
+      const id = line.response && line.response.request_id;
+      if (id && this.pending.has(id)) this.dropPrompt(id);
+    }
   }
 
   async initialize() {
@@ -1818,6 +1971,7 @@ class Cell {
 
   write(obj) {
     if (this.proc == null) return Promise.resolve();
+    if (this.quiet) return Promise.resolve(false); // replaying: the old window already sent what was needed
     return invoke('send_line', { id: this.proc, line: JSON.stringify(obj) }).then(() => true, err => { this.notice(String(err), true); return false; }); // resolves to whether it was sent
   }
 
@@ -1825,7 +1979,10 @@ class Cell {
   control(request) {
     const requestId = nextRequestId();
     const reply = new Promise(resolve => this.controls.set(requestId, resolve));
-    this.write({ type: 'control_request', request_id: requestId, request });
+    this.write({ type: 'control_request', request_id: requestId, request }).then(sent => {
+      // Not sent (no process, or a replay): nothing will answer it.
+      if (sent !== true && this.controls.has(requestId)) { this.controls.get(requestId)(null); this.controls.delete(requestId); }
+    });
     return reply;
   }
 
@@ -1840,6 +1997,7 @@ class Cell {
   async submit(prompt = null, restore = '') {
     if (this.missing || this.clearing) return;
     if (this.historyLoading) await this.historyLoading; // the transcript is drawn first, so live messages follow it
+    if (this.reattachDone) await this.reattachDone; // and a reconnecting session's replay too
     const text = prompt ?? this.input.value.trim();
     const images = prompt == null ? this.attachments : [];
     if (!text && !images.length) return;
@@ -1923,6 +2081,7 @@ class Cell {
     const written = this.write({ type: 'user', message: { role: 'user', content }, parent_tool_use_id: null });
     // After the first prompt is written, so that Claude has a message to title the remote session from.
     if (this.remote && this.spawnedFresh) this.autoEnableRemote();
+    if (prompt == null && text && text !== this.launchPrompt) this.lastUserText = text; // HQ's own prompts are not the user's words, nor is a command line's
     this.lastSent = draft; // until Claude answers, so that a process that dies at startup gives the prompt back
     if (hint.length && await written) this.setAskTasks(false); // one prompt only; a failed send keeps the toggle for the retry
   }
@@ -2061,8 +2220,8 @@ class Cell {
     for (const id of [...this.pending.keys()]) this.dropPrompt(id);
     Object.assign(this, {
       sessionId: null, fork: false, bridgeSessionId: null, aiTitle: false, renamePending: false, titleTries: 0,
-      titleAsked: '', promptText: '', sentPrompts: [], lastReply: '', lastSaid: null, lastSaidOpen: false, wmNews: false, replyLog: [], mcpExpect: false, turnTexts: [], tasksStale: false, lastDuration: '',
-      historyStart: 0, historyPending: false, statusAnswer: null, live: null, promptWritten: false, lastSent: null,
+      titleAsked: '', promptText: '', sentPrompts: [], lastUserText: '', lastReply: '', lastSaid: null, lastSaidOpen: false, wmNews: false, replyLog: [], mcpExpect: false, turnTexts: [], tasksStale: false, lastDuration: '',
+      historyStart: 0, historyUntil: null, historyPending: false, statusAnswer: null, live: null, promptWritten: false, lastSent: null,
       remoteAsked: false, currentTool: null, turnStart: null, turnTools: 0, resumeWarning: null,
     });
     const title = name.replace(/\s+/g, ' ').trim();
@@ -2133,7 +2292,9 @@ class Cell {
     } else if (!Array.isArray(batch)) {
       list = [batch];
     }
-    for (const m of list) {
+    if (this.replayQueue) { this.replayQueue.push(list); return; } // a replay is drawing: these follow it
+    for (let i = 0; i < list.length; i++) {
+      const m = list[i];
       if (this.closing) return;
       if (!m || typeof m !== 'object') continue;
       try {
@@ -2141,6 +2302,8 @@ class Cell {
       } catch (err) {
         console.error('render failed', err, m);
       }
+      // The replay just started drawing in slices: the rest of this batch waits behind it.
+      if (this.replayQueue && i + 1 < list.length) { this.replayQueue.push(list.slice(i + 1)); return; }
     }
   }
 
@@ -2156,6 +2319,7 @@ class Cell {
       case 'control_cancel_request': return this.dropPrompt(m.request_id);
       case 'control_response': return this.onControlResponse(m);
       case 'hq_exit': return this.onExit(m);
+      case 'hq_replay': return this.applyReplay(m);
       case 'rate_limit_event':
         if (this.backend !== 'claude' || this.procOnApi) return; // an API key's limits say nothing about the plan
         this.onRateLimit(m.rate_limit_info);
@@ -2179,7 +2343,7 @@ class Cell {
         this.modeSel.value = m.permissionMode;
       }
       if (changed) saveState();
-      if (this.status !== 'running') this.setStatus('running');
+      if (this.status !== 'running' && !this.stateOnly) this.setStatus('running'); // a replayed state line says how things stand, not that a turn began
       // A pending rename waits for the turn's end, when Claude's transcript surely exists.
       if (!this.renamePending) this.syncTitle();
     } else if (m.subtype === 'status') {
@@ -2607,7 +2771,7 @@ class Cell {
       if (!this.limitHit && !LIMIT_TEXT.test(String(detail))) this.notice(`Error: ${detail}`, true);
       if (this.backend === 'claude' && this.procOnApi && /invalid api key/i.test(String(detail))) {
         this.notice(`HQ's API key (${app.apiKeyHint}) was refused. Replace it in Settings > API key for API credits.`, true);
-      } else if (this.backend === 'claude' && LOGIN_TEXT.test(String(detail))) checkClaudeSetup({ force: true });
+      } else if (this.backend === 'claude' && LOGIN_TEXT.test(String(detail)) && !this.quiet) checkClaudeSetup({ force: true });
     }
     this.noteResult(m);
     if (this.compacting) this.setCompacting(false);
@@ -2615,6 +2779,11 @@ class Cell {
     if (!local && typeof m.duration_ms === 'number') this.lastDuration = `${(m.duration_ms / 1000).toFixed(1)}s`;
     this.renderMeta();
     this.setStatus('idle');
+    if (this.quiet) { // a turn the old window already saw end
+      this.refreshState();
+      this.syncTitle();
+      return;
+    }
     if (!local) {
       if (this.wmView && this.bgTasks.length) this.wmNews = true;
       this.markUnread();
@@ -2646,6 +2815,7 @@ class Cell {
     const lost = this.lastSent;
     this.lastSent = null;
     this.proc = null;
+    this.procHosted = false;
     for (const resolve of this.controls.values()) resolve(null);
     this.controls.clear();
     this.finishLive();
@@ -2686,6 +2856,7 @@ class Cell {
   onControlRequest(m) {
     const req = m.request || {};
     if (req.subtype !== 'can_use_tool') {
+      if (this.quiet) return; // refused, and said so, before HQ restarted
       // Hooks and SDK MCP servers are never registered by HQ, so refuse anything else, and say so.
       this.write({ type: 'control_response', response: { subtype: 'error', request_id: m.request_id, error: `HQ does not handle ${req.subtype}` } });
       this.notice(`${this.agent} sent a request that HQ does not handle (${req.subtype || 'unknown'}), and HQ refused it.`, true);
@@ -2698,13 +2869,20 @@ class Cell {
     card.dataset.kind = req.tool_name === 'AskUserQuestion' ? 'question' : req.tool_name === 'ExitPlanMode' ? 'plan' : 'permission';
     card.afkReq = req;
     this.pending.set(m.request_id, card);
-    afkWatch(this, m.request_id, card);
     this.prompts.append(card);
     this.syncPromptsBar(); // a card arriving while minimized only updates the count; it does not reopen the area
     this.unread = false;
     this.refreshState();
+    if (this.quiet) { card.replayed = true; return; } // applyReplay rings once for those still open
+    this.armPrompt(m.request_id, req, card);
+  }
+
+  /** Starts AFK's watch over a prompt card and asks for the user. */
+  armPrompt(requestId, req, card) {
+    card.armedAt = Date.now();
+    afkWatch(this, requestId, card);
     invoke('request_attention').catch(() => {});
-    notifyWaiting(this, req, m.request_id, card);
+    notifyWaiting(this, req, requestId, card);
   }
 
   /** Folds the prompts area to its bar, or opens it again. Only a class changes, so nothing is re-rendered. */
@@ -2740,6 +2918,7 @@ class Cell {
     const card = this.pending.get(requestId);
     if (card) {
       afkUnwatch(card);
+      reviewUnwatch(card);
       card.remove();
     }
     this.pending.delete(requestId);
@@ -2789,6 +2968,7 @@ class Cell {
     choices.push(choice(String(choices.length + 1), 'No', null, deny));
 
     const card = h('div', { class: 'prompt' }, title, reason, preview, h('div', { class: 'choices' }, choices), feedback);
+    card.feedback = feedback;
     card.hotkeys = choices.map(c => c.run);
     card.notifyAnswers = { approve: allow, deny };
     return card;
@@ -2904,8 +3084,22 @@ class Cell {
     } catch (err) {
       this.notice(`Could not load history: ${err}`, true);
     }
-    const lines = Array.isArray(chunk.lines) ? chunk.lines : [];
+    let lines = Array.isArray(chunk.lines) ? chunk.lines : [];
     this.historyStart = Number(chunk.start) || 0;
+    if (this.historyUntil) {
+      lines = lines.filter(l => !(lineTime(l) >= this.historyUntil));
+      // A long-running hosted process can fill whole chunks after its start: page back to what precedes it.
+      while (!lines.length && this.historyStart > 0) {
+        let earlier;
+        try {
+          earlier = await invoke(TRANSCRIPT_COMMANDS[this.backend], { sessionId: this.sessionId, cwd: this.cwd, before: this.historyStart });
+        } catch { break; }
+        const start = Number(earlier.start) || 0;
+        if (start >= this.historyStart) break;
+        this.historyStart = start;
+        lines = (Array.isArray(earlier.lines) ? earlier.lines : []).filter(l => !(lineTime(l) >= this.historyUntil));
+      }
+    }
     const prevStick = this.stickToBottom;
     this.stickToBottom = false;
     this.replaying = true;
@@ -2921,8 +3115,8 @@ class Cell {
     if (this.historyStart > 0) this.msgs.prepend(this.earlierNote());
     if (this.fork) this.notice('Forked: your first message starts a copy of this session. The original is left as it was.');
     else if (this.missing) this.notice('The folder of this session is missing, so the session cannot continue. Use "Locate folder…" below, or close it.');
-    else if (!this.resumeAfterUpdate) this.notice(lines.length ? `Session restored. ${this.agent} resumes when you send a message.` : 'Session restored (no history found).');
-    if (last && endsMidTurn(last) && !this.resumeAfterUpdate) this.notice('The last turn was interrupted when HQ closed.');
+    else if (!this.resumeAfterUpdate && !this.reattaching) this.notice(lines.length ? `Session restored. ${this.agent} resumes when you send a message.` : 'Session restored (no history found).');
+    if (last && endsMidTurn(last) && !this.resumeAfterUpdate && !this.reattaching) this.notice('The last turn was interrupted when HQ closed.');
     if (this.resumeWarning) this.notice(this.resumeWarning, true);
     this.pinToBottom();
   }
@@ -2971,7 +3165,8 @@ class Cell {
       this.notice(`Could not load earlier history: ${err}`, true);
       return;
     }
-    const lines = Array.isArray(chunk.lines) ? chunk.lines : [];
+    let lines = Array.isArray(chunk.lines) ? chunk.lines : [];
+    if (this.historyUntil) lines = lines.filter(l => !(lineTime(l) >= this.historyUntil)); // a hosted session's replay drew those
     // Draw into a detached container (items append to this.msgs), then move the result to the top.
     const shown = this.msgs;
     const staging = h('div');
@@ -3647,6 +3842,10 @@ const TASK_HINT = '(HQ: track this work with TaskCreate/TaskUpdate so the user c
 const RESUME_PROMPT = 'HQ restarted to install an update while you were working. That stopped your last turn, including any '
   + 'command still running and any background tasks or agents. Carry on from where you left off: check what finished, '
   + 'rerun what was cut short, and restart any background task you still need.';
+/** When a transcript line was written (ms), or NaN. */
+function lineTime(line) {
+  try { return Date.parse(JSON.parse(line).timestamp); } catch { return NaN; }
+}
 const RESUME_NOTICE = 'HQ restarted to install an update while this session was working, so it carried on by itself.';
 /** Hermes' wording of TASK_HINT; hermes.rs (COMPOSER_TASK_HINT) cuts it out of replayed history. */
 const HERMES_TASK_HINT = '(HQ: track this work with your todo tool so the user can follow progress.)';
@@ -4130,7 +4329,8 @@ function addCell(opts, { restore = false, batch = false, background = false } = 
   // `background`: a session an agent started (mcp.js) must not take the user's keyboard.
   if (!background) focusCell(cell, !batch);
   // Claude starts on the first message, so an empty cell costs no claude process.
-  if (restore) {
+  if (restore && cell.hosted) cell.reattach(); // its session kept running: drawn now, even collapsed, so its lines land after the history
+  else if (restore) {
     if (cell.collapsed) cell.historyPending = true; // drawn when the cell is first opened
     else cell.loadHistory();
   } else if (!background) {
@@ -5714,6 +5914,13 @@ function buildMoreMenu(menuEl, cell) {
   });
   menuEl.append(h('div', { class: 'menu-title', text: 'More' }),
     ...(items.length ? items : [h('div', { class: 'menu-empty', text: 'Every button is pinned to the header.' })]));
+  if (reviewBackend(cell)) {
+    menuEl.append(h('div', { class: 'menu-title', text: 'This session' }),
+      h('button', { class: `menu-item${cell.review ? ' checked' : ''}`, onclick: () => { closeMenu(); setCellReview(cell, !cell.review); },
+        title: 'A permission that has waited a minute goes to a separate Claude call first. It can approve it once or leave it for you; it never refuses.' },
+      icon(cell.review ? 'check' : 'blank'),
+      h('span', { class: 'menu-main' }, h('span', { class: 'name', text: 'Review approvals' }), h('span', { class: 'desc', text: 'Harmless ones go ahead after a minute' }))));
+  }
 }
 
 function changeSetting(key, value) {
@@ -6051,7 +6258,16 @@ function safeToRestart() {
 
 /** No turn, prompt or background task running, and no unsent text or images that a restart would lose. */
 function sessionsIdle() {
-  return app.cells.every(c => !c.busy() && !c.spawning && !c.renaming && !c.input.value.trim() && !c.attachments.length);
+  return !mcpCallsInFlight() && app.cells.every(c => !(c.busy() && !c.procHosted) && !c.spawning && !c.renaming && !c.input.value.trim() && !c.attachments.length);
+}
+
+/**
+ * HQ's MCP tool calls run in HQ itself (mcp.rs), not in the session host: a restart fails one in
+ * flight and loses an ask_user card, which no replay restores. So a hosted cell's agent waiting
+ * on one still holds an update back.
+ */
+function mcpCallsInFlight() {
+  return mcp.cancels.size > 0 || app.cells.some(c => [...c.pending.keys()].some(id => String(id).startsWith('mcp-')));
 }
 
 /**
@@ -6061,9 +6277,11 @@ function sessionsIdle() {
  */
 function restartLosesNothing() {
   // A first turn with no session ID yet, or a fork not yet made, has no transcript of its own to resume from.
-  return app.cells.every(c => !c.spawning && !c.renaming && !c.attachments.length && !(c.busy() && (!c.sessionId || c.fork))
+  // A session a session host runs carries on through the restart, so only what is still in this window counts for it.
+  if (mcpCallsInFlight()) return false;
+  return app.cells.every(c => !c.spawning && !c.renaming && !c.attachments.length && (c.procHosted || (!(c.busy() && (!c.sessionId || c.fork))
     // Images the agent may not have read yet: a resume carries text only.
-    && !(c.lastSent && c.lastSent.images.length) && !c.queuedTexts.some(q => q.images));
+    && !(c.lastSent && c.lastSent.images.length) && !c.queuedTexts.some(q => q.images))));
 }
 
 async function installUpdate() {
@@ -6272,6 +6490,8 @@ function flushState() {
       apiKey: c.apiKeyed || undefined,
       afk: c.afk ?? undefined,
       afkLog: c.afkLog.length ? c.afkLog : undefined,
+      review: c.review || undefined,
+      launched: c.launched || undefined,
       // Only in the save just before an update restarts HQ; the first save after it drops the mark.
       resumeAfterUpdate: c.resumeMark ? true : undefined,
       resumeQueued: c.resumeMark && c.resumeMark.queued.length ? c.resumeMark.queued : undefined,
@@ -6473,11 +6693,19 @@ async function restore() {
   // Cells whose folder is gone stay on the board, marked, so a rename or an unplugged drive loses nothing.
   const saved = ((state && state.cells) || []).filter(c => c && c.cwd);
   const exists = await Promise.all(saved.map(c => invoke('folder_exists', { path: c.cwd }).catch(() => false)));
+  // Sessions a session host kept running while HQ was closed (an update), or while this page reloaded.
+  const hosted = await invoke('host_sessions').catch(err => { console.warn('host sessions', err); return []; });
+  const claimed = new Set();
   saved.forEach((c, i) => {
     // Version 1 saved the model Claude reported, not one the user picked; drop it so the cell follows the default.
     if ((state.version || 1) < 2) c.model = null;
-    addCell({ ...c, missing: c.backend === 'cloud' ? false : !exists[i], remote: c.remote === true }, { restore: true, batch: true });
+    const backend = c.backend || 'claude';
+    const h = hosted.find(x => x.cellKey && x.cellKey === c.hqId && x.backend === backend && !claimed.has(x.id));
+    if (h) claimed.add(h.id);
+    addCell({ ...c, missing: c.backend === 'cloud' ? false : !exists[i], remote: c.remote === true, hosted: h ? { id: h.id, fromMs: h.replayFromMs || h.startedMs } : null }, { restore: true, batch: true });
   });
+  // No cell claims these (closed just before HQ went, say): nothing could reach them.
+  for (const h of hosted) if (!claimed.has(h.id)) invoke('kill_session', { id: h.id }).catch(() => {});
   // Each restored cell took focus in turn; a collapsed one must not keep it.
   if (app.focused && app.focused.collapsed) {
     const open = app.cells.find(c => !c.collapsed);
@@ -6514,13 +6742,14 @@ const LAUNCH_MODES = ['default', 'acceptEdits', 'plan', 'auto'];
 
 async function openLaunch(r) {
   const missing = !(await invoke('folder_exists', { path: r.cwd }).catch(() => false));
-  const opts = { cwd: r.cwd, missing };
+  const opts = { cwd: r.cwd, missing, launched: true };
   if (r.model) opts.model = r.model;
   if (r.effort) opts.effort = r.effort;
   // Never bypassPermissions from a command line: whoever runs hq.exe must not skip the prompts.
   if (LAUNCH_MODES.includes(r.permissionMode)) opts.permissionMode = r.permissionMode;
   const cell = addNewCell(opts);
   if (r.prompt) {
+    cell.launchPrompt = r.prompt.trim(); // as submit() reads the composer
     cell.input.value = r.prompt;
     autoGrow(cell.input);
     if (!missing) cell.submit(); // a missing folder keeps the prompt as a draft

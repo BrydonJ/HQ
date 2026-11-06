@@ -22,7 +22,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
@@ -45,6 +45,11 @@ const INSTRUCTIONS: &str = "You are running inside HQ, a desktop app where the u
 
 /// The port the server listens on, once `start` has run.
 static PORT: OnceLock<u16> = OnceLock::new();
+/// Whether the sessions an earlier HQ left running in a session host have their tokens again.
+static HOSTS_ADOPTED: Mutex<bool> = Mutex::new(false);
+static HOSTS_ADOPTED_CV: Condvar = Condvar::new();
+/// How long a call with an unknown token waits for that, as HQ starts.
+const ADOPT_WAIT: Duration = Duration::from_secs(30);
 static APP: OnceLock<AppHandle> = OnceLock::new();
 /// token -> the session (the id `Sessions` hands out) it was issued to, None until it has started.
 static TOKENS: Mutex<Option<HashMap<String, Option<u64>>>> = Mutex::new(None);
@@ -62,18 +67,30 @@ static DISCOVERY: Mutex<Option<PathBuf>> = Mutex::new(None);
 /// `~/.hq/mcp.json` (`mcp-<profile>.json` for another profile): the URL and the outside token,
 /// readable only by this user, for the bridge an agent outside HQ starts.
 fn discovery_file(profile: Option<&str>) -> Option<PathBuf> {
-    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).filter(|h| !h.is_empty())?;
     let name = match profile {
         Some(p) => format!("mcp-{p}.json"),
         None => "mcp.json".into(),
     };
-    Some(PathBuf::from(home).join(".hq").join(name))
+    Some(crate::host::hq_dir()?.join(name))
+}
+
+/// The port the server listens on, once started.
+pub fn port() -> Option<u16> {
+    PORT.get().copied()
 }
 
 /// Starts the server on a thread of its own. Sessions started before it is up, or when it could not
 /// bind, run without HQ's tools.
 pub fn start(app: &AppHandle, profile: Option<&str>) {
-    let listener = match TcpListener::bind(("127.0.0.1", 0)) {
+    // The port the last run had, if it is free: sessions that outlived that run (host.rs) have its
+    // URL in their config and reach HQ's tools again.
+    let port_file = crate::host::hq_dir().map(|d| d.join(match profile {
+        Some(p) => format!("mcp-port-{p}"),
+        None => "mcp-port".into(),
+    }));
+    let last_port = port_file.as_ref().and_then(|f| std::fs::read_to_string(f).ok()).and_then(|t| t.trim().parse::<u16>().ok());
+    let bound = last_port.and_then(|p| TcpListener::bind(("127.0.0.1", p)).ok()).map(Ok).unwrap_or_else(|| TcpListener::bind(("127.0.0.1", 0)));
+    let listener = match bound {
         Ok(l) => l,
         Err(e) => {
             eprintln!("HQ MCP server could not start: {e}");
@@ -83,6 +100,10 @@ pub fn start(app: &AppHandle, profile: Option<&str>) {
     let Ok(addr) = listener.local_addr() else { return };
     let _ = APP.set(app.clone());
     let _ = PORT.set(addr.port());
+    if let Some(file) = &port_file {
+        let _ = file.parent().map(std::fs::create_dir_all);
+        let _ = write_private(file, addr.port().to_string().as_bytes());
+    }
     // The frontend refuses outside calls unless the user installed HQ's tools machine-wide.
     if let (Some(file), Some(url)) = (discovery_file(profile), url()) {
         let token = new_token();
@@ -121,6 +142,10 @@ impl Grant {
         Some(Grant { token, url, bound: false })
     }
 
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
     pub fn bind(mut self, id: u64) {
         if let Some(map) = TOKENS.lock().unwrap().as_mut() {
             map.insert(self.token.clone(), Some(id));
@@ -153,6 +178,7 @@ impl Grant {
     /// it forwards to it (from the environment, so the token never appears on a command line). The
     /// same shape as the machine-wide entry, which Codex merges these into: a `url` here would clash
     /// with its `command`. Codex gives a tool a minute by default; waiting on sessions takes longer.
+    #[cfg(feature = "codex")]
     pub fn codex_args(&self) -> (Vec<String>, [(&'static str, String); 2]) {
         let mut args = Vec::new();
         for (key, value) in [
@@ -173,7 +199,7 @@ impl Grant {
     pub fn acp_server(&self) -> Value {
         json!({
             "name": SERVER_NAME,
-            "command": bridge_program(),
+            "command": session_bridge_program(),
             "args": ["--mcp-stdio"],
             "env": [{ "name": URL_VAR, "value": self.url }, { "name": TOKEN_VAR, "value": self.token }],
         })
@@ -204,6 +230,23 @@ pub fn release(id: u64) {
     }
     if let Some(file) = CONFIG_FILES.lock().unwrap().as_mut().and_then(|m| m.remove(&id)) {
         let _ = std::fs::remove_file(file);
+    }
+}
+
+/// A session that outlived HQ (host.rs) keeps the token it was given: it maps to the session's new id.
+pub fn adopt(token: &str, id: u64) {
+    TOKENS.lock().unwrap().get_or_insert_with(HashMap::new).insert(token.to_owned(), Some(id));
+}
+
+/// The bridge a session's agent runs: the session host's copy of this program, which the
+/// installer neither stops nor needs to replace, so an update leaves the session's tools running.
+fn session_bridge_program() -> String {
+    if crate::hostlink::disabled() {
+        return bridge_program();
+    }
+    match crate::hostlink::host_exe() {
+        Ok(p) => p.to_string_lossy().into_owned(),
+        Err(_) => bridge_program(),
     }
 }
 
@@ -244,7 +287,7 @@ pub fn reply(id: u64, text: String, is_error: bool) {
 /// 256 bits for a session's token. `RandomState` is seeded from the OS's random source, and its
 /// keys are never seen outside this process. std does not promise that is a CSPRNG; the token only
 /// guards a 127.0.0.1 port, so swap in getrandom if one ever joins the dependency tree.
-fn new_token() -> String {
+pub(crate) fn new_token() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     let mut token = String::with_capacity(64);
@@ -260,7 +303,7 @@ fn new_token() -> String {
 }
 
 /// Writes a file only this user can read (on Unix; on Windows the temp folder is per user already).
-fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -316,7 +359,7 @@ const TOOLS: &[Tool] = &[
     Tool {
         name: "send_message",
         description: "Sends a message to another session, as a new prompt. A working session reads it at its next step. Its answer is not returned here: use wait_for_sessions, then read_session.",
-        auto_allow: false,
+        auto_allow: true,
         schema: || json!({
             "type": "object",
             "properties": { "session": session_arg(), "message": { "type": "string" } },
@@ -389,7 +432,7 @@ const TOOLS: &[Tool] = &[
     Tool {
         name: "schedule_message",
         description: "Sends a message to a session (yourself by default) later: after a delay, at a time, or once the plan's usage limit has reset. Survives HQ restarts.",
-        auto_allow: false,
+        auto_allow: true,
         schema: || json!({
             "type": "object",
             "properties": {
@@ -531,7 +574,10 @@ fn handle_connection(mut stream: TcpStream) {
     if let Err(status) = check(&request) {
         return respond(&mut stream, status, "text/plain", status_text(status).as_bytes());
     }
-    let caller = match caller(&request) {
+    let caller = match caller(&request).or_else(|| {
+        wait_hosts_adopted();
+        caller(&request)
+    }) {
         Some(c) => c,
         None => return respond(&mut stream, 401, "text/plain", b"Unauthorized"),
     };
@@ -589,6 +635,26 @@ fn check(r: &Request) -> Result<(), u16> {
         return Err(405);
     }
     Ok(())
+}
+
+/// The sessions the hosts kept running have their tokens again (`Sessions::adopt_hosted`).
+pub fn hosts_adopted() {
+    *HOSTS_ADOPTED.lock().unwrap() = true;
+    HOSTS_ADOPTED_CV.notify_all();
+}
+
+/// Waits, as HQ starts, until the hosts' sessions have their tokens: this server takes the old
+/// port at once, and an agent that ran on through the restart may call before HQ knows it.
+fn wait_hosts_adopted() {
+    let deadline = Instant::now() + ADOPT_WAIT;
+    let mut done = HOSTS_ADOPTED.lock().unwrap();
+    while !*done {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return;
+        }
+        done = HOSTS_ADOPTED_CV.wait_timeout(done, left).unwrap().0;
+    }
 }
 
 /// The session the bearer token belongs to.

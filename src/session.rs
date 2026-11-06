@@ -19,6 +19,16 @@ use serde_json::{json, Value};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Manager};
 
+use crate::hostlink::{self, HostConn, Link, Sink};
+
+/// Why a session host did not start a session.
+pub(crate) enum HostError {
+    /// The host is unreachable: start the session in HQ instead.
+    Link,
+    /// The host tried and the agent did not start.
+    Spawn(String),
+}
+
 const STDERR_TAIL: usize = 40;
 
 /// Lines read within this long of a batch's first line go to the frontend as one message.
@@ -44,8 +54,8 @@ const NO_SUBAGENT_CAP: u32 = 1_000_000;
 /// The Claude Console key a session marked for it bills to. In `-p` mode Claude Code always uses it
 /// when it is set, but these outrank it in Claude Code's authentication precedence, so such a
 /// session must not inherit them.
-const API_KEY_VAR: &str = "ANTHROPIC_API_KEY";
-const OUTRANK_API_KEY: [&str; 4] = ["ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"];
+pub(crate) const API_KEY_VAR: &str = "ANTHROPIC_API_KEY";
+pub(crate) const OUTRANK_API_KEY: [&str; 4] = ["ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"];
 const TASK_PROMPT: &str = "You are running inside HQ, a dashboard where the user watches several sessions at once and judges progress from your task list. For work with three or more steps, or that will take more than a few minutes, create the tasks with TaskCreate before starting and keep them current with TaskUpdate: mark each one in_progress as you start it and completed as soon as it is done. Skip the task list for questions and quick single-step jobs.";
 
 pub struct Session {
@@ -60,6 +70,20 @@ pub struct Session {
     /// The child leads a process group of its own (see `hide_console`); this is its ID.
     #[cfg(unix)]
     pgid: u32,
+    /// Run by a session host (host.rs) rather than here: the host and its id for the session.
+    hosted: Option<(Arc<HostConn>, u64)>,
+}
+
+/// A session a host runs, as `host_sessions` hands it to the frontend.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostedSession {
+    pub id: u64,
+    pub cell_key: Option<String>,
+    pub backend: String,
+    pub started_ms: u64,
+    /// Where `attach` with this `from_ms` replays from: the transcript has everything before it.
+    pub replay_from_ms: u64,
 }
 
 #[derive(Default)]
@@ -68,6 +92,7 @@ pub struct Sessions {
     map: Mutex<HashMap<u64, Arc<Session>>>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
 pub struct SpawnOptions {
     pub cwd: String,
     pub resume: Option<String>,
@@ -84,6 +109,10 @@ pub struct SpawnOptions {
     pub api_key: bool,
     /// Gives the session HQ's own MCP server (mcp.rs), with a token of its own.
     pub mcp: bool,
+    /// The frontend's name for the cell, which a session host keeps so the cell finds its
+    /// session again after HQ restarts.
+    #[serde(default)]
+    pub cell_key: Option<String>,
 }
 
 /// The `claude` executable chosen in HQ's own settings, which beats `HQ_CLAUDE`.
@@ -118,6 +147,14 @@ pub(crate) fn claude_program() -> String {
 /// `kill_group` can end the shells and tools it starts (the job object's job, below). macOS: the
 /// login shell's PATH, which an app launched from Finder lacks (see macos.rs).
 pub(crate) fn hide_console(cmd: &mut Command) {
+    child_flags(cmd);
+    #[cfg(target_os = "macos")]
+    cmd.env("PATH", crate::macos::path());
+}
+
+/// `hide_console` less the macOS PATH: for the session host (host.rs), whose children get the
+/// environment HQ worked out for them.
+pub(crate) fn child_flags(cmd: &mut Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -129,8 +166,6 @@ pub(crate) fn hide_console(cmd: &mut Command) {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    #[cfg(target_os = "macos")]
-    cmd.env("PATH", crate::macos::path());
     #[cfg(not(any(unix, windows)))]
     let _ = cmd;
 }
@@ -325,6 +360,36 @@ impl Sessions {
                 let _ = std::fs::remove_file(file);
             }
         };
+        if let Some(conn) = app.state::<Link>().primary(app) {
+            let meta = json!({
+                "cellKey": opts.cell_key,
+                "backend": "claude",
+                "mcpToken": grant.as_ref().map(|g| g.token().to_owned()),
+                "mcpPort": crate::mcp::port(),
+                "mcpConfig": config_file.as_ref().map(|f| f.to_string_lossy().into_owned()),
+            });
+            match self.spawn_hosted(&conn, hostlink::spawn_message("claude", &cmd, meta), events.clone()) {
+                Ok(id) => {
+                    if let Some(grant) = grant {
+                        grant.bind(id);
+                    }
+                    if let Some(file) = config_file {
+                        crate::mcp::keep_config_file(id, file);
+                    }
+                    // It may have ended already (a bad --resume): its token and file go now.
+                    if !self.tracks(id) {
+                        crate::mcp::release(id);
+                    }
+                    return Ok(id);
+                }
+                // The host could not start it either: the same error as starting it here.
+                Err(HostError::Spawn(e)) => {
+                    remove_config();
+                    return Err(format!("Could not start `{}` ({e}). Is Claude Code installed and on PATH?", claude_program()));
+                }
+                Err(HostError::Link) => {} // run it here instead
+            }
+        }
         let mut child = cmd.spawn().map_err(|e| {
             remove_config();
             let hint = if cfg!(target_os = "macos") {
@@ -381,6 +446,7 @@ impl Sessions {
             _job: job,
             #[cfg(unix)]
             pgid,
+            hosted: None,
         });
         self.map.lock().unwrap().insert(id, session);
 
@@ -414,10 +480,120 @@ impl Sessions {
             _job: None,
             #[cfg(unix)]
             pgid: 0,
+            hosted: None,
         });
         self.map.lock().unwrap().insert(id, session);
         spawn_stdout_reader(app.clone(), id, stdout, events, || (Some(0), Vec::new()));
         id
+    }
+
+    /// Starts a session on a host. A `Link` error means the host is unreachable and the caller
+    /// should start the session itself.
+    pub(crate) fn spawn_hosted(&self, conn: &Arc<HostConn>, msg: Value, events: Channel<InvokeResponseBody>) -> Result<u64, HostError> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+        let (tx, rx) = mpsc::channel::<Outgoing>();
+        std::thread::spawn(move || run_batcher(rx, events));
+        // hostlink puts the sink and the map entry in place as it reads the reply, ahead of the first line.
+        conn.spawn(msg, Sink { local: id, tx: Some(tx) }).map_err(|e| {
+            // Only a host that is gone means start it here: one that timed out may still start it,
+            // and two agents on one session must never run (hostlink kills a late start).
+            if conn.alive() { HostError::Spawn(e) } else { HostError::Link }
+        })?;
+        Ok(id)
+    }
+
+    /// Whether HQ still tracks session `id` (a hosted one may already have ended).
+    pub(crate) fn tracks(&self, id: u64) -> bool {
+        self.map.lock().unwrap().contains_key(&id)
+    }
+
+    pub(crate) fn insert_hosted(&self, id: u64, conn: Arc<HostConn>, hid: u64) {
+        self.map.lock().unwrap().insert(
+            id,
+            Arc::new(Session {
+                input: Mutex::new(None),
+                child: None,
+                on_kill: Mutex::new(None),
+                #[cfg(windows)]
+                _job: None,
+                #[cfg(unix)]
+                pgid: 0,
+                hosted: Some((conn, hid)),
+            }),
+        );
+    }
+
+    /// The sessions the hosts run, each under an id here that `attach` then connects to a cell:
+    /// after HQ restarted, or its page reloaded.
+    pub fn adopt_hosted(&self, app: &AppHandle) -> Vec<HostedSession> {
+        // Held throughout: HQ's setup and the page's restore both adopt as HQ starts, and two at
+        // once would each give the same session an id of its own.
+        static ADOPTING: Mutex<()> = Mutex::new(());
+        let _adopting = ADOPTING.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out = Vec::new();
+        for conn in app.state::<Link>().conns() {
+            let Ok(list) = conn.list() else { continue };
+            for s in list {
+                let Some(hid) = s["id"].as_u64() else { continue };
+                let meta = &s["meta"];
+                let known = self
+                    .map
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|(_, v)| v.hosted.as_ref().is_some_and(|(c, h)| Arc::ptr_eq(c, &conn) && *h == hid))
+                    .map(|(k, _)| *k);
+                let id = match known {
+                    Some(id) => id,
+                    None => {
+                        let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+                        // Its lines wait in the host until a cell attaches.
+                        conn.add_sink(hid, Sink { local: id, tx: None });
+                        self.insert_hosted(id, conn.clone(), hid);
+                        // Only on the port it was issued for: one someone else held meanwhile may have seen it.
+                        // Residual risk, accepted: a local process that takes this port while HQ is down
+                        // for an update sees the session's calls and token, and could reuse it once HQ
+                        // has the port again. Refusing it would cost every surviving session HQ's
+                        // tools after every update; a running agent cannot be given a new token.
+                        let same_port = meta["mcpPort"].as_u64().is_some_and(|p| crate::mcp::port() == Some(p as u16));
+                        if let Some(token) = meta["mcpToken"].as_str().filter(|_| same_port) {
+                            crate::mcp::adopt(token, id);
+                        }
+                        if let Some(file) = meta["mcpConfig"].as_str() {
+                            crate::mcp::keep_config_file(id, file.into());
+                        }
+                        id
+                    }
+                };
+                out.push(HostedSession {
+                    id,
+                    cell_key: meta["cellKey"].as_str().map(str::to_owned),
+                    backend: meta["backend"].as_str().unwrap_or("claude").to_owned(),
+                    started_ms: s["startedMs"].as_u64().unwrap_or(0),
+                    replay_from_ms: s["replayFromMs"].as_u64().unwrap_or(0),
+                });
+            }
+        }
+        out
+    }
+
+    /// Connects a hosted session to a cell: `events` first gets an `hq_replay` line with what the
+    /// host kept of the session, then its lines as they come.
+    pub fn attach(&self, id: u64, from_ms: u64, events: Channel<InvokeResponseBody>) -> Result<(), String> {
+        let session = self.get(id)?;
+        let Some((conn, hid)) = session.hosted.clone() else { return Err("not a hosted session".into()) };
+        let (tx, rx) = mpsc::channel::<Outgoing>();
+        std::thread::spawn(move || run_batcher(rx, events));
+        conn.attach(hid, from_ms, Sink { local: id, tx: Some(tx) })
+    }
+
+    pub fn is_hosted(&self, id: u64) -> bool {
+        self.map.lock().unwrap().get(&id).is_some_and(|s| s.hosted.is_some())
+    }
+
+    /// Drops a session HQ no longer tracks (its host said it ended).
+    pub(crate) fn forget(&self, id: u64) {
+        self.map.lock().unwrap().remove(&id);
     }
 
     /// Queues a line for the session's writer thread and returns at once. Lines reach claude in the
@@ -427,6 +603,9 @@ impl Sessions {
             return Err("payload must be a single JSON line".into());
         }
         let session = self.get(id)?;
+        if let Some((conn, hid)) = &session.hosted {
+            return conn.send(*hid, &line).map_err(|_| "session is not running".to_string());
+        }
         let input = session.input.lock().unwrap();
         // The writer thread ends when claude stops reading, which means the session is going away.
         input.as_ref().and_then(|tx| tx.send(line).ok()).ok_or_else(|| "session is not running".to_string())
@@ -434,6 +613,17 @@ impl Sessions {
 
     pub fn kill(&self, id: u64) {
         let Some(session) = self.map.lock().unwrap().remove(&id) else { return };
+        // The host reports the exit, which ends the cell's lines.
+        if let Some((conn, hid)) = &session.hosted {
+            conn.kill(*hid);
+            // A cell waits on its exit, which goes through the sink. One no cell attached (adopted,
+            // then not claimed) gets no exit here, so it is let go now.
+            if !conn.has_cell(*hid) {
+                conn.drop_sink(*hid);
+                crate::mcp::release(id);
+            }
+            return;
+        }
         // Ends the writer thread, which closes claude's stdin.
         session.input.lock().unwrap().take();
         if let Some(stop) = session.on_kill.lock().unwrap().take() {
@@ -452,10 +642,36 @@ impl Sessions {
         // Dropping the last Arc closes the job handle, which ends the whole process tree.
     }
 
-    pub fn kill_all(&self) {
-        let ids: Vec<u64> = self.map.lock().unwrap().keys().copied().collect();
+    /// HQ is quitting: every session ends, the hosts' too.
+    pub fn kill_all(&self, app: &AppHandle) {
+        self.kill_local();
+        for conn in app.state::<Link>().conns() {
+            conn.kill_all();
+        }
+        self.map.lock().unwrap().clear();
+    }
+
+    /// Ends the sessions running inside HQ, leaving the hosts' alone. A freshly loaded page owns
+    /// no cells, so these belonged to a page that reloaded; a hosted one is attached again instead.
+    pub fn kill_local(&self) {
+        let ids: Vec<u64> = self.map.lock().unwrap().iter().filter(|(_, s)| s.hosted.is_none()).map(|(k, _)| *k).collect();
         for id in ids {
             self.kill(id);
+        }
+    }
+
+    /// The update did not install after all: the hosts go back to the wait for a crash.
+    pub fn cancel_detach(&self, app: &AppHandle) {
+        for conn in app.state::<Link>().conns() {
+            conn.detach(hostlink::LOST_GRACE_SECS);
+        }
+    }
+
+    /// HQ is closing to install an update: hosted sessions carry on and wait for it, the rest end.
+    pub fn detach_for_update(&self, app: &AppHandle) {
+        self.kill_local();
+        for conn in app.state::<Link>().conns() {
+            conn.detach(hostlink::UPDATE_GRACE_SECS);
         }
     }
 
@@ -464,7 +680,7 @@ impl Sessions {
     }
 }
 
-fn spawn_stderr_reader(stderr: impl Read + Send + 'static, tail: Arc<Mutex<VecDeque<String>>>) {
+pub(crate) fn spawn_stderr_reader(stderr: impl Read + Send + 'static, tail: Arc<Mutex<VecDeque<String>>>) {
     std::thread::spawn(move || {
         for line in BufReader::new(stderr).lines() {
             let Ok(line) = line else { break };
@@ -504,7 +720,7 @@ fn remote_name_prefix(cwd: &str) -> String {
 
 /// Writes queued lines to claude's stdin on a thread of its own, so a multi-MB image payload
 /// never stalls the caller and lines still arrive in the order they were queued.
-fn spawn_stdin_writer(mut stdin: ChildStdin) -> mpsc::Sender<String> {
+pub(crate) fn spawn_stdin_writer(mut stdin: ChildStdin) -> mpsc::Sender<String> {
     let (tx, rx) = mpsc::channel::<String>();
     std::thread::spawn(move || {
         for line in rx {
@@ -522,7 +738,7 @@ fn spawn_stdin_writer(mut stdin: ChildStdin) -> mpsc::Sender<String> {
 
 /// What the stdout reader hands the batcher. The exit is queued behind every line, so it is
 /// always the last thing the frontend sees.
-enum Outgoing {
+pub(crate) enum Outgoing {
     Line(String),
     Exit(String),
 }
@@ -531,7 +747,7 @@ enum Outgoing {
 ///
 /// Dropped lines are only those the frontend is certain to ignore, because a wrong drop loses
 /// reply text while a wrong keep only costs a little time.
-fn is_forwardable(line: &str) -> bool {
+pub(crate) fn is_forwardable(line: &str) -> bool {
     line.starts_with('{') && !is_unused_stream_event(line) && serde_json::from_str::<IgnoredAny>(line).is_ok()
 }
 
@@ -591,7 +807,7 @@ fn spawn_stdout_reader(
 /// On Unix it then ends what claude left running in its group, as closing the job does on Windows.
 /// A group ID is not handed out again while any member lives; an empty group's could be in the
 /// moment since the reap, a pid-wrap race too unlikely to guard against.
-fn wait_for_exit(child: &Mutex<Child>) -> Option<i32> {
+pub(crate) fn wait_for_exit(child: &Mutex<Child>) -> Option<i32> {
     loop {
         let mut child = child.lock().unwrap();
         match child.try_wait() {
@@ -612,7 +828,7 @@ fn wait_for_exit(child: &Mutex<Child>) -> Option<i32> {
 /// spares the frontend a second JSON parse per line.
 ///
 /// The exit goes out in the last array, as its last element, and nothing follows it.
-fn run_batcher(rx: mpsc::Receiver<Outgoing>, events: Channel<InvokeResponseBody>) {
+pub(crate) fn run_batcher(rx: mpsc::Receiver<Outgoing>, events: Channel<InvokeResponseBody>) {
     let mut batch = String::new();
     while let Ok(first) = rx.recv() {
         batch.push('[');
@@ -823,13 +1039,13 @@ mod tests {
 }
 
 #[cfg(windows)]
-mod job {
+pub(crate) mod job {
     use std::os::windows::io::AsRawHandle;
     use std::process::Child;
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
 
@@ -863,6 +1079,13 @@ mod job {
 
         pub fn assign(&self, child: &Child) -> bool {
             unsafe { AssignProcessToJobObject(self.0, child.as_raw_handle() as HANDLE) != 0 }
+        }
+
+        /// Ends every process in the job now, as closing it would.
+        pub fn terminate(&self) {
+            unsafe {
+                TerminateJobObject(self.0, 1);
+            }
         }
     }
 
