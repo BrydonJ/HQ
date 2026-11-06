@@ -383,6 +383,14 @@ body:not(.fade-buttons):not(.hover-buttons) .cell.wm-on .cell-head:hover > .icon
 }
 .cell.state-running .wv-busy, .cell.state-bg .wv-busy { display: block; }
 .cell.wrapping-up .wv-busy { color: var(--waiting); }
+/* Finished, and nothing is happening any more: the project's colour gives way to green and a tick replaces the loader. */
+.cell.wm-done .waiting-view, .cell.wm-done .cell-head { --proj: var(--done); }
+.wv-check { display: none; width: 64px; height: 64px; color: var(--done); }
+.cell.wm-done .wv-loader { display: none; }
+.cell.wm-done .wv-check { display: block; }
+.cell.wm-done .wv-busy { display: block; color: var(--done); font-weight: 600; }
+.cell.wm-done .status-dot { background: var(--done); animation: none; }
+.cell.wm-done .act-waiting.on { color: var(--done); }
 .wv-body { flex: none; width: min(460px, 100%); font-size: 13px; }
 .wv-body > .pv-progress { margin: 0 0 12px; }
 .wv-body .pv-bar { height: 4px; background: color-mix(in srgb, var(--fg) 10%, transparent); }
