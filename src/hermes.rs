@@ -148,9 +148,27 @@ pub fn spawn(app: &AppHandle, opts: SpawnOptions, events: Channel<InvokeResponse
 /// How long `hermes sessions discard` may take; it waits on Hermes' gateway.
 const DISCARD_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// How long Hermes may stay silent before the cell's session is open (and its model and mode
+/// set) before HQ gives up on it. Longer than `DISCARD_TIMEOUT`, which can fall inside the wait.
+/// Without it a `session/new` Hermes never answers leaves the cell "working" for good, every
+/// message held in `early`.
+/// Hermes starts in seconds and a load streams its replay as it goes, so two minutes of
+/// silence means it is stuck, not slow.
+const OPEN_QUIET: Duration = Duration::from_secs(120);
+
+/// Leads a side question asked in a fresh session, which has none of the conversation.
+const SIDE_FRESH_PREFACE: &str = "(HQ: you are answering a side question about another Hermes session that is busy with a turn. You cannot see its conversation; answer only from what follows, and do not use tools or carry on its work.)";
+
 /// How long a turn Hermes started itself must go without news, with no tool or question open,
 /// before HQ takes it as over: Hermes reports no end for a turn HQ did not send.
 const OWN_TURN_QUIET: Duration = if cfg!(test) { Duration::from_millis(300) } else { Duration::from_secs(30) };
+
+/// How long a turn HQ sent may go without a line from Hermes before HQ writes it a harmless
+/// request (`session/list`, which Hermes answers from its own catalog). Hermes' ACP adapter has
+/// been seen holding a whole turn's updates for hours (its gateway link up, the turn long done)
+/// and handing them all over the moment HQ next wrote to it; a line now and then keeps that from
+/// waiting on the user. A long tool is silent too, so this only writes, never ends the turn.
+const TURN_NUDGE: Duration = if cfg!(test) { Duration::from_millis(300) } else { Duration::from_secs(60) };
 
 /// Stop's answer during a turn Hermes started itself. Hermes' gateway cancels only the prompts
 /// this connection sent (`acp_adapter/gateway_server.py`, `cancel`) and refuses `/stop`, and the
@@ -508,6 +526,8 @@ enum Call {
     /// `session/set_mode` putting a side question's fork back to asking before edits.
     SideMode { fork: String, question: String },
     SidePrompt { fork: String },
+    /// `session/list` written to a turn gone quiet (see `TURN_NUDGE`); its answer is not used.
+    Nudge,
     /// The cell's own model or mode, set before anything the cell sent is passed on.
     Setup(After),
 }
@@ -561,6 +581,8 @@ struct Bridge {
     early: Vec<String>,
     /// Setup calls Hermes has yet to answer; the cell's lines wait in `early` until it has.
     setup: usize,
+    /// While the session is not yet ready: when Hermes last said anything. `None` once ready.
+    opening: Option<Instant>,
     /// Prompts sent while a turn runs. Hermes would answer them at once and run them later
     /// without a reply of their own, so they wait here and each gets its own turn and result.
     prompts: VecDeque<(Value, Value)>, // (ACP prompt, the frontend's content for HQ's copy)
@@ -568,6 +590,8 @@ struct Bridge {
     /// A turn Hermes started itself, such as on a background process's notice: when it began and
     /// when Hermes last reported on it. Its updates stream in like a turn's, but no reply ends it.
     own_turn: Option<(Instant, Instant)>,
+    /// When Hermes last said anything, or HQ last nudged it: what `TURN_NUDGE` counts from.
+    heard: Instant,
     models: Vec<Value>,
     model: String,
     default_model: String,
@@ -625,9 +649,11 @@ impl Bridge {
             events,
             early: Vec::new(),
             setup: 0,
+            opening: Some(Instant::now()),
             prompts: VecDeque::new(),
             in_turn: false,
             own_turn: None,
+            heard: Instant::now(),
             models: Vec::new(),
             model: String::new(),
             default_model: String::new(),
@@ -666,12 +692,23 @@ impl Bridge {
             Call::Initialize,
         );
         loop {
-            let event = match self.own_turn {
-                // Only a turn Hermes started itself needs the clock: nothing else ends it.
-                Some(_) => match events.recv_timeout(Duration::from_millis(250)) {
+            // Only a turn Hermes started itself, or a session still opening, needs the clock:
+            // nothing else ends them.
+            let mut wait = match (self.own_turn, self.opening) {
+                (Some(_), _) => Some(Duration::from_millis(250)),
+                (None, Some(since)) => Some((since + OPEN_QUIET).saturating_duration_since(Instant::now())),
+                (None, None) => None,
+            };
+            if let Some(nudge) = self.nudge_wait() {
+                wait = Some(wait.map_or(nudge, |w| w.min(nudge)));
+            }
+            let event = match wait {
+                Some(wait) => match events.recv_timeout(wait) {
                     Ok(event) => event,
                     Err(mpsc::RecvTimeoutError::Timeout) => {
                         self.own_turn_quiet();
+                        self.open_quiet();
+                        self.turn_quiet();
                         continue;
                     }
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -681,6 +718,9 @@ impl Bridge {
                     Err(_) => break,
                 },
             };
+            if self.opening.is_some() && !matches!(event, Event::Frontend(_)) {
+                self.opening = Some(Instant::now());
+            }
             match event {
                 Event::Frontend(line) => {
                     if self.session.is_none() || self.setup > 0 {
@@ -751,6 +791,7 @@ impl Bridge {
     // ---------- from Hermes ----------
 
     fn from_hermes(&mut self, line: &str) {
+        self.heard = Instant::now();
         let Ok(msg) = serde_json::from_str::<Value>(line) else { return };
         match (msg.get("method").and_then(Value::as_str), msg.get("id")) {
             (Some(method), Some(id)) => self.hermes_request(method, id.clone(), &msg["params"]),
@@ -816,6 +857,7 @@ impl Bridge {
                 }
                 self.setup_done();
             }
+            Call::Nudge => {}
         }
     }
 
@@ -841,6 +883,14 @@ impl Bridge {
             }
             Call::Initialize | Call::Open { .. } => self.fatal(&format!("Hermes could not start the session: {error}")),
             Call::Prompt { started } => self.turn_ended(started, "error", &Value::Null, Some(error)),
+            // Hermes forks only an idle session (`session_busy` mid-turn) and has no /btw over ACP
+            // yet, so a side question asked mid-turn goes to a fresh session. That session cannot
+            // see the conversation, only what `side_prompt` put in the question.
+            Call::SideFork { request_id, question } if details == Some("session_busy") => {
+                let question = format!("{SIDE_FRESH_PREFACE}\n\n{question}");
+                let params = json!({ "cwd": self.opts.cwd, "mcpServers": [] });
+                self.call("session/new", params, Call::SideFork { request_id, question });
+            }
             Call::Control { request_id, .. } | Call::SideFork { request_id, .. } => self.reply_err(&request_id, error),
             Call::SideMode { fork, .. } | Call::SidePrompt { fork } => {
                 if let Some((request_id, _)) = self.sides.remove(&fork) {
@@ -849,11 +899,13 @@ impl Bridge {
             }
             // The cell keeps whatever Hermes is really using; system/init reports that.
             Call::Setup(_) => self.setup_done(),
+            Call::Nudge => {}
         }
     }
 
     /// Reports an error the cell cannot recover from, then ends Hermes.
     fn fatal(&mut self, error: &str) {
+        self.opening = None;
         self.dismiss(|_| true);
         self.emit(json!({ "type": "result", "subtype": "error", "is_error": true, "result": error }));
         self.hermes = None;
@@ -930,6 +982,7 @@ impl Bridge {
 
     /// Passes on what the cell sent while the session was opening.
     fn ready(&mut self) {
+        self.opening = None;
         for line in std::mem::take(&mut self.early) {
             self.frontend(&line);
         }
@@ -1220,6 +1273,36 @@ impl Bridge {
         }
     }
 
+    /// Whether a nudge can be written (see `TURN_NUDGE`): `None` otherwise, so a turn whose
+    /// Hermes stdin is gone does not wake the loop for nothing.
+    fn nudge_wait(&self) -> Option<Duration> {
+        (self.in_turn && self.hermes.is_some()).then(|| (self.heard + TURN_NUDGE).saturating_duration_since(Instant::now()))
+    }
+
+    /// Writes Hermes a harmless request when a turn HQ sent has gone quiet (see `TURN_NUDGE`).
+    fn turn_quiet(&mut self) {
+        if self.nudge_wait() == Some(Duration::ZERO) {
+            self.heard = Instant::now(); // once a `TURN_NUDGE`, whether or not Hermes answers
+            // A Hermes that holds its output holds the answers too, so only the latest nudge is
+            // kept: each write may be the one that frees it, and the calls stay bounded. A late
+            // answer to a forgotten one matches no call and is dropped.
+            self.calls.retain(|_, c| !matches!(c, Call::Nudge));
+            // Narrowed to the cell's folder, so Hermes reads less of its catalog to answer.
+            let params = json!({ "cwd": self.opts.cwd });
+            self.call("session/list", params, Call::Nudge);
+        }
+    }
+
+    /// Gives up on a session Hermes went silent while opening. What the cell sent meanwhile is
+    /// dropped with it; the error tells the user to send it again in a new cell.
+    fn open_quiet(&mut self) {
+        let Some(since) = self.opening else { return };
+        if since.elapsed() >= OPEN_QUIET {
+            let secs = OPEN_QUIET.as_secs();
+            self.fatal(&format!("Hermes did not open the session within {secs} s, so nothing you sent reached it. Close this cell and start a new one. Once it is closed, any error Hermes printed is in ~/.hq/hosts/host.log."));
+        }
+    }
+
     fn turn_ended(&mut self, started: Instant, stop: &str, usage: &Value, error: Option<&str>) {
         self.flush();
         self.in_turn = false;
@@ -1324,6 +1407,7 @@ impl Bridge {
         }));
         self.record(json!({ "type": "user", "message": { "role": "user", "content": content } }));
         self.in_turn = true;
+        self.heard = Instant::now(); // the turn's quiet counts from its start, not from the idle before it
         // A turn Hermes started itself runs ahead of this prompt. Hermes' gateway queues the
         // prompt behind it and replies only once the prompt has run, so that reply ends both.
         self.own_turn = None;
@@ -1999,6 +2083,138 @@ mod tests {
         let _ = child.kill();
     }
 
+    #[test]
+    fn a_side_question_hermes_will_not_fork_goes_to_a_fresh_session() {
+        let (mut child, mut hermes, input, rx) = scripted();
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": 0, "result": {} }));
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": 1, "result": { "sessionId": "s1" } }));
+        std::thread::sleep(Duration::from_millis(100));
+        input.send(json!({ "type": "control_request", "request_id": "side", "request": { "subtype": "side_question", "question": "Sitrep?" } }).to_string()).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        // Mid-turn, Hermes refuses the fork; HQ opens a fresh session (id 3) instead.
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": 2, "error": { "code": -32603, "message": "Internal error", "data": { "details": "session_busy" } } }));
+        std::thread::sleep(Duration::from_millis(100));
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": 3, "result": { "sessionId": "side1" } }));
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": 4, "result": {} }));
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "method": "session/update", "params": { "sessionId": "side1", "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "All on track." } } } }));
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": 5, "result": { "stopReason": "end_turn" } }));
+        let reply = next_matching(&rx, "the side answer", |v| v["type"] == "control_response" && v["response"]["request_id"] == "side");
+        assert_eq!(reply["response"]["subtype"], "success", "{reply}");
+        assert_eq!(reply["response"]["response"]["response"], "All on track.");
+        drop(input);
+        drop(hermes);
+        let _ = child.kill();
+    }
+
+    #[test]
+    fn a_session_hermes_never_opens_ends_with_an_error() {
+        let bridge = |opening: Option<Instant>| {
+            let dir = std::env::temp_dir().join(format!("hq-hermes-open-quiet-{}", std::process::id()));
+            let opts = SpawnOptions { cwd: dir.to_string_lossy().into_owned(), resume: None, permission_mode: None, model: None, effort: None, fork: false, auto_tasks: false, max_agents: None, api_key: false, mcp: false, cell_key: None };
+            let mut sink = if cfg!(windows) { Command::new("findstr") } else { Command::new("cat") };
+            if cfg!(windows) {
+                sink.arg("^");
+            }
+            sink.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+            hide_console(&mut sink);
+            let mut child = sink.spawn().unwrap();
+            let (lines, out) = std::io::pipe().unwrap();
+            let mut b = Bridge::new(child.stdin.take().unwrap(), out, dir, opts, json!([]), mpsc::channel().0);
+            b.opening = opening;
+            (b, lines, child)
+        };
+        let read_all = |lines: PipeReader| BufReader::new(lines).lines().map(|l| serde_json::from_str::<Value>(&l.unwrap()).unwrap()).collect::<Vec<_>>();
+
+        // Still within the wait: nothing happens.
+        let (mut b, lines, mut child) = bridge(Some(Instant::now()));
+        b.open_quiet();
+        assert!(b.hermes.is_some());
+        b.early.push("held".into());
+        b.ready(); // the session opened: the clock stops
+        assert!(b.opening.is_none());
+        b.open_quiet();
+        assert!(b.hermes.is_some());
+        drop(b);
+        assert!(read_all(lines).iter().all(|v| v["type"] != "result"));
+        let _ = child.kill();
+
+        // Silent past the wait: the cell gets an error and Hermes is let go.
+        let (mut b, lines, mut child) = bridge(Instant::now().checked_sub(OPEN_QUIET + Duration::from_secs(1)));
+        b.open_quiet();
+        assert!(b.hermes.is_none());
+        assert!(b.opening.is_none());
+        drop(b);
+        let result = read_all(lines).into_iter().find(|v| v["type"] == "result").expect("an error result");
+        assert_eq!(result["is_error"], true);
+        assert!(result["result"].as_str().unwrap().contains("did not open the session"), "{result}");
+        let _ = child.kill();
+    }
+
+    #[test]
+    fn a_quiet_turn_gets_a_harmless_nudge_once_a_wait() {
+        let dir = std::env::temp_dir().join(format!("hq-hermes-nudge-{}", std::process::id()));
+        let opts = SpawnOptions { cwd: dir.to_string_lossy().into_owned(), resume: None, permission_mode: None, model: None, effort: None, fork: false, auto_tasks: false, max_agents: None, api_key: false, mcp: false, cell_key: None };
+        let mut sink = if cfg!(windows) { Command::new("findstr") } else { Command::new("cat") };
+        if cfg!(windows) {
+            sink.arg("^");
+        }
+        sink.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+        hide_console(&mut sink);
+        let mut child = sink.spawn().unwrap();
+        let (_lines, out) = std::io::pipe().unwrap();
+        let mut b = Bridge::new(child.stdin.take().unwrap(), out, dir, opts, json!([]), mpsc::channel().0);
+        let nudges = |b: &Bridge| b.calls.values().filter(|c| matches!(c, Call::Nudge)).count();
+        let long_ago = || Instant::now().checked_sub(TURN_NUDGE * 2).unwrap();
+
+        // No turn of HQ's open: however quiet, nothing is written or waited on.
+        b.heard = long_ago();
+        assert_eq!(b.nudge_wait(), None);
+        b.turn_quiet();
+        assert_eq!(nudges(&b), 0);
+
+        // A prompt sent after a long idle starts the clock afresh.
+        b.session = Some("s1".into());
+        b.send_prompt(json!({ "sessionId": "s1", "prompt": [] }), json!("hi"));
+        assert!(b.in_turn);
+        b.turn_quiet();
+        assert_eq!(nudges(&b), 0, "nudged a turn that had only just begun");
+
+        // A turn quiet past the wait gets one nudge, and no second while it is unanswered.
+        b.heard = long_ago();
+        b.turn_quiet();
+        assert_eq!(nudges(&b), 1);
+        b.heard = long_ago();
+        b.turn_quiet();
+        assert_eq!(nudges(&b), 1, "an unanswered nudge was kept beside its successor");
+
+        // Its answer changes nothing, and the next waits a whole wait again.
+        let nudge_id = |b: &Bridge| *b.calls.iter().find(|(_, c)| matches!(c, Call::Nudge)).unwrap().0;
+        b.from_hermes(&json!({ "jsonrpc": "2.0", "id": nudge_id(&b), "result": { "sessions": [] } }).to_string());
+        assert_eq!(nudges(&b), 0);
+        assert!(b.in_turn && b.hermes.is_some());
+        b.turn_quiet();
+        assert_eq!(nudges(&b), 0, "nudged again without waiting");
+
+        // Nor does its failure.
+        b.heard = long_ago();
+        b.turn_quiet();
+        b.from_hermes(&json!({ "jsonrpc": "2.0", "id": nudge_id(&b), "error": { "code": -32603, "message": "no" } }).to_string());
+        assert_eq!(nudges(&b), 0);
+        assert!(b.in_turn && b.hermes.is_some());
+
+        // The loop waits for the next nudge only while one can be written.
+        assert!(b.nudge_wait().is_some_and(|w| w > Duration::ZERO && w <= TURN_NUDGE));
+        b.heard = long_ago();
+        assert_eq!(b.nudge_wait(), Some(Duration::ZERO));
+
+        // A Hermes whose stdin is gone is neither written to nor waited on, so the loop cannot spin.
+        b.hermes = None;
+        assert_eq!(b.nudge_wait(), None);
+        b.turn_quiet();
+        assert_eq!(nudges(&b), 0);
+        let _ = child.kill();
+    }
+
     fn options(ids: &[(&str, &str)]) -> Vec<(String, String)> {
         ids.iter().map(|(i, k)| (i.to_string(), k.to_string())).collect()
     }
@@ -2375,6 +2591,14 @@ mod live {
         h.control("stop", json!({ "subtype": "interrupt" }));
         let result = h.result();
         assert_eq!(result["subtype"], "error_during_execution", "{result}");
+
+        // Mid-turn, Hermes will not fork, so the side question goes to a fresh session.
+        h.prompt("Run the shell command `ping -n 30 127.0.0.1` in the terminal, then say done.");
+        h.until("the ping", 180, |v| v["type"] == "assistant" && v.to_string().contains("tool_use"));
+        h.control("busy-side", json!({ "subtype": "side_question", "question": "In one sentence, what is the running request?" }));
+        let side = h.response("busy-side");
+        assert_eq!(side["subtype"], "success", "{side}");
+        h.result();
 
         // A side question gets an answer without joining the conversation.
         h.control("side", json!({ "subtype": "side_question", "question": "What is 2+2? Answer with the digit only." }));
