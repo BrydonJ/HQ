@@ -58,6 +58,8 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_UNPROVEN: usize = 16;
 static UNPROVEN: AtomicUsize = AtomicUsize::new(0);
 const LOG_MAX_BYTES: u64 = 1 << 20;
+/// How much of each stderr line of a failed session goes into the log.
+const STDERR_LOG_CHARS: usize = 500;
 
 /// `~/.hq`, where HQ keeps what the host and the MCP bridge share with it.
 pub(crate) fn hq_dir() -> Option<PathBuf> {
@@ -821,6 +823,15 @@ fn spawn(msg: &Value, gen: u64, tx: &mpsc::Sender<Wire>) -> Result<(), String> {
         let done = sp.delivered >= seq || sp.sink.is_none();
         drop(sp);
         log(format!("session {id} ended with code {code:?}"));
+        // The cell may be gone (a session HQ killed reports to no one), so a failed session's last
+        // stderr lines are kept here too: they are the only trace of why an agent stalled. Like the
+        // rest of this log they stay on this machine; each is cut short to bound what lands here.
+        if code != Some(0) {
+            for line in &stderr {
+                let line: String = line.chars().take(STDERR_LOG_CHARS).collect();
+                log(format!("session {id} stderr: {line}"));
+            }
+        }
         if done {
             host().sessions.lock().unwrap().remove(&id);
         }

@@ -148,6 +148,14 @@ pub fn spawn(app: &AppHandle, opts: SpawnOptions, events: Channel<InvokeResponse
 /// How long `hermes sessions discard` may take; it waits on Hermes' gateway.
 const DISCARD_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// How long Hermes may stay silent before the cell's session is open (and its model and mode
+/// set) before HQ gives up on it. Longer than `DISCARD_TIMEOUT`, which can fall inside the wait.
+/// Without it a `session/new` Hermes never answers leaves the cell "working" for good, every
+/// message held in `early`.
+/// Hermes starts in seconds and a load streams its replay as it goes, so two minutes of
+/// silence means it is stuck, not slow.
+const OPEN_QUIET: Duration = Duration::from_secs(120);
+
 /// How long a turn Hermes started itself must go without news, with no tool or question open,
 /// before HQ takes it as over: Hermes reports no end for a turn HQ did not send.
 const OWN_TURN_QUIET: Duration = if cfg!(test) { Duration::from_millis(300) } else { Duration::from_secs(30) };
@@ -561,6 +569,8 @@ struct Bridge {
     early: Vec<String>,
     /// Setup calls Hermes has yet to answer; the cell's lines wait in `early` until it has.
     setup: usize,
+    /// While the session is not yet ready: when Hermes last said anything. `None` once ready.
+    opening: Option<Instant>,
     /// Prompts sent while a turn runs. Hermes would answer them at once and run them later
     /// without a reply of their own, so they wait here and each gets its own turn and result.
     prompts: VecDeque<(Value, Value)>, // (ACP prompt, the frontend's content for HQ's copy)
@@ -625,6 +635,7 @@ impl Bridge {
             events,
             early: Vec::new(),
             setup: 0,
+            opening: Some(Instant::now()),
             prompts: VecDeque::new(),
             in_turn: false,
             own_turn: None,
@@ -666,12 +677,19 @@ impl Bridge {
             Call::Initialize,
         );
         loop {
-            let event = match self.own_turn {
-                // Only a turn Hermes started itself needs the clock: nothing else ends it.
-                Some(_) => match events.recv_timeout(Duration::from_millis(250)) {
+            // Only a turn Hermes started itself, or a session still opening, needs the clock:
+            // nothing else ends them.
+            let wait = match (self.own_turn, self.opening) {
+                (Some(_), _) => Some(Duration::from_millis(250)),
+                (None, Some(since)) => Some((since + OPEN_QUIET).saturating_duration_since(Instant::now())),
+                (None, None) => None,
+            };
+            let event = match wait {
+                Some(wait) => match events.recv_timeout(wait) {
                     Ok(event) => event,
                     Err(mpsc::RecvTimeoutError::Timeout) => {
                         self.own_turn_quiet();
+                        self.open_quiet();
                         continue;
                     }
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -681,6 +699,9 @@ impl Bridge {
                     Err(_) => break,
                 },
             };
+            if self.opening.is_some() && !matches!(event, Event::Frontend(_)) {
+                self.opening = Some(Instant::now());
+            }
             match event {
                 Event::Frontend(line) => {
                     if self.session.is_none() || self.setup > 0 {
@@ -854,6 +875,7 @@ impl Bridge {
 
     /// Reports an error the cell cannot recover from, then ends Hermes.
     fn fatal(&mut self, error: &str) {
+        self.opening = None;
         self.dismiss(|_| true);
         self.emit(json!({ "type": "result", "subtype": "error", "is_error": true, "result": error }));
         self.hermes = None;
@@ -930,6 +952,7 @@ impl Bridge {
 
     /// Passes on what the cell sent while the session was opening.
     fn ready(&mut self) {
+        self.opening = None;
         for line in std::mem::take(&mut self.early) {
             self.frontend(&line);
         }
@@ -1217,6 +1240,16 @@ impl Bridge {
             self.own_turn = Some((started, Instant::now()));
         } else if last.elapsed() >= OWN_TURN_QUIET {
             self.turn_ended(started, "end_turn", &Value::Null, None);
+        }
+    }
+
+    /// Gives up on a session Hermes went silent while opening. What the cell sent meanwhile is
+    /// dropped with it; the error tells the user to send it again in a new cell.
+    fn open_quiet(&mut self) {
+        let Some(since) = self.opening else { return };
+        if since.elapsed() >= OPEN_QUIET {
+            let secs = OPEN_QUIET.as_secs();
+            self.fatal(&format!("Hermes did not open the session within {secs} s, so nothing you sent reached it. Close this cell and start a new one. Once it is closed, any error Hermes printed is in ~/.hq/hosts/host.log."));
         }
     }
 
@@ -1996,6 +2029,50 @@ mod tests {
         assert_eq!(reply["response"]["subtype"], "success", "{reply}");
         drop(input);
         drop(hermes);
+        let _ = child.kill();
+    }
+
+    #[test]
+    fn a_session_hermes_never_opens_ends_with_an_error() {
+        let bridge = |opening: Option<Instant>| {
+            let dir = std::env::temp_dir().join(format!("hq-hermes-open-quiet-{}", std::process::id()));
+            let opts = SpawnOptions { cwd: dir.to_string_lossy().into_owned(), resume: None, permission_mode: None, model: None, effort: None, fork: false, auto_tasks: false, max_agents: None, api_key: false, mcp: false, cell_key: None };
+            let mut sink = if cfg!(windows) { Command::new("findstr") } else { Command::new("cat") };
+            if cfg!(windows) {
+                sink.arg("^");
+            }
+            sink.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+            hide_console(&mut sink);
+            let mut child = sink.spawn().unwrap();
+            let (lines, out) = std::io::pipe().unwrap();
+            let mut b = Bridge::new(child.stdin.take().unwrap(), out, dir, opts, json!([]), mpsc::channel().0);
+            b.opening = opening;
+            (b, lines, child)
+        };
+        let read_all = |lines: PipeReader| BufReader::new(lines).lines().map(|l| serde_json::from_str::<Value>(&l.unwrap()).unwrap()).collect::<Vec<_>>();
+
+        // Still within the wait: nothing happens.
+        let (mut b, lines, mut child) = bridge(Some(Instant::now()));
+        b.open_quiet();
+        assert!(b.hermes.is_some());
+        b.early.push("held".into());
+        b.ready(); // the session opened: the clock stops
+        assert!(b.opening.is_none());
+        b.open_quiet();
+        assert!(b.hermes.is_some());
+        drop(b);
+        assert!(read_all(lines).iter().all(|v| v["type"] != "result"));
+        let _ = child.kill();
+
+        // Silent past the wait: the cell gets an error and Hermes is let go.
+        let (mut b, lines, mut child) = bridge(Instant::now().checked_sub(OPEN_QUIET + Duration::from_secs(1)));
+        b.open_quiet();
+        assert!(b.hermes.is_none());
+        assert!(b.opening.is_none());
+        drop(b);
+        let result = read_all(lines).into_iter().find(|v| v["type"] == "result").expect("an error result");
+        assert_eq!(result["is_error"], true);
+        assert!(result["result"].as_str().unwrap().contains("did not open the session"), "{result}");
         let _ = child.kill();
     }
 
