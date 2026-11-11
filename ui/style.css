@@ -1032,6 +1032,10 @@ body:not(.fade-buttons):not(.hover-buttons) .cell.wm-on .cell-head:hover > .icon
 
 /* ---------- resume list: where and when a session started ---------- */
 .resume-started { color: var(--fg-faint); font-size: 11px; flex: none; }
+.resume-day {
+  position: sticky; top: 0; z-index: 1; padding: 6px 10px 3px; background: var(--bg-raised);
+  color: var(--fg-muted); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
+}
 .resume-path.filter-link { cursor: pointer; }
 .resume-path.filter-link:hover { text-decoration: underline; }
 .resume-moved { color: var(--fg-faint); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }

@@ -146,6 +146,9 @@ function syncAfk() {
 
 function afkStart(cell) {
   cell.afkOn = true;
+  const since = (cell.afk || app.afk || {}).since;
+  cell.afkWentAt = Number.isFinite(since) ? since : Date.now();
+  cell.notice(`You went AFK at ${afkClock(cell.afkWentAt)}.`); // display only: the agent is told separately
   cell.afkDigested = false;
   cell.afkNoted = false;
   cell.afkNudges = 0;
@@ -162,6 +165,8 @@ function afkStart(cell) {
 
 function afkEnd(cell) {
   cell.afkOn = false;
+  // "Ended", not "back": a set time running out ends it too, whether or not the user has returned.
+  cell.notice(`AFK ended at ${afkClock(Date.now())}${cell.afkWentAt ? ` (you went AFK at ${afkClock(cell.afkWentAt)})` : ''}.`);
   for (const card of cell.pending.values()) afkUnwatch(card);
   clearTimeout(cell.afkNudgeTimer);
   // Only to a turn that can read it now: a Hermes turn would only read it when it ends, and a new
