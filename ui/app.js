@@ -4824,13 +4824,16 @@ const resumeSearch = $('#resume-search');
 const SOURCE_LABELS = { 'claude-vscode': 'VS Code', cli: 'Terminal', 'sdk-cli': 'HQ', 'claude-desktop': 'Desktop' };
 /** The resume filter for sessions other agents started headless (`claude -p`); kept out of the rest. */
 const AGENTS_SOURCE = 'agents';
+// Claude sessions read for the list: enough to reach back a few days (the backend caps it at 500).
+const RESUME_LIMIT = 200;
 // A transcript written this recently may still be open somewhere else.
 const RECENTLY_ACTIVE_MS = 5 * 60 * 1000;
 const resumeProject = $('#resume-project');
 // `all`: the newest sessions from every folder, which the folder list is built from.
 // `project`: the folder picked in the list ('' for all); its sessions are fetched on their own,
 // so older ones show too. `seq` drops a reply that a newer request has overtaken.
-const resumeState = { sessions: [], all: [], project: '', source: '', loading: false, error: null, seq: 0,
+const resumeDay = $('#resume-day');
+const resumeState = { sessions: [], all: [], project: '', day: '', source: '', loading: false, error: null, seq: 0,
   deep: false, hits: [], deepLoading: false, deepError: null, deepSeq: 0 }; // deep: search inside the conversations
 
 async function openResumer() {
@@ -4841,6 +4844,8 @@ async function openResumer() {
   resumer.classList.remove('hidden');
   resumeSearch.value = '';
   resumeState.project = '';
+  resumeState.day = '';
+  renderDayOptions(); // cleared until the list is read and counted
   hermesResumeFilter($('#resume-filters'));
   codexResumeFilter($('#resume-filters')); // after HQ's too, so before Hermes
   renderProjectOptions();
@@ -4860,7 +4865,7 @@ async function loadResumeSessions() {
   const others = agents ? null : otherSessions(cwd); // read alongside, added once Claude's are shown
   resumeState.othersLoading = others ? others.names : false;
   try {
-    sessions = await invoke('list_sessions', { limit: 80, cwd, agents });
+    sessions = await invoke('list_sessions', { limit: RESUME_LIMIT, cwd, agents });
   } catch (err) {
     error = String(err);
   }
@@ -4917,6 +4922,36 @@ function renderProjectOptions() {
   })));
   resumeProject.value = resumeState.project;
   resumeProject.classList.toggle('on', !!resumeState.project);
+}
+
+const UNKNOWN_DAY = '?';
+/** A local calendar day, "2026-11-11", for grouping and filtering the resume list by when a session was last used. */
+function dayKey(ms) {
+  if (!(ms > 0)) return UNKNOWN_DAY; // Codex and Hermes give 0 when they cannot tell
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/** "Today", "Yesterday", "Mon, Nov 9", or with the year when it is not this one. */
+function dayLabel(key) {
+  if (key === UNKNOWN_DAY) return 'Unknown date';
+  const [y, m, d] = key.split('-').map(Number);
+  const now = new Date();
+  if (key === dayKey(now)) return 'Today';
+  if (key === dayKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1))) return 'Yesterday';
+  return new Date(y, m - 1, d).toLocaleDateString([], y === now.getFullYear()
+    ? { weekday: 'short', month: 'short', day: 'numeric' } : { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' });
+}
+
+/** The days in `counts` (day key → sessions the other filters let through), newest first, the unknown day last. */
+function renderDayOptions(counts = new Map()) {
+  if (resumeState.day && !counts.has(resumeState.day)) counts.set(resumeState.day, 0); // keeps the pick while a folder's list loads
+  const days = [...counts.keys()].sort((a, b) => (a === UNKNOWN_DAY) - (b === UNKNOWN_DAY) || b.localeCompare(a));
+  resumeDay.replaceChildren(h('option', { value: '', text: 'Any day' }),
+    ...days.map(k => h('option', { value: k, text: `${dayLabel(k)} (${counts.get(k)})` })));
+  resumeDay.value = resumeState.day;
+  resumeDay.classList.toggle('on', !!resumeState.day);
+  resumeDay.disabled = resumeState.deep; // the search inside conversations has its own dates
 }
 
 function closeResumer() {
@@ -4997,7 +5032,7 @@ function runDeepSearch() {
 }
 
 function renderResumeList() {
-  if (resumeState.deep) { renderDeepHits(); return; }
+  if (resumeState.deep) { renderDayOptions(); renderDeepHits(); return; }
   if (resumeState.loading && !resumeState.sessions.length) {
     resumeList.replaceChildren(h('div', { class: 'session-empty', text: 'Reading sessions…' }));
     return;
@@ -5009,12 +5044,17 @@ function renderResumeList() {
   const terms = resumeSearch.value.toLowerCase().split(/\s+/).filter(Boolean);
   const project = resumeState.project ? projectKey(resumeState.project) : null;
   const rows = [];
+  let lastDay = null;
+  const dayCounts = new Map(); // what the day list offers: the sessions every other filter lets through
   for (const info of resumeState.sessions) {
     if (resumeState.source && resumeState.source !== AGENTS_SOURCE && info.entrypoint !== resumeState.source) continue;
     if (project && projectKey(info.cwd) !== project && !(info.lastCwd && projectKey(info.lastCwd) === project)) continue;
     const title = info.title || info.lastPrompt || '(no prompt)';
     const hay = [title, info.lastPrompt, info.cwd, info.lastCwd].join('\n').toLowerCase();
     if (!terms.every(t => hay.includes(t))) continue;
+    const day = dayKey(info.modifiedMs);
+    dayCounts.set(day, (dayCounts.get(day) || 0) + 1);
+    if (resumeState.day && day !== resumeState.day) continue;
 
     const open = app.cells.find(c => c.sessionId === info.sessionId);
     const recent = Date.now() - info.modifiedMs < RECENTLY_ACTIVE_MS;
@@ -5042,12 +5082,14 @@ function renderResumeList() {
       open || !info.cwdExists ? null : fork);
     row.style.setProperty('--proj', projectColor(info.cwd));
     row.addEventListener('click', () => resumeSession(info, false));
+    if (day !== lastDay) { rows.push(h('div', { class: 'resume-day', text: dayLabel(day) })); lastDay = day; } // the list is newest first
     rows.push(row);
   }
   if (!rows.length) {
     const text = resumeState.loading ? 'Reading sessions…' : resumeState.sessions.length ? 'No sessions match.' : 'No sessions found.';
     rows.push(h('div', { class: 'session-empty', text }));
   }
+  renderDayOptions(dayCounts);
   if (resumeState.othersLoading && !resumeState.loading) rows.unshift(h('div', { class: 'session-empty hermes-loading', text: `Loading ${resumeState.othersLoading} sessions…` }));
   resumeList.replaceChildren(...rows);
 }
@@ -5104,10 +5146,15 @@ function setResumeProject(path) {
 }
 
 resumeProject.addEventListener('change', () => setResumeProject(resumeProject.value));
+resumeDay.addEventListener('change', () => {
+  resumeState.day = resumeDay.value;
+  resumeDay.classList.toggle('on', !!resumeState.day);
+  renderResumeList();
+});
 resumer.addEventListener('keydown', e => {
   const items = [...resumeList.querySelectorAll('.resume-item:not([disabled]), .hit:not([disabled])')];
   if (e.key === 'Escape') { e.stopPropagation(); closeResumer(); return; }
-  if (e.target === resumeProject) return; // the arrow keys pick a folder there
+  if (e.target === resumeProject || e.target === resumeDay) return; // the arrow keys pick an option there
   if (e.key === 'Enter' && document.activeElement === resumeSearch) {
     e.preventDefault();
     if (items[0]) items[0].click();
