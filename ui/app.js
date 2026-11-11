@@ -324,7 +324,7 @@ class Cell {
     this.wmTimer = 0;              // one timeout: marks the view done once the cell has stayed idle
     this.wmDone = false;           // nothing is happening any more: the view shows Done (waiting mode stays on)
     this.lastTurnOk = false;       // the last turn ended cleanly, so idle can count as done
-    this.wmDoneOpen = false;       // the waiting view shows its completed tasks (folded away by default)
+    this.wmDoneOpen = false;       // the progress panel and waiting view show completed tasks (folded away by default)
     this.wmStick = true;           // stickToBottom, kept while the chat is hidden
     this.taskLine = '';            // "3/7": the task list at a glance, in the header
     this.sideTaskLine = '';        // the same without the live tool name, for the sidebar (which a change rebuilds)
@@ -402,7 +402,6 @@ class Cell {
     this.turnTools = 0;        // top-level tool calls in the current turn
     this.currentTool = null;   // { id, name, summary } of the latest top-level tool still running
     this.statusAnswer = null;  // { text, at, percent, asking } from the Sitrep button
-    this.progressTimer = null;
     this.replaying = false;    // loadHistory is replaying the transcript
     this.live = null;        // { msgId, blocks: Map<index, {item, md, text}> } for streamed text
     this.renderTimer = null;
@@ -776,7 +775,6 @@ class Cell {
     }
     this.collapsed = on;
     this.applyCollapsed();
-    this.syncProgressTimer();
     layout();
     if (!on) {
       this.expandedAt = Date.now();
@@ -1065,22 +1063,6 @@ class Cell {
     this.renderProgress();
   }
 
-  /** The elapsed time ticks once a second while the panel is open and Claude is working, and the cell can be seen. */
-  syncProgressTimer() {
-    const need = (this.progressView || this.wmView) && (this.status === 'running' || this.bgTasks.length > 0) && !this.collapsed && !document.hidden;
-    const tick = () => {
-      const el = (this.wmView ? this.waitBody : this.progressEl).querySelector('.pv-elapsed');
-      if (el && this.turnStart) el.textContent = formatDuration(Date.now() - this.turnStart);
-    };
-    if (need && !this.progressTimer) {
-      tick(); // catch up at once on coming back into view
-      this.progressTimer = setInterval(tick, 1000);
-    } else if (!need && this.progressTimer) {
-      clearInterval(this.progressTimer);
-      this.progressTimer = null;
-    }
-  }
-
   /** Redraws at most once per frame: every stream event and task update calls this. */
   renderProgress() {
     if (this.replaying || this.progressFrame) return; // loadHistory draws it once the transcript is in
@@ -1100,7 +1082,6 @@ class Cell {
     const running = this.status === 'running';
     // The progress button shows "3/7" in place of its icon while a task list is under way.
     this.drawTaskLine(list, live && (running || taskPct < 100), done);
-    this.syncProgressTimer();
     const answer = this.statusAnswer;
     const agent = this.agent;
     const estimate = answer && answer.percent != null && this.turnStart && answer.at >= this.turnStart ? answer.percent : null;
@@ -1114,33 +1095,26 @@ class Cell {
     if (!this.progressView && !asWaiting) return;
 
     const waiting = this.pending.size > 0;
-    const [state, stateCls] = waiting ? ['Waiting for you', 'waiting']
-      : running ? ['Working', 'running']
-      : this.bgTasks.length ? ['Background work running', 'bg']
-      : this.status === 'exited' ? ['Stopped', 'exited']
-      : ['Idle', ''];
     const timing = pct != null ? this.pctTiming(pct) : '';
     const barLabel = live ? `${taskPct}%  ·  ${done} of ${list.length} tasks done${timing}`
       : estimate != null ? `About ${estimate}%  ·  ${agent}'s estimate${timing}`
-      : running ? 'No task list. Ask for a sitrep to get a rough percentage.' : '';
+      : '';
 
     const ask = h('button', { class: 'btn pv-ask', disabled: this.proc == null || (answer && answer.asking),
       title: this.proc == null ? `${agent} starts when you send a message` : `Asks ${agent} for a quick progress report on what it is doing and what is left, without interrupting it` },
-    icon(answer && answer.asking ? 'loading codicon-modifier-spin' : 'comment-discussion'), answer && answer.asking ? 'Getting sitrep…' : 'Sitrep');
+    icon(answer && answer.asking ? 'loading codicon-modifier-spin' : 'comment-discussion'), asWaiting ? (answer && answer.asking ? 'Getting sitrep…' : 'Sitrep') : null);
+    if (!asWaiting) ask.className = 'icon-btn pv-ask-icon';
     ask.addEventListener('click', () => this.askStatus());
 
-    const turnActive = (running || waiting) && this.turnStart;
-    // The waiting view keeps only the sitrep button here: its loader and busy word already say it is working.
+    // Only buttons here: the panel shows tasks, and the waiting view's loader and busy word already say it is working.
+    // The panel's bar sits in this row beside them (filled in below, once it is built).
     const head = h('div', { class: 'pv-head' },
-      asWaiting ? null : h('span', { class: `pv-state ${stateCls}` }, h('span', { class: 'pv-dot' }), state),
-      turnActive && !asWaiting ? h('span', { class: 'pv-elapsed', text: formatDuration(Date.now() - this.turnStart) }) : null,
-      turnActive && !asWaiting && this.turnTools ? h('span', { text: `${this.turnTools} tool call${this.turnTools === 1 ? '' : 's'}` }) : null,
       h('span', { class: 'spacer' }),
       asWaiting && this.wmDone ? h('button', { class: 'btn pv-ask', title: 'Turn waiting mode off and show the chat', onclick: () => this.setWaitingMode(false) }, icon('comment-discussion'), 'Show chat') : ask,
       asWaiting ? null : h('button', { class: 'icon-btn pv-close', title: 'Close', onclick: () => this.setProgressView(false) }, icon('close')));
 
     let bar = null;
-    if (pct != null || (running && !asWaiting)) { // the waiting view's loader stands in for the indeterminate bar
+    if (pct != null) { // the waiting view's loader stands in for the indeterminate bar
       const fill = h('span');
       if (pct != null) fill.style.setProperty('--pct', `${pct}%`);
       bar = h('div', { class: 'pv-progress' }, h('div', { class: `pv-bar${pct == null ? ' indeterminate' : ''}` }, fill),
@@ -1148,13 +1122,9 @@ class Cell {
     }
 
     let now = null;
-    if (asWaiting) now = null; // the tool line is noise there; the agent's latest message says what it is doing
+    // The panel shows only tasks; the tool line was noise in both views.
+    if (asWaiting) now = null;
     else if (waiting) now = h('div', { class: 'pv-now' }, icon('bell'), `${agent} needs your answer or permission below.`);
-    else if (running) {
-      const t = this.currentTool;
-      now = h('div', { class: 'pv-now' }, icon('debug-stackframe'),
-        t ? [h('span', { class: 'tname', text: t.name }), h('span', { class: 'targ', text: t.summary })] : h('span', { text: 'Thinking or writing' }));
-    }
 
     // The agent's latest words, faded and clamped to three lines; a click shows all of it.
     const said = asWaiting && this.lastSaid;
@@ -1171,9 +1141,9 @@ class Cell {
         icon(iconFor[t.status] || 'circle-large-outline'),
         h('span', { text: t.status === 'in_progress' && t.activeForm ? t.activeForm : t.subject }));
       const stale = this.tasksStale ? ' stale' : '';
-      const title = h('div', { class: 'pv-title', text: this.tasksStale ? 'Previous task list' : 'Tasks' });
-      // The waiting view lists what is left first and folds the finished ones away under it: long lists bury the live task.
-      const finished = asWaiting ? list.filter(t => t.status === 'completed') : [];
+      const title = this.tasksStale || asWaiting ? h('div', { class: 'pv-title', text: this.tasksStale ? 'Previous task list' : 'Tasks' }) : null;
+      // What is left comes first and the finished ones fold away under it: long lists bury the live task.
+      const finished = list.filter(t => t.status === 'completed');
       if (!finished.length) tasks = h('div', { class: 'pv-section' }, title, h('ul', { class: `pv-tasks${stale}` }, list.map(item)));
       else {
         const left = list.filter(t => t.status !== 'completed');
@@ -1211,9 +1181,12 @@ class Cell {
       h('div', { class: `pv-answer${answer.error ? ' error' : ''}`, text: answer.text })) : null;
 
     const empty = !bar && !now && !tasks && !agentsEl && !(asWaiting && (running || saidEl || this.wmDone))
-      ? h('div', { class: 'pv-empty', text: 'Nothing is running. Progress shows here while Claude works.' }) : null;
+      ? h('div', { class: 'pv-empty', text: running ? 'No task list yet.' : 'No tasks.' }) : null;
 
-    const parts = asWaiting ? [bar, head, now, saidEl, tasks, agentsEl, answerEl, empty] : [head, bar, now, tasks, agentsEl, answerEl, empty];
+    // The panel puts its bar, or the empty note, in the button row instead of a row of its own.
+    const lead = !asWaiting && (bar || empty);
+    if (lead) head.replaceChild(lead, head.firstChild);
+    const parts = asWaiting ? [bar, head, now, saidEl, tasks, agentsEl, answerEl, empty] : [head, now, tasks, agentsEl, answerEl];
     (asWaiting ? this.waitBody : this.progressEl).replaceChildren(...parts.filter(Boolean));
   }
 
@@ -2326,7 +2299,6 @@ class Cell {
     cancelAnimationFrame(this.scrollFrame);
     cancelAnimationFrame(this.progressFrame);
     clearTimeout(this.interruptTimer);
-    clearInterval(this.progressTimer);
     clearTimeout(this.wmTimer);
   }
 
@@ -5333,7 +5305,6 @@ function scheduleNextUsage() {
 
 document.addEventListener('visibilitychange', () => {
   document.documentElement.classList.toggle('doc-hidden', document.hidden); // pauses the waiting view's animation
-  for (const cell of app.cells) cell.syncProgressTimer();
   if (!document.hidden && Date.now() - usage.fetchedAt > USAGE_STALE_MS) refreshUsage();
 });
 

@@ -324,13 +324,15 @@ body:not(.fade-buttons):not(.hover-buttons) .cell.wm-on .cell-head:hover > .icon
    redrawn on every streamed token, in every cell showing the panel. */
 .cell.progress-view .progress-panel {
   display: block; position: absolute; top: 8px; right: 14px; z-index: 2; width: min(340px, calc(100% - 28px));
-  max-height: min(50%, 360px); overflow-y: auto; padding: 8px 10px 10px; user-select: text;
-  background: var(--bg-raised); border: 1px solid var(--border-strong); border-radius: 6px;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35); font-size: 12.5px;
+  max-height: min(50%, 360px); overflow-y: auto; padding: 10px 12px 12px; user-select: text;
+  background: var(--bg-raised); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3); font-size: 12.5px;
   animation: pv-in 0.15s ease-out;
 }
 @keyframes pv-in { from { opacity: 0; transform: translateY(-4px); } }
 .pv-close { flex: none; margin-right: -4px; }
+.progress-panel .pv-close { opacity: 0; transition: opacity 0.15s; }
+.progress-panel:hover .pv-close, .progress-panel .pv-close:focus-visible { opacity: 1; }
 .pv-agents li { align-items: flex-start; }
 .pv-agents li + li { border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
 .pv-agent-main { flex: 1; min-width: 0; }
@@ -358,6 +360,17 @@ body:not(.fade-buttons):not(.hover-buttons) .cell.wm-on .cell-head:hover > .icon
 .pv-elapsed { font-variant-numeric: tabular-nums; }
 .pv-ask { font-size: 12px; padding: 2px 8px; }
 .pv-ask[disabled] { opacity: 0.5; cursor: default; }
+.pv-ask-icon { flex: none; color: var(--fg-faint); }
+.pv-ask-icon:hover:not([disabled]) { color: var(--fg-muted); }
+.pv-ask-icon[disabled] { opacity: 0.5; cursor: default; }
+.progress-panel .pv-head + * { margin-top: 10px; }
+.progress-panel .pv-bar { height: 4px; }
+.progress-panel .pv-head { gap: 4px; align-items: flex-start; }
+.progress-panel .pv-head > .pv-progress { flex: 1; min-width: 0; margin: 0 6px 0 0; padding-top: 9px; }
+.progress-panel .pv-head > .pv-empty { flex: 1; min-width: 0; margin: 0; align-self: center; }
+.progress-panel .pv-section { padding-top: 8px; border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
+.progress-panel .pv-head + .pv-section { border-top: 0; padding-top: 0; }
+.progress-panel .pv-tasks li { padding: 3px 0; }
 .pv-progress { margin-top: 8px; }
 .pv-bar { position: relative; height: 6px; border-radius: 3px; background: var(--input-bg); overflow: hidden; }
 .pv-bar > span {
