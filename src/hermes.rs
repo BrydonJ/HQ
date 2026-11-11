@@ -156,6 +156,9 @@ const DISCARD_TIMEOUT: Duration = Duration::from_secs(60);
 /// silence means it is stuck, not slow.
 const OPEN_QUIET: Duration = Duration::from_secs(120);
 
+/// Leads a side question asked in a fresh session, which has none of the conversation.
+const SIDE_FRESH_PREFACE: &str = "(HQ: you are answering a side question about another Hermes session that is busy with a turn. You cannot see its conversation; answer only from what follows, and do not use tools or carry on its work.)";
+
 /// How long a turn Hermes started itself must go without news, with no tool or question open,
 /// before HQ takes it as over: Hermes reports no end for a turn HQ did not send.
 const OWN_TURN_QUIET: Duration = if cfg!(test) { Duration::from_millis(300) } else { Duration::from_secs(30) };
@@ -862,6 +865,14 @@ impl Bridge {
             }
             Call::Initialize | Call::Open { .. } => self.fatal(&format!("Hermes could not start the session: {error}")),
             Call::Prompt { started } => self.turn_ended(started, "error", &Value::Null, Some(error)),
+            // Hermes forks only an idle session (`session_busy` mid-turn) and has no /btw over ACP
+            // yet, so a side question asked mid-turn goes to a fresh session. That session cannot
+            // see the conversation, only what `side_prompt` put in the question.
+            Call::SideFork { request_id, question } if details == Some("session_busy") => {
+                let question = format!("{SIDE_FRESH_PREFACE}\n\n{question}");
+                let params = json!({ "cwd": self.opts.cwd, "mcpServers": [] });
+                self.call("session/new", params, Call::SideFork { request_id, question });
+            }
             Call::Control { request_id, .. } | Call::SideFork { request_id, .. } => self.reply_err(&request_id, error),
             Call::SideMode { fork, .. } | Call::SidePrompt { fork } => {
                 if let Some((request_id, _)) = self.sides.remove(&fork) {
@@ -2033,6 +2044,29 @@ mod tests {
     }
 
     #[test]
+    fn a_side_question_hermes_will_not_fork_goes_to_a_fresh_session() {
+        let (mut child, mut hermes, input, rx) = scripted();
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": 0, "result": {} }));
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": 1, "result": { "sessionId": "s1" } }));
+        std::thread::sleep(Duration::from_millis(100));
+        input.send(json!({ "type": "control_request", "request_id": "side", "request": { "subtype": "side_question", "question": "Sitrep?" } }).to_string()).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        // Mid-turn, Hermes refuses the fork; HQ opens a fresh session (id 3) instead.
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": 2, "error": { "code": -32603, "message": "Internal error", "data": { "details": "session_busy" } } }));
+        std::thread::sleep(Duration::from_millis(100));
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": 3, "result": { "sessionId": "side1" } }));
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": 4, "result": {} }));
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "method": "session/update", "params": { "sessionId": "side1", "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "All on track." } } } }));
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": 5, "result": { "stopReason": "end_turn" } }));
+        let reply = next_matching(&rx, "the side answer", |v| v["type"] == "control_response" && v["response"]["request_id"] == "side");
+        assert_eq!(reply["response"]["subtype"], "success", "{reply}");
+        assert_eq!(reply["response"]["response"]["response"], "All on track.");
+        drop(input);
+        drop(hermes);
+        let _ = child.kill();
+    }
+
+    #[test]
     fn a_session_hermes_never_opens_ends_with_an_error() {
         let bridge = |opening: Option<Instant>| {
             let dir = std::env::temp_dir().join(format!("hq-hermes-open-quiet-{}", std::process::id()));
@@ -2452,6 +2486,14 @@ mod live {
         h.control("stop", json!({ "subtype": "interrupt" }));
         let result = h.result();
         assert_eq!(result["subtype"], "error_during_execution", "{result}");
+
+        // Mid-turn, Hermes will not fork, so the side question goes to a fresh session.
+        h.prompt("Run the shell command `ping -n 30 127.0.0.1` in the terminal, then say done.");
+        h.until("the ping", 180, |v| v["type"] == "assistant" && v.to_string().contains("tool_use"));
+        h.control("busy-side", json!({ "subtype": "side_question", "question": "In one sentence, what is the running request?" }));
+        let side = h.response("busy-side");
+        assert_eq!(side["subtype"], "success", "{side}");
+        h.result();
 
         // A side question gets an answer without joining the conversation.
         h.control("side", json!({ "subtype": "side_question", "question": "What is 2+2? Answer with the digit only." }));
