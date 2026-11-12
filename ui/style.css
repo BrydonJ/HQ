@@ -255,6 +255,9 @@ body:not(.fade-buttons):not(.hover-buttons) .cell.wm-on .cell-head:hover > .icon
 
 /* Icons the codicon font lacks (the waiting mode hourglass), drawn to match its 16px glyphs. */
 .svg-icon { width: 16px; height: 16px; display: block; }
+/* The detail level as bars of output: all three at level 1 (everything), two at 2, one at 3 (replies only). */
+.act-detail .bar { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
+.act-detail[data-level="2"] .b3, .act-detail[data-level="3"] .b2, .act-detail[data-level="3"] .b3 { opacity: 0.25; }
 .act-detail.on, .act-progress.on, .act-waiting.on, .act-tasklist.on { color: var(--link); }
 .act-spot.on { color: var(--waiting); }
 .act-group.on { color: var(--group); }
@@ -351,13 +354,6 @@ body:not(.fade-buttons):not(.hover-buttons) .cell.wm-on .cell-head:hover > .icon
 .pv-stop[disabled] { opacity: 0.5; cursor: default; }
 .pv-head { display: flex; align-items: center; gap: 10px; color: var(--fg-muted); font-size: 12px; }
 .pv-head .spacer { flex: 1; }
-.pv-state { display: inline-flex; align-items: center; gap: 6px; color: var(--fg-strong); font-weight: 600; font-size: 13px; }
-.pv-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg-faint); }
-.pv-state.running .pv-dot { background: var(--link); animation: pulse 1s ease-in-out infinite; }
-.pv-state.waiting .pv-dot { background: var(--waiting); animation: pulse 0.8s ease-in-out infinite; }
-.pv-state.bg .pv-dot { background: transparent; box-shadow: inset 0 0 0 2px var(--link); animation: pulse 1.6s ease-in-out infinite; }
-.pv-state.exited .pv-dot { background: var(--error); }
-.pv-elapsed { font-variant-numeric: tabular-nums; }
 .pv-ask { font-size: 12px; padding: 2px 8px; }
 .pv-ask[disabled] { opacity: 0.5; cursor: default; }
 .pv-ask-icon { flex: none; color: var(--fg-faint); }
@@ -545,6 +541,10 @@ body:not(.fade-buttons):not(.hover-buttons) .cell.wm-on .cell-head:hover > .icon
 }
 .bubble.queued { opacity: 0.6; border-style: dashed; }
 .bubble-images { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 4px; }
+/* Images a session shared (SendUserFile, show_image): big enough to read, click for full size. */
+.shared-images { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0; }
+.shared-image .thumb { display: block; max-width: 100%; max-height: 360px; border-radius: 4px; border: 1px solid var(--border-strong); object-fit: contain; background: var(--bg-alt); cursor: zoom-in; }
+.shared-images figcaption { flex-basis: 100%; color: var(--fg-faint); font-size: 12px; }
 .bubble-images .thumb { max-width: 160px; max-height: 120px; border-radius: 4px; border: 1px solid var(--border-strong); object-fit: contain; background: var(--bg-alt); }
 
 /* Claude's questions and the answers given. Not a .tool, so the replies-only view keeps it. */

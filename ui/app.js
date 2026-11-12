@@ -232,11 +232,11 @@ function formatAge(ms) {
   return m % 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${Math.floor(m / 60)}h`;
 }
 
-// The eye button's levels: [icon, what shows, what the next click shows].
+// The detail button's levels: [what shows, what the next click shows]. Its icon lights 3, 2 or 1 bars to match.
 const DETAIL_LEVELS = {
-  1: ['eye', 'everything', 'replies, thinking and narration'],
-  2: ['eye-closed', 'replies, thinking and narration', 'replies only'],
-  3: ['comment', 'replies only', 'everything'],
+  1: ['everything', 'replies, thinking and narration'],
+  2: ['replies, thinking and narration', 'replies only'],
+  3: ['replies only', 'everything'],
 };
 
 // Claude Code only updates itself from interactive sessions, and HQ runs it headless, so HQ
@@ -312,7 +312,7 @@ class Cell {
     this.titleAsked = '';          // the prompt text Claude was last asked to title
     this.promptText = '';          // the prompts sent so far, which Claude titles the session from
     this.renaming = false;
-    // How much of the chat shows (the eye button): 1 everything, 2 no tool calls, 3 replies only (no thinking or narration).
+    // How much of the chat shows (the detail button): 1 everything, 2 no tool calls, 3 replies only (no thinking or narration).
     // Cells saved before the levels had a `clean` flag: true was the prompts-and-replies view,
     // false showed everything. Cells with no flag start at the new default, 2.
     this.detail = [1, 2, 3].includes(detail) ? detail : clean === true ? 3 : clean === false ? 1 : 2;
@@ -741,9 +741,9 @@ class Cell {
 
   applyDetail() {
     for (const n of [1, 2, 3]) this.el.classList.toggle(`detail-${n}`, this.detail === n);
-    const [icon, now, next] = DETAIL_LEVELS[this.detail];
+    const [now, next] = DETAIL_LEVELS[this.detail];
     this.detailBtn.classList.toggle('on', this.detail !== app.settings.defaultDetail); // lit when off the default
-    this.detailBtn.querySelector('.codicon').className = `codicon codicon-${icon}`;
+    this.detailBtn.dataset.level = this.detail;
     this.detailBtn.title = `Showing ${now}. Click to show ${next}.`;
   }
 
@@ -2635,6 +2635,9 @@ class Cell {
     this.tools.set(block.id, t);
     this.openTools.add(block.id);
     this.append(item, parent);
+    // Images a session shares show under the call, at every detail level, and again when the transcript is restored.
+    const shared = isImageShare(name) ? sharedImagePaths(block.input) : [];
+    if (shared.length) this.append(sharedImages(shared, block.input.caption, this.cwd), parent);
   }
 
   buildTool(t) {
@@ -3784,7 +3787,7 @@ const lightboxImg = lightbox.querySelector('img');
 
 /** Opens an image from the chat or the composer full size. Restored images that were not loaded have no source to show. */
 function onImageClick(e) {
-  const img = e.target.closest('.bubble-images .thumb, .attachment img');
+  const img = e.target.closest('.bubble-images .thumb, .shared-image .thumb, .attachment img');
   if (!img || !/^(data|blob):/i.test(img.currentSrc || img.src || '')) return;
   lightboxImg.src = img.currentSrc || img.src;
   lightbox.classList.remove('hidden');
@@ -4342,7 +4345,7 @@ const projectKey = path => normPath(path).toLowerCase();
  * and the Ctrl+1..9 keys show sessions grouped by project, projects in the order first opened.
  */
 function addCell(opts, { restore = false, batch = false, background = false } = {}) {
-  // A new cell starts at the eye button's level picked in Settings; a restored one keeps its own.
+  // A new cell starts at the detail button's level picked in Settings; a restored one keeps its own.
   if (!restore && opts.detail == null) opts = { ...opts, detail: app.settings.defaultDetail };
   const cell = new Cell(opts);
   // A session another session started joins its group, made now if it has none, so related work sits together.

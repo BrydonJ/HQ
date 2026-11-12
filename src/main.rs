@@ -76,6 +76,68 @@ fn send_line(sessions: State<'_, Sessions>, id: u64, line: String) -> Result<(),
     sessions.send(id, line)
 }
 
+/// The image types a session may show in its cell, by file extension.
+const SHOWN_IMAGE_TYPES: [&str; 5] = ["png", "jpg", "jpeg", "gif", "webp"];
+/// Bigger files are refused: the cell keeps the image in memory as a data URL.
+const MAX_SHOWN_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
+
+/// Refuses a path a session may not have the cell load: anything but a local, absolute image file.
+/// Network paths (\\host\share, //host/share, \\?\UNC\…) are refused because the tool calls that
+/// reach this are allowed without asking, and opening one would send the user's Windows
+/// credentials to that host.
+/// A symlink on a local drive that points at a share is not caught; making one needs
+/// Developer Mode or admin rights, which a session does not get by sending a path. Nor is a
+/// drive letter mapped to a share (Z:\): the user mapped it, so their credentials already go there.
+fn check_shown_image(path: &str) -> Result<(), String> {
+    let p = Path::new(path);
+    if !is_local_absolute(p) {
+        return Err(format!("{path} is not a local absolute path"));
+    }
+    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    if !SHOWN_IMAGE_TYPES.contains(&ext.as_str()) {
+        return Err(format!("{path} is not a PNG, JPEG, GIF or WebP image"));
+    }
+    Ok(())
+}
+
+/// Whether a path is absolute on a local drive. On Windows that means it starts with a drive
+/// letter (`C:\`, or `\\?\C:\`); every other prefix (`\\host`, `/\host`, `\\?\UNC\`, `\\.\`) is
+/// refused, whichever slashes it is written with.
+fn is_local_absolute(p: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        p.is_absolute() && matches!(p.components().next(), Some(Component::Prefix(pre)) if matches!(pre.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)))
+    }
+    #[cfg(not(windows))]
+    {
+        p.is_absolute() && !p.to_string_lossy().starts_with("//")
+    }
+}
+
+/// Reads an image file a session asked to show (SendUserFile or HQ's show_image), as raw bytes.
+/// Only local image files are read, so a tool call cannot make the cell load an arbitrary file.
+/// With `probe` it only checks the file could be shown and returns no bytes.
+#[tauri::command]
+async fn read_image(path: String, probe: Option<bool>) -> Result<tauri::ipc::Response, String> {
+    check_shown_image(&path)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let meta = std::fs::metadata(&path).map_err(|e| format!("{path}: {e}"))?;
+        if !meta.is_file() {
+            return Err(format!("{path} is not a file"));
+        }
+        if meta.len() > MAX_SHOWN_IMAGE_BYTES {
+            return Err(format!("{path} is over 20 MB"));
+        }
+        if probe.unwrap_or(false) {
+            return Ok(tauri::ipc::Response::new(Vec::new()));
+        }
+        std::fs::read(&path).map(tauri::ipc::Response::new).map_err(|e| format!("{path}: {e}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 fn kill_session(sessions: State<'_, Sessions>, id: u64) {
     sessions.kill(id);
@@ -840,6 +902,7 @@ fn main() {
             spawn_session,
             send_line,
             kill_session,
+            read_image,
             host_sessions,
             attach_session,
             session_hosted,
@@ -945,6 +1008,26 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shown_images_must_be_local_absolute_image_files() {
+        let local = if cfg!(windows) { "C:\\shots\\a.PNG" } else { "/shots/a.PNG" };
+        assert!(check_shown_image(local).is_ok());
+        let bad_paths = [
+            "\\\\host\\share\\a.png",
+            "//host/share/a.png",
+            "/\\host\\share\\a.png",
+            "\\/host/share/a.png",
+            "\\\\?\\UNC\\host\\share\\a.png",
+            "\\\\.\\pipe\\a.png",
+            "shots/a.png",
+        ];
+        for bad in bad_paths {
+            assert!(check_shown_image(bad).is_err(), "{bad} should be refused");
+        }
+        let text = if cfg!(windows) { "C:\\notes\\secret.txt" } else { "/notes/secret.txt" };
+        assert!(check_shown_image(text).is_err());
+    }
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()

@@ -462,6 +462,19 @@ const MCP_TOOLS = {
     return 'Shown.';
   },
 
+  async show_image(caller, a) {
+    if (caller.external) fail('show_image works only in sessions inside HQ.');
+    const paths = sharedImagePaths(a);
+    if (!paths.length) fail('paths must list at least one image file.');
+    // The cell draws the images from the tool call itself (so they come back with the transcript); this only checks they load.
+    const bad = [];
+    for (const p of paths) {
+      try { await invoke('read_image', { path: absPath(p, caller.cwd), probe: true }); } catch (e) { bad.push(String(e)); }
+    }
+    if (bad.length === paths.length) fail(bad.join('\n'));
+    return bad.length ? `Shown, except:\n${bad.join('\n')}` : 'Shown in your cell.';
+  },
+
   ask_user(caller, a, callId) {
     if (caller.external) fail('ask_user works only in sessions inside HQ.');
     const question = mcpString(a.question, 'question', 4000);

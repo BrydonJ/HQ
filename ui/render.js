@@ -208,6 +208,47 @@ function relPath(p, cwd) {
   return nativeSep(np, p);
 }
 
+/** `p` made absolute against `cwd` when it is relative; kept in the form it was written in. */
+function absPath(p, cwd) {
+  const s = String(p || '').trim();
+  if (!cwd || /^([a-z]:)?[\\/]/i.test(s)) return s;
+  return nativeSep(`${normPath(cwd)}\\${normPath(s.replace(/^\.[\\/]/, ''))}`, cwd);
+}
+
+// ---------- shared images ----------
+
+/** Whether a tool call shows the user files: Claude's SendUserFile, or HQ's show_image (Hermes names it its own way). */
+function isImageShare(name) {
+  return name === 'SendUserFile' || /show_image$/i.test(String(name || ''));
+}
+
+/** The image paths a SendUserFile or show_image call names (at most 8), skipping other files. */
+function sharedImagePaths(input) {
+  const list = input && (Array.isArray(input.paths) ? input.paths : Array.isArray(input.files) ? input.files : null);
+  return (list || []).filter(p => typeof p === 'string' && /\.(png|jpe?g|gif|webp)$/i.test(p.trim())).slice(0, 8);
+}
+
+const IMAGE_MIME = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' };
+
+/**
+ * The images a session shared, drawn under its reply. Each loads from disk through read_image;
+ * one that is gone or unreadable says so in its place.
+ */
+function sharedImages(paths, caption, cwd) {
+  const figure = h('figure', { class: 'item shared-images' });
+  for (const p of paths) {
+    const full = absPath(p, cwd);
+    const slot = h('div', { class: 'shared-image', title: full });
+    figure.append(slot);
+    window.__TAURI__.core.invoke('read_image', { path: full })
+      .then(buf => readAsDataUrl(new Blob([buf], { type: IMAGE_MIME[full.split('.').pop().toLowerCase()] })))
+      .then(url => slot.append(h('img', { class: 'thumb', src: url, alt: baseName(full) })))
+      .catch(e => slot.append(h('span', { class: 'image-note', text: `[${baseName(full)}: ${String(e)}]` })));
+  }
+  if (caption) figure.append(h('figcaption', { text: caption }));
+  return figure;
+}
+
 function baseName(p) {
   const np = normPath(p);
   const i = np.lastIndexOf('\\');
