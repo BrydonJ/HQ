@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod activity;
 mod cloud;
 #[cfg(feature = "codex")]
 mod codex;
@@ -286,6 +287,12 @@ fn load_state(app: AppHandle) -> Result<Option<String>, String> {
 #[tauri::command]
 fn save_state(app: AppHandle, json: String) -> Result<(), String> {
     store::save_state(&app, json)
+}
+
+/// One session state change for the timesheet log (activity.rs). Not `async`, so lines stay in order.
+#[tauri::command]
+fn log_activity(app: AppHandle, day: String, line: String) -> Result<(), String> {
+    activity::append(&app, &day, &line)
 }
 
 #[tauri::command]
@@ -919,6 +926,7 @@ fn main() {
             folder_exists,
             load_state,
             save_state,
+            log_activity,
             load_transcript,
             #[cfg(feature = "codex")]
             load_codex_transcript,
@@ -967,6 +975,8 @@ fn main() {
             #[cfg(not(target_os = "macos"))]
             icon::apply(app.handle());
             mcp::start(app.handle(), app.state::<Profile>().0.as_deref());
+            let pruner = app.handle().clone();
+            std::thread::spawn(move || activity::prune(&pruner));
             // Finds the sessions an earlier HQ left running and starts this build's host, off the
             // UI thread; the first spawn or `host_sessions` waits for it.
             let (handle, profile) = (app.handle().clone(), app.state::<Profile>().0.clone());
