@@ -1013,16 +1013,21 @@ mod tests {
     fn shown_images_must_be_local_absolute_image_files() {
         let local = if cfg!(windows) { "C:\\shots\\a.PNG" } else { "/shots/a.PNG" };
         assert!(check_shown_image(local).is_ok());
-        let bad_paths = [
-            "\\\\host\\share\\a.png",
-            "//host/share/a.png",
-            "/\\host\\share\\a.png",
-            "\\/host/share/a.png",
-            "\\\\?\\UNC\\host\\share\\a.png",
-            "\\\\.\\pipe\\a.png",
-            "shots/a.png",
-        ];
-        for bad in bad_paths {
+        // Backslashes are only separators on Windows; elsewhere `/\host` is an ordinary local file.
+        let bad_paths: &[&str] = if cfg!(windows) {
+            &[
+                "\\\\host\\share\\a.png",
+                "//host/share/a.png",
+                "/\\host\\share\\a.png",
+                "\\/host/share/a.png",
+                "\\\\?\\UNC\\host\\share\\a.png",
+                "\\\\.\\pipe\\a.png",
+                "shots/a.png",
+            ]
+        } else {
+            &["//host/share/a.png", "shots/a.png"]
+        };
+        for &bad in bad_paths {
             assert!(check_shown_image(bad).is_err(), "{bad} should be refused");
         }
         let text = if cfg!(windows) { "C:\\notes\\secret.txt" } else { "/notes/secret.txt" };
