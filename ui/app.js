@@ -6430,18 +6430,23 @@ setInterval(() => {
 // Keyboard
 // ======================================================================================
 
+// A reload restarts HQ's page, which stops every claude, so the webview's own F5 and Ctrl+R (with or
+// without Shift) never reload. Dev builds read the UI from disk and keep Ctrl+R (not F5, too easy to
+// hit) to show edits. It listens on window in the capture phase so it runs before any other handler:
+// fields that stop their keys (rename, compact) used to let F5 through to the webview.
+window.addEventListener('keydown', e => {
+  const mod = IS_MAC ? e.metaKey : e.ctrlKey;
+  if (e.key !== 'F5' && !(mod && (e.key === 'r' || e.key === 'R' || (e.code === 'KeyR' && !e.altKey)))) return; // code: R on any layout; AltGr (Ctrl+Alt) types
+  e.preventDefault();
+  e.stopPropagation();
+  if (build.liveUi && e.key !== 'F5' && !e.repeat) flushState().then(() => location.reload());
+}, true);
+
 document.addEventListener('keydown', e => {
   const cell = app.focused;
   const typing = e.target.matches?.('input, textarea, select'); // the target is document when nothing has focus
-  // A reload restarts HQ's page, which stops every claude, so the webview's own F5 and Ctrl+R never
-  // reload. Dev builds read the UI from disk and keep Ctrl+R (not F5, too easy to hit) to show edits.
   // Cmd on a Mac (Ctrl+B, N, O there are text-field cursor keys), Ctrl elsewhere.
   const mod = IS_MAC ? e.metaKey : e.ctrlKey;
-  if (e.key === 'F5' || (mod && (e.key === 'r' || e.key === 'R'))) {
-    e.preventDefault();
-    if (build.liveUi && e.key !== 'F5') flushState().then(() => location.reload());
-    return;
-  }
   if (e.key === 'Escape' && menuState.anchor) {
     e.preventDefault();
     closeMenu();
