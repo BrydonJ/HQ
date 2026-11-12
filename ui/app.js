@@ -25,6 +25,7 @@ const app = {
   remoteDefault: null, // new sessions start with Remote Control on; null until seeded from the account
   remoteAvailable: null, // from the last initialize reply: null until a session has reported it
   nextBackend: 'claude', // the agent the new-session picker starts (see agentPickerSwitch)
+  pickerSort: 'recent', // the new-session picker's folder order: 'recent' (last used first) or 'name' (A-Z)
   settings: null,      // the Settings screen; see sanitizeSettings for the keys
   apiKeyHint: null,    // "sk-ant-…abcd" while an API key is saved (the key itself stays in the backend)
   planLimitedUntil: 0, // when the plan's usage comes back (ms), from a plan session's refused request
@@ -4693,15 +4694,20 @@ sessionList.addEventListener('keydown', e => {
 
 const picker = $('#picker');
 let pickerIndex = -1;
+let pickerSeq = 0; // a later openPicker wins, so fast clicks on the sort switch or forget never list folders twice
 
 async function openPicker() {
   closeResumer();
   closeTokens();
+  const seq = ++pickerSeq;
   const list = $('#picker-recent');
-  list.replaceChildren();
   const exists = await Promise.all(app.recent.map(p => invoke('folder_exists', { path: p }).catch(() => false)));
-  app.recent.forEach((path, i) => {
-    if (!exists[i]) return;
+  if (seq !== pickerSeq) return;
+  list.replaceChildren();
+  // app.recent is kept last-used first (rememberFolder), so 'recent' is its own order.
+  const paths = app.recent.filter((_, i) => exists[i]);
+  if (app.pickerSort === 'name') paths.sort((a, b) => (baseName(a) || a).localeCompare(baseName(b) || b, undefined, { sensitivity: 'base', numeric: true }) || a.localeCompare(b));
+  paths.forEach(path => {
     const forget = h('span', { class: 'icon-btn forget', title: 'Remove from list' }, icon('close'));
     forget.addEventListener('click', e => {
       e.stopPropagation();
@@ -4714,6 +4720,7 @@ async function openPicker() {
   });
   pickerIndex = -1;
   agentPickerSwitch(picker);
+  pickerSortSwitch(picker, paths.length > 1);
   picker.classList.remove('hidden');
   if (!list.children.length) browseFolder();
   else picker.querySelector('.picker-item').focus();
@@ -4759,6 +4766,29 @@ function agentPickerSwitch(picker) {
       agentPickerSwitch(picker);
     },
   }, AGENT_NAMES[b])));
+}
+
+/** The Recent / A-Z switch over the new-session picker's folders, shown when there are two or more. */
+function pickerSortSwitch(picker, show) {
+  let row = picker.querySelector('.picker-sort');
+  if (!show) {
+    if (row) row.remove();
+    return;
+  }
+  if (!row) {
+    row = h('div', { class: 'segmented picker-sort', title: 'Order the folders' });
+    picker.querySelector('#picker-recent').before(row);
+  }
+  row.replaceChildren(...[['recent', 'Last used'], ['name', 'A-Z']].map(([key, label]) => h('button', {
+    class: app.pickerSort === key ? 'on' : '',
+    onclick: e => {
+      e.stopPropagation();
+      if (app.pickerSort === key) return;
+      app.pickerSort = key;
+      saveState();
+      openPicker();
+    },
+  }, label)));
 }
 
 async function browseFolder() {
@@ -6531,6 +6561,7 @@ function flushState() {
     hermes: hermesState(),
     codex: codexState(),
     nextBackend: app.nextBackend === 'claude' ? undefined : app.nextBackend,
+    pickerSort: app.pickerSort === 'name' ? 'name' : undefined,
     workspaces: app.workspaces,
     projectColors: projectColorPicks,
     claudeUpdateAt: app.claudeUpdateAt || undefined,
@@ -6709,6 +6740,7 @@ async function restore() {
   hermesRestore(state && state.hermes);
   codexRestore(state && state.codex);
   mcpRestore(state && state.mcp);
+  app.pickerSort = state && state.pickerSort === 'name' ? 'name' : 'recent';
   // Boards saved before Codex kept the picker's choice as a Hermes flag.
   app.nextBackend = state && typeof state.nextBackend === 'string' ? state.nextBackend : state && state.hermes && state.hermes.next === true ? 'hermes' : 'claude';
   app.workspaces = sanitizeWorkspaces(state && state.workspaces);

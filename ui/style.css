@@ -1128,6 +1128,7 @@ body:not(.fade-buttons):not(.hover-buttons) .cell.wm-on .cell-head:hover > .icon
 /* Codex (codex.js) and Hermes Agent (hermes.js) cells */
 .agent-tag { flex: none; padding: 0 5px; border: 1px solid var(--border-strong); border-radius: 3px; color: var(--fg-muted); font-size: 10px; line-height: 15px; text-transform: uppercase; letter-spacing: 0.04em; }
 .picker-agent { margin: 0 6px 6px; }
+.picker-sort { margin: 0 6px 6px; }
 .hermes-loading { display: flex; align-items: center; gap: 6px; }
 .hermes-loading::before { content: ''; width: 10px; height: 10px; border: 1.5px solid var(--border-strong); border-top-color: var(--link); border-radius: 50%; animation: ctx-spin 0.9s linear infinite; }
 
