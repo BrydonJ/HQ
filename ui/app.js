@@ -277,6 +277,18 @@ const nextRequestId = () => `hq-${Date.now().toString(36)}-${++reqSeq}`;
 // Cell: one chat session bound to one folder
 // ======================================================================================
 
+/** Writes one line to HQ's timesheet log (src/activity.rs; /log-hours reads it): when a session
+ *  started working, went idle, exited or was closed, in the local day's file. */
+function logActivity(cell, state) {
+  const now = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  const day = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  const off = -now.getTimezoneOffset();
+  const t = `${day}T${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}${off < 0 ? '-' : '+'}${pad(Math.floor(Math.abs(off) / 60))}:${pad(Math.abs(off) % 60)}`;
+  const line = JSON.stringify({ t, state, id: cell.hqId, agent: cell.backend, session: cell.sessionId || undefined, cwd: cell.cwd || undefined, title: (cell.customTitle || cell.title || '').slice(0, 200) || undefined });
+  invoke('log_activity', { day, line }).catch(() => {});
+}
+
 class Cell {
   constructor({ cwd, sessionId = null, permissionMode = 'default', model = null, effort = null, title = '', aiTitle = false,
     customTitle = null, renamePending = false, detail, clean, progress = false, fork = false, collapsed = false,
@@ -1690,6 +1702,7 @@ class Cell {
   setStatus(status) {
     if (status === 'running' && this.status !== 'running') this.startTurn();
     if (status === 'running') this.lastTurnOk = false;
+    if (status !== this.status && !this.quiet) logActivity(this, status);
     this.status = status;
     this.refreshState();
   }
@@ -2292,6 +2305,7 @@ class Cell {
   }
 
   dispose() {
+    if (!this.closing) logActivity(this, 'closed');
     this.closing = true;
     if (menuState.cell === this) closeMenu();
     if (this.proc != null) invoke('kill_session', { id: this.proc });
