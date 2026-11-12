@@ -464,6 +464,19 @@ const TOOLS: &[Tool] = &[
         schema: || json!({ "type": "object", "properties": { "message": { "type": "string" } }, "required": ["message"] }),
     },
     Tool {
+        name: "show_image",
+        description: "Shows the user images inline in your cell: a screenshot, chart, mock-up or diagram you made or found. PNG, JPEG, GIF or WebP files on this machine, up to 20 MB each. Use it whenever an image says it better than words.",
+        auto_allow: true,
+        schema: || json!({
+            "type": "object",
+            "properties": {
+                "paths": { "type": "array", "items": { "type": "string" }, "maxItems": 8, "description": "Absolute paths, or relative to your folder." },
+                "caption": { "type": "string", "description": "A line shown under the images." }
+            },
+            "required": ["paths"]
+        }),
+    },
+    Tool {
         name: "ask_user",
         description: "Asks the user a question in your cell and waits for the answer. Returns at once if the user is away (AFK).",
         auto_allow: true,
@@ -533,7 +546,7 @@ const TOOLS: &[Tool] = &[
 ];
 
 /// The tools that change nothing at all.
-const READ_ONLY: [&str; 7] = ["list_sessions", "read_session", "wait_for_sessions", "get_usage", "list_scheduled", "list_claims", "note_get"];
+const READ_ONLY: [&str; 8] = ["show_image", "list_sessions", "read_session", "wait_for_sessions", "get_usage", "list_scheduled", "list_claims", "note_get"];
 
 fn tool_list() -> Value {
     let tools: Vec<Value> = TOOLS
