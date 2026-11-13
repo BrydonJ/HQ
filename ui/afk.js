@@ -304,12 +304,26 @@ function reviewBackend(cell) {
 function reviewOn(cell) {
   if (!reviewBackend(cell)) return false;
   if (cell.review) return true;
+  if (reviewAllCovers(cell)) return true; // Settings > Review approvals in every session
   // An agent picks the folder of a session it starts (with spawn_session, or by running hq.exe), and
   // the path rule trusts that folder, so HQ's AFK does not reach those sessions. The user can still
   // turn it on for one of them.
   if ((cell.spawnedBy || cell.launched) && !cell.afk) return false;
   const away = afkUntil(cell) ? cell.afk || app.afk : null;
   return !!(away && away.review);
+}
+
+/** Settings > Review approvals in every session: on, at once, with no minute's wait. */
+function reviewAll() {
+  return !!(app.settings && app.settings.reviewAll);
+}
+
+/**
+ * Whether that setting covers this session. Not one an agent or a command line started (see
+ * reviewOn), nor one the user left out from its right-click menu (`reviewOff`).
+ */
+function reviewAllCovers(cell) {
+  return reviewAll() && !cell.reviewOff && !cell.spawnedBy && !cell.launched;
 }
 
 function reviewable(cell, requestId, card) {
@@ -327,7 +341,8 @@ function reviewWatch(cell, requestId, card) {
   if (card.reviewState || card.replayed) return;
   afkUnwatch(card);
   card.reviewState = 'waiting';
-  const due = (card.armedAt || Date.now()) + AFK_GRACE_MS;
+  // Settings > Review approvals in every session skips the minute's wait.
+  const due = (card.armedAt || Date.now()) + (reviewAll() ? 0 : AFK_GRACE_MS);
   const count = promptCountdown(card, due, 'Reviewing in ', 'A reviewer looks at this then. Answer it yourself before then to keep it.');
   card.reviewCount = count.el;
   card.reviewTick = count.tick;

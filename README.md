@@ -167,7 +167,7 @@ the repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the contents of the updater 
   location (`~/.local/bin`) directly. HQ asks again when Claude is signed out, or when a
   session reports it is not logged in; **Not now** hides it until then. HQ never sees the
   credentials: Claude stores them itself.
-- **New session** (Ctrl+N) lists recent folders. You can also browse to any folder on any drive.
+- **New session** (Ctrl+N) lists recent folders, each in its project colour. You can also browse to any folder on any drive.
   A new cell starts `claude` only when you send its first message, so empty cells cost nothing.
   - Esc (or the stop button) while Claude is still starting takes the prompt back into the
     composer, and nothing is sent. If Claude cannot start, the prompt comes back too, and its
@@ -177,6 +177,10 @@ the repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the contents of the updater 
     (`--permission-mode` takes default, acceptEdits, plan or auto; never bypassPermissions). If
     HQ is running, the running copy of that profile opens it; otherwise HQ starts first. A
     missing folder keeps the prompt as a draft. `/full-send` uses this to hand a ticket to Sonnet.
+  - From Explorer (Windows, the installed app): turn on **Open in HQ in Explorer** in Settings,
+    then right-click a folder, or the empty space inside one, and pick **Open in HQ**. It runs the
+    command line above, so AFK and the approval reviewer leave that session alone until you turn
+    them on in it. The menu lives under HKCU and needs no admin.
   - `claude update` runs in the background, at most once every 6 hours (the time of the last run
     is kept in the board), and a first message does not wait for it. If a start fails while the
     update replaces the program, HQ waits for the update and tries once more.
@@ -268,14 +272,14 @@ the repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the contents of the updater 
     size is learned from the first reply.
   - The cell's meta line, and the hover, also show the cost Claude Code reported in this HQ
     run (a total of what `result` messages say; it starts again from 0 when HQ restarts).
-- **Remote Control:** the broadcast button in the composer bar, next to the MCP button, lets you continue the session
-  from claude.ai/code or the Claude mobile app. Prompts and permission answers from there show
-  up in the cell.
-  - It needs claude.ai subscription sign-in. The button is hidden when Claude reports that
+- **Remote Control** (Settings) lets you continue Claude sessions from claude.ai/code or the
+  Claude mobile app. Prompts and permission answers from there show up in the cell.
+  - It needs claude.ai subscription sign-in. The setting is hidden when Claude reports that
     Remote Control is not available, or when your organization turned it off.
-  - Click it for **Open on claude.ai**, **Copy link** and **Turn off**, or to turn it on.
-    **Start with Remote Control on** sets the default for new sessions. The first time, it
-    follows your account's own auto-enable setting.
+  - The setting applies to new sessions and to every open one not set on its own. The first
+    time, it follows your account's own auto-enable setting.
+  - Right-click a session's header (or its row in the sessions list) to turn it off or on for
+    that session alone, and, while it is connected, for **Open on claude.ai** and **Copy link**.
   - For a new session, HQ turns it on right after the first prompt, so that claude.ai lists
     the session under its title. HQ sets the remote name only when you renamed the session or
     Claude gave it a title (a name locks the title). Otherwise Claude Code derives one from
@@ -359,8 +363,20 @@ the repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the contents of the updater 
   and shows the first line of its reply when a turn finishes, or says that Claude needs you.
   Coming back to HQ soon after one opens that cell. Turn them off in Settings.
 - **Settings** (the gear in the top bar, or Ctrl+,): theme (auto, dark or light), notifications,
-  Remote Control for new sessions, the default model, automatic HQ updates, and the path of the
-  `claude` program.
+  permissions, Remote Control, reviewing approvals in every session, the default model,
+  automatic HQ updates, the Explorer menu, and the path of the `claude` program.
+- **Steer or Queue** (Claude and Hermes): the toggle in the composer bar sets what a message
+  sent while the agent works does in that chat. **Steer** reaches the running turn: Claude reads
+  it at its next step; Hermes stops its turn and the message goes next. **Queue** holds it (marked
+  Queued, with an × to take it back) and sends it when the turn ends, several at once as one
+  prompt. Claude starts on Steer and Hermes on Queue, as before. A held message is not kept
+  across a closed HQ, though an update's restart sends it on.
+- **Session menu:** right-click a session's header, or its row in the sessions list, for what
+  that one session does differently from Settings: its permission mode, Remote Control, and
+  whether its approvals are reviewed. **Session settings…** in the header's "…" menu opens it too.
+- **Bundled skills:** HQ ships the `one-sentence` Claude Code skill and its `/1s` command
+  (`skills/`) and writes each to `~/.claude` (or `CLAUDE_CONFIG_DIR`) at each start when it is
+  missing. A copy already there is never overwritten, so your edits stay.
 - **Questions:** when Claude asks you something, the chat keeps a one-line record of the
   question and your answer. Click it to see every option and which ones you picked. No detail
   level hides it.
@@ -385,7 +401,7 @@ the repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the contents of the updater 
     shown.
   - The list comes from Claude itself. A change applies at once to a running session, or at
     start for a new one.
-- **MCP servers:** the plug button lists the servers for that session with their status.
+- **MCP servers:** the MCP button lists the servers for that session with their status.
   - Turn a server on or off, or reconnect it. Opening the menu starts Claude if it is not
     running yet.
   - The button turns amber when a server has failed or needs sign-in.
@@ -396,9 +412,13 @@ the repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the contents of the updater 
   - **No**: deny, with optional feedback for Claude.
   - Keys 1…9 answer the top card. With several questions, they answer the highlighted one,
     and move on to the next after a single-choice answer. Click a question to highlight it.
-- Permission mode selector per cell: ask before edits, edit automatically, plan, auto, bypass.
-  If Claude rejects a switch, the cell shows the reason and keeps the old mode. For example,
-  bypass can't be turned on mid-session, and auto isn't available on every model.
+- **Permissions** (Settings): ask before edits, edit automatically, plan, auto, bypass. It sets
+  new Claude sessions and every open one not set on its own; sessions an agent or a command line
+  started keep the mode they were started with. Right-click a session's header to give it its own
+  mode, or **Follow Settings** again. A session not in its usual mode shows it in the composer
+  bar (bypass in red); click it for the session menu. If Claude rejects a switch, the cell shows
+  the reason and keeps the old mode. For example, bypass can't be turned on mid-session, and auto
+  isn't available on every model.
 - **AFK:** going away for a while? The coffee button in the top bar tells every session you are
   AFK for 30 minutes to 8 hours, until a time you pick, or until you are back. Sessions then carry
   on with what they can do without you, instead of stopping at the first question.
@@ -427,10 +447,13 @@ the repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the contents of the updater 
 - **Approval reviewer:** off by default, and for Claude and Hermes sessions only (on Hermes it
   reviews real terminal commands and plain file edits that give a full path; anything else stays
   with you). Turn it on for one
-  session with **Review approvals** in its **More** menu, or tick **Review approvals while away**
-  in the AFK menu, which lasts as long as that AFK and skips sessions set to **Never AFK** and
-  sessions an agent started. It can only be set here: not from the command line, and not by an agent.
-  - A permission card you leave for a minute counts down ("Reviewing in 0:42"), then goes to a
+  session with **Review approvals** in its session menu (right-click its header), or tick
+  **Review approvals while away** in the AFK menu, which lasts as long as that AFK and skips
+  sessions set to **Never AFK** and sessions an agent started. **Review approvals in every
+  session** in Settings turns it on everywhere and reviews each card at once, with no minute's
+  wait; it leaves out sessions an agent or a command line started, and any you turn it off for
+  in their session menu. It can only be set here: not from the command line, and not by an agent.
+  - A permission card you leave for a minute (no wait with the Settings switch) counts down ("Reviewing in 0:42"), then goes to a
     separate Claude call (Haiku, with no tools, using your Claude login, so it counts towards your
     plan). Answer the card yourself at any time and the review is dropped.
   - The reviewer can only approve or leave the card for you; it never refuses. An approval answers
@@ -587,6 +610,11 @@ the board: start a Codex session for one part of a job, wait for it, read its an
   `close_session`, `set_session_model` and `collapse_session`. Sessions inside HQ message each
   other with no approval, even a session that runs with fewer prompts than the sender; an agent
   outside HQ still needs your yes for a session it did not start.
+- **Started sessions:** a session an agent started joins its starter's group and wears the
+  starter's project colour and name, even in a worktree. Its header links back to the starter
+  ("↳ name"); the starter's header counts what it started, pulses while one waits on you, and
+  lists them (with **Dock them all**). **Sessions agents start** in Settings opens them full size,
+  small (half width, smaller text; the default) or docked.
 - **Coordination:** shared notes (`note_set`, `note_get`, `note_delete`) kept across restarts;
   advisory file claims (`claim_files`, `release_files`, `list_claims`) held until released or
   the session's cell closes; `schedule_message` (after a delay, at a time, or once the plan's
@@ -663,6 +691,8 @@ dev.cmd          rebuilds and restarts the dev copy
 
 ## Known limits
 
+- The Explorer **Open in HQ** menu is kept in HKCU and the uninstaller does not remove it: turn
+  it off in Settings before you uninstall.
 - Sessions run in `-p` (print) mode, which skips Claude's workspace-trust dialog. Only open
   folders you trust.
 - Sessions run headless, so commands that need the interactive terminal either print a short

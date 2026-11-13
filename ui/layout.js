@@ -115,6 +115,7 @@ function layout(animate = true) {
   for (const c of shown) c.el.classList.toggle('max', c.el === max);
   // A move or a closed cell can change which session leads a group, and so its colour.
   for (const c of app.cells) if (c.group) c.applyGroup();
+  for (const c of app.cells) c.renderLineage(); // a cell came or went: starter links and counts follow
 
   // Writes only: a scrollTop past the end is clamped, so scrollHeight is not read once per cell.
   for (const [c, top, stick] of scrolls) c.msgs.scrollTop = stick ? 1e9 : top;
