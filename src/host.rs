@@ -792,6 +792,9 @@ fn spawn(msg: &Value, gen: u64, tx: &mpsc::Sender<Wire>) -> Result<(), String> {
     std::thread::spawn(move || {
         let mut reader = BufReader::new(out);
         let mut buf = Vec::with_capacity(64 * 1024);
+        // Whether the last turn ended in an error: a session HQ's Hermes bridge gives up on (one
+        // that never opened, say) ends with code 0, and its stderr is still the only trace of why.
+        let mut ended_on_error = false;
         loop {
             buf.clear();
             match reader.read_until(b'\n', &mut buf) {
@@ -805,6 +808,7 @@ fn spawn(msg: &Value, gen: u64, tx: &mpsc::Sender<Wire>) -> Result<(), String> {
                     let kind = classify(line);
                     let mut sp = session.spool.lock().unwrap();
                     if kind == Kind::TurnEnd {
+                        ended_on_error = serde_json::from_str::<Value>(line).is_ok_and(|v| v["subtype"] == "error");
                         sp.drop_stream();
                     }
                     sp.push(id, false, kind, line.to_owned());
@@ -826,7 +830,7 @@ fn spawn(msg: &Value, gen: u64, tx: &mpsc::Sender<Wire>) -> Result<(), String> {
         // The cell may be gone (a session HQ killed reports to no one), so a failed session's last
         // stderr lines are kept here too: they are the only trace of why an agent stalled. Like the
         // rest of this log they stay on this machine; each is cut short to bound what lands here.
-        if code != Some(0) {
+        if code != Some(0) || ended_on_error {
             for line in &stderr {
                 let line: String = line.chars().take(STDERR_LOG_CHARS).collect();
                 log(format!("session {id} stderr: {line}"));

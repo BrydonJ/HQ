@@ -170,6 +170,14 @@ const OWN_TURN_QUIET: Duration = if cfg!(test) { Duration::from_millis(300) } el
 /// waiting on the user. A long tool is silent too, so this only writes, never ends the turn.
 const TURN_NUDGE: Duration = if cfg!(test) { Duration::from_millis(300) } else { Duration::from_secs(60) };
 
+/// How long a held model or mode change waits before HQ asks again, after Hermes said it was busy
+/// while HQ saw no turn (one Hermes started itself, not yet reported), and how many times it asks.
+const HELD_RETRY: Duration = if cfg!(test) { Duration::from_millis(300) } else { Duration::from_secs(10) };
+const HELD_TRIES: u32 = 3;
+/// How long a sent held change may go unanswered before HQ gives up on it, so a lost answer does
+/// not keep the queued prompts waiting for good.
+const HELD_ANSWER: Duration = Duration::from_secs(60);
+
 /// Stop's answer during a turn Hermes started itself. Hermes' gateway cancels only the prompts
 /// this connection sent (`acp_adapter/gateway_server.py`, `cancel`) and refuses `/stop`, and the
 /// turn runs in the gateway, so ending `hermes acp` (Force stop) leaves it running too.
@@ -519,8 +527,6 @@ enum Call {
     /// `session/new`, `session/load` or `session/fork` for the cell's own session.
     Open { loaded: Option<String>, fork_of: Option<String> },
     Prompt { started: Instant },
-    /// A frontend control request, answered with `ok` once Hermes accepts.
-    Control { request_id: String, ok: Value, then: After },
     /// `session/fork` for a side question (Handoff, the progress button).
     SideFork { request_id: String, question: String },
     /// `session/set_mode` putting a side question's fork back to asking before edits.
@@ -528,8 +534,19 @@ enum Call {
     SidePrompt { fork: String },
     /// `session/list` written to a turn gone quiet (see `TURN_NUDGE`); its answer is not used.
     Nudge,
+    /// A model or mode change the cell asked for, sent once Hermes was idle (see `Held`).
+    Held(Held),
     /// The cell's own model or mode, set before anything the cell sent is passed on.
     Setup(After),
+}
+
+/// A model or mode change waiting for Hermes to be idle: Hermes refuses either during a turn
+/// ("Mode changes apply when the session is idle"), and while busy may report it as a bare
+/// "Internal error" with `session_busy` details. `tries`: how often Hermes already said it was busy.
+struct Held {
+    request_id: String,
+    then: After,
+    tries: u32,
 }
 
 /// State to change once Hermes accepts a control request.
@@ -587,6 +604,15 @@ struct Bridge {
     /// without a reply of their own, so they wait here and each gets its own turn and result.
     prompts: VecDeque<(Value, Value)>, // (ACP prompt, the frontend's content for HQ's copy)
     in_turn: bool,
+    /// Model and mode changes the cell asked for while Hermes was busy, the latest of each kind,
+    /// sent once the turn ends. The next queued prompt waits for their answers (`applying`), or
+    /// it would make Hermes busy again first.
+    held: Vec<Held>,
+    applying: usize,
+    /// When the held changes now in flight were sent (see `HELD_ANSWER`).
+    applying_since: Option<Instant>,
+    /// When to ask again for a held change Hermes said it was too busy for (see `HELD_RETRY`).
+    held_retry: Option<Instant>,
     /// A turn Hermes started itself, such as on a background process's notice: when it began and
     /// when Hermes last reported on it. Its updates stream in like a turn's, but no reply ends it.
     own_turn: Option<(Instant, Instant)>,
@@ -652,6 +678,10 @@ impl Bridge {
             opening: Some(Instant::now()),
             prompts: VecDeque::new(),
             in_turn: false,
+            held: Vec::new(),
+            applying: 0,
+            applying_since: None,
+            held_retry: None,
             own_turn: None,
             heard: Instant::now(),
             models: Vec::new(),
@@ -702,6 +732,11 @@ impl Bridge {
             if let Some(nudge) = self.nudge_wait() {
                 wait = Some(wait.map_or(nudge, |w| w.min(nudge)));
             }
+            let held_clock = self.held_retry.into_iter().chain(self.applying_since.map(|at| at + HELD_ANSWER)).min();
+            if let Some(at) = held_clock {
+                let retry = at.saturating_duration_since(Instant::now());
+                wait = Some(wait.map_or(retry, |w| w.min(retry)));
+            }
             let event = match wait {
                 Some(wait) => match events.recv_timeout(wait) {
                     Ok(event) => event,
@@ -709,6 +744,11 @@ impl Bridge {
                         self.own_turn_quiet();
                         self.open_quiet();
                         self.turn_quiet();
+                        self.held_unanswered();
+                        if self.held_retry.is_some_and(|at| at <= Instant::now()) {
+                            self.held_retry = None;
+                            self.release();
+                        }
                         continue;
                     }
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -818,13 +858,6 @@ impl Bridge {
             Call::Initialize => self.open_session(),
             Call::Open { loaded, fork_of } => self.opened(result, loaded, fork_of),
             Call::Prompt { started } => self.turn_ended(started, result["stopReason"].as_str().unwrap_or("end_turn"), &result["usage"], None),
-            Call::Control { request_id, ok, then } => {
-                match then {
-                    After::Model(model) => self.model = model,
-                    After::Mode(mode) => self.mode = mode,
-                }
-                self.reply_ok(&request_id, ok);
-            }
             Call::SideFork { request_id, question } => {
                 let Some(fork) = result["sessionId"].as_str().map(str::to_owned) else {
                     return self.reply_err(&request_id, "Hermes did not fork the session");
@@ -856,6 +889,15 @@ impl Bridge {
                     After::Mode(mode) => self.mode = mode,
                 }
                 self.setup_done();
+            }
+            Call::Held(held) => {
+                self.applying -= 1;
+                match held.then {
+                    After::Model(model) => self.model = model,
+                    After::Mode(mode) => self.mode = mode,
+                }
+                self.reply_ok(&held.request_id, json!({}));
+                self.release();
             }
             Call::Nudge => {}
         }
@@ -891,7 +933,26 @@ impl Bridge {
                 let params = json!({ "cwd": self.opts.cwd, "mcpServers": [] });
                 self.call("session/new", params, Call::SideFork { request_id, question });
             }
-            Call::Control { request_id, .. } | Call::SideFork { request_id, .. } => self.reply_err(&request_id, error),
+            // Hermes started a turn HQ has not seen yet: asked again shortly, unless a newer change replaced it.
+            Call::Held(mut held) if is_busy(error, details) && held.tries + 1 < HELD_TRIES => {
+                self.applying -= 1;
+                held.tries += 1;
+                let same = |h: &Held| std::mem::discriminant(&h.then) == std::mem::discriminant(&held.then);
+                if self.held.iter().any(same) {
+                    // The cell chose again meanwhile; the newer change goes instead.
+                    self.reply_ok(&held.request_id, json!({}));
+                } else {
+                    self.held.push(held);
+                }
+                self.held_retry.get_or_insert_with(|| Instant::now() + HELD_RETRY);
+                self.release();
+            }
+            Call::Held(held) => {
+                self.applying -= 1;
+                self.reply_err(&held.request_id, &rpc_error(error, details));
+                self.release();
+            }
+            Call::SideFork { request_id, .. } => self.reply_err(&request_id, error),
             Call::SideMode { fork, .. } | Call::SidePrompt { fork } => {
                 if let Some((request_id, _)) = self.sides.remove(&fork) {
                     self.reply_err(&request_id, error);
@@ -1247,6 +1308,15 @@ impl Bridge {
         self.emit(msg);
     }
 
+    /// The mode the cell shows: a held change's, as the cell chose it, so a turn starting
+    /// meanwhile does not set its picker back.
+    fn shown_mode(&self) -> &str {
+        self.held.iter().rev().find_map(|h| match &h.then {
+            After::Mode(mode) => Some(mode.as_str()),
+            After::Model(_) => None,
+        }).unwrap_or(&self.mode)
+    }
+
     /// Hermes reported on a turn it started itself; the first report shows the cell working.
     fn note_own_turn(&mut self) {
         let now = Instant::now();
@@ -1256,7 +1326,7 @@ impl Bridge {
                 self.own_turn = Some((now, now));
                 self.emit(json!({
                     "type": "system", "subtype": "init", "session_id": self.session, "model": self.model,
-                    "permissionMode": claude_mode(&self.mode), "cwd": self.opts.cwd,
+                    "permissionMode": claude_mode(self.shown_mode()), "cwd": self.opts.cwd,
                 }));
             }
         }
@@ -1343,6 +1413,59 @@ impl Bridge {
         // A Hermes that never listed its commands still answers initialize.
         self.commands.get_or_insert_with(Vec::new);
         self.answer_init();
+        self.release();
+    }
+
+    /// Keeps `held` as the change to send once Hermes is idle. One of the same kind it replaces is
+    /// answered as done: the cell has moved past it.
+    fn hold(&mut self, held: Held) {
+        let same = |h: &Held| matches!((&h.then, &held.then), (After::Model(_), After::Model(_)) | (After::Mode(_), After::Mode(_)));
+        if let Some(i) = self.held.iter().position(same) {
+            let old = self.held.remove(i);
+            self.reply_ok(&old.request_id, json!({}));
+        }
+        self.held.push(held);
+    }
+
+    /// Gives up on held changes Hermes has not answered within `HELD_ANSWER`, failing them in the
+    /// cell, and lets the queued prompts go. A late answer then matches no call and is dropped.
+    fn held_unanswered(&mut self) {
+        let Some(since) = self.applying_since else { return };
+        if self.applying > 0 && since.elapsed() < HELD_ANSWER {
+            return;
+        }
+        let lost: Vec<u64> = self.calls.iter().filter(|(_, c)| matches!(c, Call::Held(_))).map(|(id, _)| *id).collect();
+        for id in lost {
+            if let Some(Call::Held(held)) = self.calls.remove(&id) {
+                self.reply_err(&held.request_id, "Hermes did not answer the change; try it again");
+            }
+        }
+        self.applying = 0;
+        self.applying_since = None;
+        self.release();
+    }
+
+    /// Once Hermes is idle, sends the held changes, then (once they are answered) the next queued prompt.
+    fn release(&mut self) {
+        let waiting = self.held_retry.is_some_and(|at| at > Instant::now());
+        if self.in_turn || self.own_turn.is_some() || self.applying > 0 || waiting {
+            return;
+        }
+        self.held_retry = None;
+        self.applying_since = None;
+        let Some(session) = self.session.clone() else { return };
+        if !self.held.is_empty() {
+            self.applying_since = Some(Instant::now());
+            for held in std::mem::take(&mut self.held) {
+                let (method, params) = match &held.then {
+                    After::Model(model) => ("session/set_model", json!({ "sessionId": session, "modelId": model })),
+                    After::Mode(mode) => ("session/set_mode", json!({ "sessionId": session, "modeId": mode })),
+                };
+                self.applying += 1;
+                self.call(method, params, Call::Held(held));
+            }
+            return;
+        }
         if let Some((prompt, content)) = self.prompts.pop_front() {
             self.send_prompt(prompt, content);
         }
@@ -1383,7 +1506,8 @@ impl Bridge {
             return;
         }
         let prompt = json!({ "sessionId": self.session, "prompt": blocks });
-        if self.in_turn {
+        // Also behind a held model or mode change, which Hermes must take before the next turn.
+        if self.in_turn || self.applying > 0 || !self.held.is_empty() {
             self.prompts.push_back((prompt, content.clone()));
         } else {
             self.send_prompt(prompt, content.clone());
@@ -1403,7 +1527,7 @@ impl Bridge {
         }
         self.emit(json!({
             "type": "system", "subtype": "init", "session_id": id, "model": self.model,
-            "permissionMode": claude_mode(&self.mode), "cwd": self.opts.cwd,
+            "permissionMode": claude_mode(self.shown_mode()), "cwd": self.opts.cwd,
         }));
         self.record(json!({ "type": "user", "message": { "role": "user", "content": content } }));
         self.in_turn = true;
@@ -1468,13 +1592,14 @@ impl Bridge {
                 if model.is_empty() {
                     return self.reply_err(request_id, "Hermes reported no default model");
                 }
-                let ok = json!({});
-                self.call("session/set_model", json!({ "sessionId": session, "modelId": model }), Call::Control { request_id: request_id.into(), ok, then: After::Model(model) });
+                // Answered once Hermes takes it, which it does only between turns (see `Held`).
+                self.hold(Held { request_id: request_id.into(), then: After::Model(model), tries: 0 });
+                self.release();
             }
             "set_permission_mode" => match req["mode"].as_str().and_then(hermes_mode) {
                 Some(mode) => {
-                    let params = json!({ "sessionId": session, "modeId": mode });
-                    self.call("session/set_mode", params, Call::Control { request_id: request_id.into(), ok: json!({}), then: After::Mode(mode.into()) });
+                    self.hold(Held { request_id: request_id.into(), then: After::Mode(mode.into()), tries: 0 });
+                    self.release();
                 }
                 None => self.reply_err(request_id, "Hermes has no such mode"),
             },
@@ -1517,6 +1642,20 @@ impl Bridge {
             None => json!({ "outcome": "cancelled" }),
         };
         self.send_hermes(json!({ "jsonrpc": "2.0", "id": p.rpc_id, "result": { "outcome": outcome } }));
+    }
+}
+
+/// Whether Hermes refused a change only because the session is mid-turn: its friendly wording, or
+/// a bare "Internal error" whose details say so.
+fn is_busy(error: &str, details: Option<&str>) -> bool {
+    details == Some("session_busy") || error.contains("when the session is idle")
+}
+
+/// Hermes' error with its details, which a bare "Internal error" otherwise hides.
+fn rpc_error(error: &str, details: Option<&str>) -> String {
+    match details.filter(|d| !d.is_empty() && !error.contains(d)) {
+        Some(details) => format!("{error} ({details})"),
+        None => error.to_owned(),
     }
 }
 
@@ -2104,6 +2243,74 @@ mod tests {
         drop(input);
         drop(hermes);
         let _ = child.kill();
+    }
+
+    #[test]
+    fn a_mode_switch_mid_turn_waits_for_the_turn_and_the_next_prompt_waits_for_it() {
+        let (mut child, mut hermes, input, rx) = scripted();
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": 0, "result": {} }));
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": 1, "result": { "sessionId": "s1" } }));
+        std::thread::sleep(Duration::from_millis(100));
+        let prompt = |text: &str| json!({ "type": "user", "message": { "role": "user", "content": text } }).to_string();
+        input.send(prompt("first")).unwrap(); // id 2
+        let mode = |id: &str, mode: &str| json!({ "type": "control_request", "request_id": id, "request": { "subtype": "set_permission_mode", "mode": mode } }).to_string();
+        input.send(mode("m1", "acceptEdits")).unwrap();
+        input.send(mode("m2", "bypassPermissions")).unwrap(); // replaces m1, which is answered as done
+        input.send(prompt("second")).unwrap();
+        let replaced = next_matching(&rx, "the replaced switch's answer", |v| v["type"] == "control_response");
+        assert_eq!(replaced["response"]["request_id"], "m1", "{replaced}");
+        assert_eq!(replaced["response"]["subtype"], "success", "{replaced}");
+        // Nothing went to Hermes mid-turn: an answer to id 3 now matches no call and is dropped.
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": 3, "error": { "code": -32603, "message": "Internal error", "data": { "details": "session_busy" } } }));
+        std::thread::sleep(Duration::from_millis(100));
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": 2, "result": { "stopReason": "end_turn" } }));
+        next_matching(&rx, "the first turn's result", |v| v["type"] == "result");
+        // The held switch is id 3 now. The second prompt waits for its answer: it would make Hermes busy again.
+        std::thread::sleep(Duration::from_millis(200));
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": 3, "result": {} }));
+        let switched = next_matching(&rx, "the held switch's answer", |v| v["type"] == "control_response");
+        assert_eq!(switched["response"]["request_id"], "m2", "{switched}");
+        assert_eq!(switched["response"]["subtype"], "success", "{switched}");
+        let init = next_matching(&rx, "the second turn's start", |v| v["type"] == "system" && v["subtype"] == "init");
+        assert_eq!(init["permissionMode"], "bypassPermissions", "{init}");
+        drop(input);
+        drop(hermes);
+        let _ = child.kill();
+    }
+
+    #[test]
+    fn a_busy_refused_switch_gives_way_to_a_newer_one_which_is_asked_again() {
+        let (mut child, mut hermes, input, rx) = scripted();
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": 0, "result": {} }));
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": 1, "result": { "sessionId": "s1" } }));
+        std::thread::sleep(Duration::from_millis(100));
+        let mode = |id: &str, mode: &str| json!({ "type": "control_request", "request_id": id, "request": { "subtype": "set_permission_mode", "mode": mode } }).to_string();
+        input.send(mode("m1", "acceptEdits")).unwrap(); // idle: sent at once as id 2
+        input.send(mode("m2", "default")).unwrap(); // held behind it
+        std::thread::sleep(Duration::from_millis(100));
+        // Hermes had started a turn of its own: m1 is refused as busy and m2 replaces it.
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": 2, "error": { "code": -32603, "message": "Internal error", "data": { "details": "session_busy" } } }));
+        let first = next_matching(&rx, "the replaced switch's answer", |v| v["type"] == "control_response");
+        assert_eq!(first["response"]["request_id"], "m1", "{first}");
+        assert_eq!(first["response"]["subtype"], "success", "{first}");
+        // After `HELD_RETRY`, m2 is asked as id 3.
+        std::thread::sleep(Duration::from_millis(600));
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": 3, "result": {} }));
+        let second = next_matching(&rx, "the newer switch's answer", |v| v["type"] == "control_response");
+        assert_eq!(second["response"]["request_id"], "m2", "{second}");
+        assert_eq!(second["response"]["subtype"], "success", "{second}");
+        drop(input);
+        drop(hermes);
+        let _ = child.kill();
+    }
+
+    #[test]
+    fn hermes_error_details_are_shown_and_busy_is_recognised() {
+        assert_eq!(rpc_error("Internal error", Some("revision_conflict")), "Internal error (revision_conflict)");
+        assert_eq!(rpc_error("No such model", None), "No such model");
+        assert!(is_busy("Internal error", Some("session_busy")));
+        assert!(is_busy("Mode changes apply when the session is idle; try again after this turn.", None));
+        assert!(!is_busy("Internal error", Some("revision_conflict")));
     }
 
     #[test]
