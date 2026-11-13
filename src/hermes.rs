@@ -2748,6 +2748,26 @@ mod live {
 
     #[test]
     #[ignore]
+    fn live_a_mode_switch_mid_turn_lands_after_the_turn() {
+        let mut h = start(None, false);
+        h.prompt("Without using any tools, write the numbers 1 to 150 in words, one per line.");
+        h.until("the turn's first text", 120, |v| v["type"] == "stream_event" || v["type"] == "assistant");
+        h.control("m1", json!({ "subtype": "set_permission_mode", "mode": "acceptEdits" }));
+        h.prompt("Reply with just: done");
+        let first = h.result();
+        assert_eq!(first["subtype"], "success", "{first}");
+        let switched = h.response("m1");
+        assert_eq!(switched["subtype"], "success", "{switched}");
+        let init = h.until("the second turn's start", 60, |v| v["type"] == "system" && v["subtype"] == "init");
+        assert_eq!(init["permissionMode"], "acceptEdits", "{init}");
+        let second = h.result();
+        assert_eq!(second["subtype"], "success", "{second}");
+        assert!(!h.texts().contains("when the session is idle"), "Hermes refused the switch: {}", h.texts());
+        h.stop();
+    }
+
+    #[test]
+    #[ignore]
     fn live_turns_tools_resume_fork_and_side_questions() {
         // A turn, with the initialize reply the frontend asks for at once.
         let mut h = start(None, false);
