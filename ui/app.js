@@ -292,8 +292,8 @@ function logActivity(cell, state) {
 class Cell {
   constructor({ cwd, sessionId = null, permissionMode = 'default', model = null, effort = null, title = '', aiTitle = false,
     customTitle = null, renamePending = false, detail, clean, progress = false, fork = false, collapsed = false,
-    missing = false, remote = null, bridgeSessionId = null, draft = '', backend = 'claude', resumeAfterUpdate = false, resumeQueued = null, api = false, apiKey = false, afk = null, afkLog = null, review = false, launched = false,
-    hqId = null, spawnedBy = null, depth = 0, hosted = null, spot = false, group = null, flexW = 1, flexH = 1 }) {
+    missing = false, remote = null, bridgeSessionId = null, draft = '', backend = 'claude', resumeAfterUpdate = false, resumeQueued = null, api = false, apiKey = false, afk = null, afkLog = null, review = false, reviewOff = false, launched = false, modeOwn = false, remoteOwn = false, busySend = null,
+    hqId = null, spawnedBy = null, colorCwd = null, depth = 0, hosted = null, spot = false, group = null, flexW = 1, flexH = 1 }) {
     this.cwd = cwd;
     // A session a session host kept running while HQ restarted: { id, startedMs }. reattach() connects to it.
     this.hosted = hosted;
@@ -305,6 +305,9 @@ class Cell {
     // HQ's MCP tools (mcp.js): the id they know this session by, the session that started it, and how deep that goes.
     this.hqId = typeof hqId === 'string' && /^s[0-9a-z]{4}$/.test(hqId) && !app.cells.some(c => c.hqId === hqId) ? hqId : newHqId();
     this.spawnedBy = typeof spawnedBy === 'string' ? spawnedBy : null;
+    // The folder whose project colour and name it wears: a session another one started (often in a
+    // worktree) wears its starter's, so a red project's helper stays red after its starter closes.
+    this.colorCwd = typeof colorCwd === 'string' && colorCwd && colorCwd !== cwd ? colorCwd : null;
     this.depth = Number.isInteger(depth) && depth > 0 ? depth : 0;
     this.mcpExpect = false;        // HQ's tools sent it a prompt that its turn has not answered yet
     this.replyLog = [];            // the full text of its latest replies, for read_session
@@ -313,6 +316,8 @@ class Cell {
     this.sessionId = sessionId;
     this.fork = !!(fork && sessionId); // resume into a new session ID, leaving the original alone
     this.permissionMode = permissionMode || 'default';
+    // Picked in this session (its right-click menu), so Settings > Permissions no longer moves it.
+    this.modeOwn = modeOwn === true;
     this.modelChoice = model && model !== 'default' ? model : null; // null = Claude's default
     this.effort = effort || null;  // null = Claude's default
     this.resolvedModel = null;     // what Claude reports it is running
@@ -341,7 +346,6 @@ class Cell {
     this.wmStick = true;           // stickToBottom, kept while the chat is hidden
     this.taskLine = '';            // "3/7": the task list at a glance, in the header
     this.sideTaskLine = '';        // the same without the live tool name, for the sidebar (which a change rebuilds)
-    this.askTasks = false;         // the composer's task-list toggle: asks for a list on the next prompt only
     this.collapsed = !!collapsed;  // only the header shows, in the dock under the grid
     this.spot = !!spot;            // in the spotlight: the main pane, with the other sessions in a strip beside it (layout.js)
     this.group = typeof group === 'string' && /^g[0-9a-z]{1,8}$/.test(group) ? group : null; // cells in a group sit together
@@ -351,6 +355,7 @@ class Cell {
     this.expandedAt = 0;
     this.missing = !!missing;      // the folder was gone at startup: the cell stays, with its composer off
     this.remote = remote ?? app.remoteDefault; // Remote Control wanted for this session; null until the account's default is known
+    this.remoteOwn = remoteOwn === true; // set in this session's menu, so Settings > Remote Control no longer moves it
     this.bridgeSessionId = bridgeSessionId || null; // the claude.ai session Remote Control last used
     this.remoteState = 'off';      // off | connecting | on | failed | policy
     this.remoteUrl = null;
@@ -361,12 +366,17 @@ class Cell {
     this.resumeAfterUpdate = !!resumeAfterUpdate; // an update restarted HQ while this cell was working: it carries on by itself
     this.resumeQueued = Array.isArray(resumeQueued) ? resumeQueued.filter(t => typeof t === 'string') : [];
     this.queuedTexts = [];         // prompts sent while a turn ran, which the agent may not have read yet (until the turn ends)
+    // A message sent while the agent works (the composer's Steer/Queue toggle, Claude and Hermes):
+    // 'steer' reaches the running turn (Claude reads it at its next step; Hermes' turn is stopped
+    // so it goes next), 'queue' waits for the turn to end. Each agent starts with what it did before.
+    this.busySend = busySend === 'steer' || busySend === 'queue' ? busySend : null;
+    this.held = [];                // messages HQ holds until the turn ends: { text, images, bubble }
     this.resumeMark = null;        // set as an update starts installing: { queued } for a working cell, which the restart saves
     this.busyWord = '';            // the verb shown above the prompt box this turn
     this.lastReply = '';
     this.lastSaid = null;          // the agent's latest top-level text { text, at }, shown faded in the waiting view
     this.lastSaidOpen = false;     // that text is expanded past its three lines
-    this.color = projectColor(cwd);
+    this.color = projectColor(this.colorCwd || cwd);
     this.attachments = [];         // images waiting to be sent: { mediaType, data, url }
     this.turnTexts = [];           // top-level text items since the last tool call in this turn
     this.mcpServers = null;        // last mcp_status reply (names and states only)
@@ -395,6 +405,7 @@ class Cell {
     this.afk = sanitizeCellAfk(afk); // AFK for this session (afk.js): null follows HQ, false never, else { until, since }
     this.afkLog = sanitizeAfkLog(afkLog); // what HQ did while the user was away, listed once they are back
     this.review = review === true; // the approval reviewer (afk.js); set from the UI only
+    this.reviewOff = reviewOff === true && !this.review; // left out of Settings > Review approvals in every session
     this.launched = launched === true; // opened by a command line, which may be an agent's
     this.lastUserText = '';        // what the user last typed here: tells the reviewer what the work is for
     this.afkOn = false;        // AFK is in force here now (syncAfk)
@@ -449,30 +460,31 @@ class Cell {
     this.waitEl = el.querySelector('.waiting-view');
     this.waitBody = el.querySelector('.wv-body');
     this.loader = null;            // the waiting view's current loader, a fresh one each time the view opens
-    this.taskBtn = el.querySelector('.act-tasklist');
     this.stateEl = el.querySelector('.cell-state');
     this.codeBtn = el.querySelector('.act-code');
     this.collapseBtn = el.querySelector('.act-collapse');
     this.ctxBtn = el.querySelector('.act-context');
     this.cacheEl = el.querySelector('.cache-age');
-    this.remoteBtn = el.querySelector('.act-remote');
+    this.modeChip = el.querySelector('.act-mode');
+    this.busyChip = el.querySelector('.act-busysend');
     this.missingBar = el.querySelector('.missing-bar');
     this.afkBtn = el.querySelector('.act-afk');
     this.spotBtn = el.querySelector('.act-spot');
     this.groupBtn = el.querySelector('.act-group');
 
     el.style.setProperty('--proj', this.color);
-    for (const name of el.querySelectorAll('.proj-name, .cell-project .sweep-name')) name.textContent = baseName(this.cwd) || this.cwd;
+    for (const name of el.querySelectorAll('.proj-name, .cell-project .sweep-name')) name.textContent = baseName(this.colorCwd || this.cwd) || this.cwd;
     el.querySelector('.cell-path').textContent = this.cwd;
     if (this.backend === 'hermes') hermesDecorate(this);
     if (this.backend === 'codex') codexDecorate(this);
     if (this.backend === 'cloud') cloudDecorate(this);
     this.modeSel.value = this.permissionMode;
+    this.renderMode();
+    this.renderBusySend();
     this.setTitle(this.title);
     this.applyDetail();
     this.applyProgressView();
     this.applyWaitingMode();
-    this.setAskTasks(false);
     this.applyCollapsed();
     this.applySpot();
     this.applyGroup();
@@ -484,10 +496,19 @@ class Cell {
     this.renderRemote();
     this.renderApi();
     this.renderAfk();
-    if (this.spawnedBy) {
-      el.classList.add('spawned');
-      this.titleEl.title = `Started by another session (${this.spawnedBy}) through HQ's tools`;
-    }
+    // Who started whom: a link to the starter on a session another one started, and a count of the
+    // sessions it started on a starter (renderLineage keeps both current).
+    this.parentEl = h('button', { class: 'cell-parent hidden', type: 'button' });
+    this.parentEl.addEventListener('click', e => {
+      e.stopPropagation();
+      const parent = this.parentCell();
+      if (parent) revealCell(parent);
+    });
+    this.kidsEl = h('button', { class: 'cell-kids hidden', type: 'button', 'aria-haspopup': 'menu' }, icon('type-hierarchy-sub'), h('span', { class: 'n' }));
+    this.kidsEl.addEventListener('click', e => { e.stopPropagation(); openMenu(this.kidsEl, this, menuEl => buildKidsMenu(menuEl, this)); });
+    el.querySelector('.cell-project').after(this.parentEl);
+    this.stateEl.before(this.kidsEl);
+    if (this.spawnedBy) el.classList.add('spawned');
     if (this.initialDraft) {
       this.input.value = this.initialDraft;
       autoGrow(this.input);
@@ -501,7 +522,7 @@ class Cell {
     });
     head.addEventListener('dblclick', e => {
       if (Date.now() - this.expandedAt < 600) return; // the first click of this double-click expanded the cell
-      if (!e.target.closest('button, .cell-title, .cell-rename, .cell-project')) toggleMaximize(this);
+      if (!e.target.closest('button, .cell-title, .cell-rename, .cell-project, .cell-parent, .cell-kids')) toggleMaximize(this);
     });
     this.titleEl.addEventListener('click', () => { if (!this.collapsed) this.startRename(); });
     const proj = el.querySelector('.cell-project');
@@ -509,15 +530,16 @@ class Cell {
     proj.addEventListener('click', e => {
       if (this.collapsed) return; // the click opens the cell instead
       e.stopPropagation();
-      openMenu(proj, this, menuEl => buildColorMenu(menuEl, this.cwd));
+      openMenu(proj, this, menuEl => buildColorMenu(menuEl, this.colorCwd || this.cwd));
     });
     this.detailBtn.addEventListener('click', () => this.setDetail(this.detail % 3 + 1));
     this.progressBtn.addEventListener('click', () => this.setProgressView(!this.progressView));
     this.waitBtn.addEventListener('click', () => this.setWaitingMode(!this.wmArmed));
+    // Done: the big check turns into a chat bubble on hover, and a click shows the chat (as Show chat does).
+    el.querySelector('.wv-check').addEventListener('click', () => { if (this.wmDone) this.setWaitingMode(false); });
     wireButtonDrag(el.querySelector('.cell-head'));
     const moreBtn = el.querySelector('.act-more');
     moreBtn.addEventListener('click', e => { e.stopPropagation(); openMenu(moreBtn, this, menuEl => buildMoreMenu(menuEl, this)); });
-    this.taskBtn.addEventListener('click', () => this.setAskTasks(!this.askTasks));
     el.querySelector('.act-max').addEventListener('click', () => toggleMaximize(this));
     this.spotBtn.addEventListener('click', () => toggleSpot(this));
     this.groupBtn.addEventListener('click', e => { e.stopPropagation(); openMenu(this.groupBtn, this, menuEl => buildGroupMenu(menuEl, this)); });
@@ -533,7 +555,14 @@ class Cell {
     this.ctxBtn.addEventListener('mouseleave', hideContextPop);
     this.ctxBtn.addEventListener('focus', () => showContextPop(this));
     this.ctxBtn.addEventListener('blur', hideContextPop);
-    this.remoteBtn.addEventListener('click', () => openMenu(this.remoteBtn, this, menuEl => this.buildRemoteMenu(menuEl)));
+    this.modeChip.addEventListener('click', () => openMenu(this.modeChip, this, menuEl => buildSessionMenu(menuEl, this)));
+    this.busyChip.addEventListener('click', () => this.setBusySend(this.busySendMode() === 'steer' ? 'queue' : 'steer'));
+    // Right-click the header: this session's own permissions, Remote Control and approval reviews.
+    head.addEventListener('contextmenu', e => {
+      if (e.defaultPrevented || e.target.closest('.cell-rename')) return; // the VS Code button has its own menu
+      e.preventDefault();
+      openMenu(this.titleEl, this, menuEl => buildSessionMenu(menuEl, this), { x: e.clientX, y: e.clientY });
+    });
     this.handoffBtn = el.querySelector('.act-handoff');
     this.handoffBtn.addEventListener('click', () => this.writeHandoff());
     this.afkBtn.addEventListener('click', () => openMenu(this.afkBtn, this, menuEl => buildAfkMenu(menuEl, this)));
@@ -541,7 +570,6 @@ class Cell {
     el.querySelector('.act-drop').addEventListener('click', () => closeCell(this));
     el.querySelector('.act-send').addEventListener('click', () => this.submit());
     this.stopBtn.addEventListener('click', () => this.interrupt());
-    this.modeSel.addEventListener('change', () => this.setMode(this.modeSel.value).then(() => this.remember({ permissionMode: this.permissionMode })));
     this.modelBtn.addEventListener('click', () => openMenu(this.modelBtn, this, menuEl => this.buildModelMenu(menuEl)));
     this.apiBtn.addEventListener('click', () => openMenu(this.apiBtn, this, menuEl => this.buildApiMenu(menuEl)));
     this.keyBtn.addEventListener('click', () => this.toggleApiKeyed());
@@ -664,6 +692,35 @@ class Cell {
     this.titleEl.classList.toggle('placeholder', !name);
     this.el.querySelector('.cell-head').title = name ? `${this.cwd}\n${name}` : this.cwd;
     renderSidebar();
+    for (const c of app.cells) if (c.spawnedBy === this.hqId) c.renderLineage(); // their link shows this name
+  }
+
+  /** The open session that started this one, if any. */
+  parentCell() {
+    return this.spawnedBy ? app.cells.find(c => c.hqId === this.spawnedBy) || null : null;
+  }
+
+  /** The open sessions this one started. */
+  childCells() {
+    return app.cells.filter(c => c.spawnedBy === this.hqId);
+  }
+
+  /** The starter link on a started session and the started-sessions count on a starter. */
+  renderLineage() {
+    const parent = this.parentCell();
+    this.parentEl.classList.toggle('hidden', !this.spawnedBy);
+    if (this.spawnedBy) {
+      const name = parent ? parent.displayTitle() || 'New session' : 'a closed session';
+      this.parentEl.textContent = `↳ ${name}`;
+      this.parentEl.disabled = !parent;
+      this.parentEl.title = parent ? `Started by "${name}" (${baseName(parent.cwd) || parent.cwd}) through HQ's tools. Click to go to it.`
+        : `Started by a session that is now closed (${this.spawnedBy})`;
+    }
+    const kids = this.childCells();
+    this.kidsEl.classList.toggle('hidden', !kids.length);
+    this.kidsEl.querySelector('.n').textContent = kids.length ? String(kids.length) : '';
+    this.kidsEl.classList.toggle('attention', kids.some(c => c.pending.size > 0));
+    this.kidsEl.title = `Started ${kids.length} session${kids.length === 1 ? '' : 's'}. Click to list them.`;
   }
 
   startRename() {
@@ -1332,12 +1389,6 @@ class Cell {
     return this.collapsed || this.wmView;
   }
 
-  /** The composer's task-list toggle: the next prompt carries a nudge to keep a list. One-shot. */
-  setAskTasks(on) {
-    this.askTasks = on;
-    this.taskBtn.classList.toggle('on', on);
-  }
-
   // ---------- images ----------
 
   async addImages(files) {
@@ -1705,6 +1756,88 @@ class Cell {
     if (status !== this.status && !this.quiet) logActivity(this, status);
     this.status = status;
     this.refreshState();
+    if (status !== 'running' && this.held.length) queueMicrotask(() => this.sendHeld());
+  }
+
+  // ---------- steer or queue ----------
+
+  /** What a message sent mid-turn does here: the choice made in this chat, else what this agent always did. */
+  busySendMode() {
+    return this.busySend || (this.backend === 'hermes' ? 'queue' : 'steer');
+  }
+
+  /** Whether this chat offers the toggle: Claude and Hermes (Codex and cloud cells keep their own way). */
+  busySendOffered() {
+    return this.backend === 'claude' || this.backend === 'hermes';
+  }
+
+  setBusySend(mode) {
+    this.busySend = mode;
+    this.renderBusySend();
+    saveState();
+  }
+
+  renderBusySend() {
+    const chip = this.busyChip;
+    chip.classList.toggle('hidden', !this.busySendOffered());
+    const steer = this.busySendMode() === 'steer';
+    chip.classList.toggle('steer', steer);
+    chip.setAttribute('aria-pressed', String(steer));
+    chip.querySelector('.label').textContent = steer ? 'Steer' : 'Queue';
+    chip.querySelector('.codicon').className = `codicon codicon-${steer ? 'debug-step-into' : 'list-ordered'}`;
+    chip.title = steer
+      ? (this.backend === 'hermes'
+        ? 'Steer: a message sent while Hermes works stops its turn and goes next. Click to queue instead.'
+        : 'Steer: a message sent while Claude works reaches it at its next step, in the same turn. Click to queue instead.')
+      : `Queue: a message sent while ${this.agent} works waits until the turn ends, then goes as the next prompt. Click to steer instead.`;
+  }
+
+  /** Whether HQ itself holds a message sent now (Claude queue, Hermes steer); the other two pass straight to the agent. */
+  holdsMessage() {
+    if (!this.busySendOffered() || this.status !== 'running' || this.proc == null) return false;
+    const mode = this.busySendMode();
+    return (this.backend === 'claude' && mode === 'queue') || (this.backend === 'hermes' && mode === 'steer');
+  }
+
+  /** Keeps a message sent mid-turn until the turn ends; for Hermes steer, stops the turn so that is now. */
+  holdMessage(text, images) {
+    this.input.value = '';
+    autoGrow(this.input);
+    slashClose(this);
+    this.attachments = [];
+    this.renderAttachments();
+    saveState();
+    const steer = this.busySendMode() === 'steer';
+    const bubble = this.append(userBubble(text, images.map(i => i.url), Date.now()));
+    bubble.classList.add('held');
+    const entry = { text, images, bubble };
+    const drop = h('button', { class: 'icon-btn held-drop', title: 'Take this message back into the composer' }, icon('close'));
+    drop.addEventListener('click', () => {
+      this.held = this.held.filter(e => e !== entry);
+      bubble.remove();
+      if (!this.input.value.trim()) { this.input.value = text; autoGrow(this.input); }
+      this.attachments.push(...images);
+      this.renderAttachments();
+    });
+    bubble.append(h('div', { class: 'held-note' }, h('span', { text: steer ? 'Steering: stopping the turn, then this goes next' : 'Queued: goes when this turn ends' }), drop));
+    this.held.push(entry);
+    this.stickToBottom = true;
+    if (steer && !this.steering) {
+      this.steering = true;
+      this.interrupt();
+    }
+  }
+
+  /** The turn ended: what was held goes now, as one prompt, so the agent reads it all in one turn. */
+  async sendHeld() {
+    this.steering = false;
+    if (!this.held.length || this.status === 'running' || this.closing) return;
+    const held = this.held;
+    this.held = [];
+    for (const e of held) e.bubble.remove();
+    const text = held.map(e => e.text).filter(Boolean).join('\n\n');
+    const images = held.flatMap(e => e.images);
+    await this.submit(null, '', { text, images });
   }
 
   refreshState() {
@@ -1718,6 +1851,8 @@ class Cell {
     el.classList.toggle('unread', this.unread && !waiting && !(this.wmView && this.bgTasks.length));
     this.stopBtn.classList.toggle('hidden', this.status !== 'running' && !waiting);
     this.stateEl.textContent = stateOf(this)[1]; // shown while collapsed, where the chat cannot say it
+    const parent = this.parentCell();
+    if (parent) parent.renderLineage(); // its count lights up while this one waits on the user
     this.syncWaiting();
     this.syncWaitingBusy();
     this.renderProgress();
@@ -2031,13 +2166,18 @@ class Cell {
    * Sends the composer's text and images, or `prompt` instead (HQ's own), which leaves the composer
    * alone. `restore`: what of HQ's prompt goes back in the composer if it is never sent (the user's own words).
    */
-  async submit(prompt = null, restore = '') {
+  async submit(prompt = null, restore = '', typed = null) {
     if (this.missing || this.clearing) return;
     if (this.historyLoading) await this.historyLoading; // the transcript is drawn first, so live messages follow it
     if (this.reattachDone) await this.reattachDone; // and a reconnecting session's replay too
-    const text = prompt ?? this.input.value.trim();
-    const images = prompt == null ? this.attachments : [];
+    // typed: what the user wrote earlier and HQ held (sendHeld), sent as if typed now, leaving the composer alone.
+    const text = prompt ?? (typed ? typed.text : this.input.value.trim());
+    const images = prompt == null ? (typed ? typed.images : this.attachments) : [];
     if (!text && !images.length) return;
+    if (prompt == null && !typed && this.holdsMessage()) {
+      this.holdMessage(text, images);
+      return;
+    }
     if (this.limitResume) this.setLimitResume(false); // sent now, by the user or by checkLimitResumes
     // /clear (and its aliases) is answered here: Claude's own /clear would change the session
     // behind HQ's back. The cell starts a new session; the old one stays on disk for Resume.
@@ -2055,7 +2195,7 @@ class Cell {
     }
     for (const old of this.msgs.querySelectorAll('.item.user.unsent')) old.remove(); // a prompt that failed to send is replaced by this one
     const draft = { text, images, cancelled: false, bubble: null, addedPrompt: false, titled: false, hq: prompt != null, restore };
-    if (prompt == null) {
+    if (prompt == null && !typed) {
       this.input.value = '';
       autoGrow(this.input);
       slashClose(this);
@@ -2103,11 +2243,10 @@ class Cell {
     }
     // Not on a slash command: Claude Code only runs one sent as the whole prompt.
     const slash = /^\/[\w:-]+(\s|$)/.test(text.trimStart());
-    const hint = this.askTasks && prompt == null && !slash ? [{ type: 'text', text: this.backend === 'hermes' ? HERMES_TASK_HINT : this.backend === 'codex' ? CODEX_TASK_HINT : TASK_HINT }] : [];
     // Blocks even for plain text: Claude then records no prompt text in the transcript's first enqueue,
     // which is how the resume list tells HQ's sessions from an agent's `claude -p` (store.rs is_agent).
-    const content = images.length || hint.length || (text && !slash)
-      ? [...images.map(i => ({ type: 'image', source: { type: 'base64', media_type: i.mediaType, data: i.data } })), ...(text ? [{ type: 'text', text }] : []), ...hint]
+    const content = images.length || (text && !slash)
+      ? [...images.map(i => ({ type: 'image', source: { type: 'base64', media_type: i.mediaType, data: i.data } })), ...(text ? [{ type: 'text', text }] : [])]
       : text;
     if (text) this.sentPrompts.push(text);
     if (!this.promptWritten) {
@@ -2119,7 +2258,6 @@ class Cell {
     if (this.remote && this.spawnedFresh) this.autoEnableRemote();
     if (prompt == null && text && text !== this.launchPrompt) this.lastUserText = text; // HQ's own prompts are not the user's words, nor is a command line's
     this.lastSent = draft; // until Claude answers, so that a process that dies at startup gives the prompt back
-    if (hint.length && await written) this.setAskTasks(false); // one prompt only; a failed send keeps the toggle for the retry
   }
 
   /** Picks up the work an update cut off: the transcript is drawn (even in a collapsed cell), then the agent is told to carry on. */
@@ -2282,6 +2420,7 @@ class Cell {
     const previous = this.permissionMode;
     this.permissionMode = mode;
     this.modeSel.value = mode;
+    this.renderMode();
     saveState();
     if (this.proc == null) return; // applied with --permission-mode on the next spawn
     const reply = await this.control({ subtype: 'set_permission_mode', mode });
@@ -2289,8 +2428,22 @@ class Cell {
       this.notice(`Could not switch mode: ${reply.error || `rejected by ${this.agent}`}`, true);
       this.permissionMode = previous;
       this.modeSel.value = previous;
+      this.renderMode();
       saveState();
     }
+  }
+
+  /**
+   * The permission mode lives in Settings and the header's right-click menu; the composer shows it
+   * only when it is not the agent's usual one (plan, bypass…), so a session that skips prompts says so.
+   */
+  renderMode() {
+    const opt = [...this.modeSel.options].find(o => o.value === this.permissionMode);
+    const usual = this.backend === 'cloud' || this.permissionMode === (this.backend === 'codex' ? CODEX_DEFAULT_MODE : 'default');
+    this.modeChip.classList.toggle('hidden', usual || !opt);
+    this.modeChip.classList.toggle('danger', this.permissionMode === 'bypassPermissions');
+    this.modeChip.querySelector('.label').textContent = opt ? opt.textContent : '';
+    this.modeChip.title = `Permissions: ${opt ? opt.textContent : this.permissionMode}. Click, or right-click the header, to change them for this session.`;
   }
 
   requestClose(btn) {
@@ -2377,6 +2530,7 @@ class Cell {
       if (m.permissionMode && m.permissionMode !== this.permissionMode) {
         this.permissionMode = m.permissionMode;
         this.modeSel.value = m.permissionMode;
+        this.renderMode();
       }
       if (changed) saveState();
       if (this.status !== 'running' && !this.stateOnly) this.setStatus('running'); // a replayed state line says how things stand, not that a turn began
@@ -3252,6 +3406,7 @@ class Cell {
     const path = await invoke('pick_folder').catch(() => null);
     if (!path) return;
     this.cwd = path;
+    this.colorCwd = null;
     this.color = projectColor(path);
     this.el.style.setProperty('--proj', this.color);
     for (const name of this.el.querySelectorAll('.proj-name, .cell-project .sweep-name')) name.textContent = baseName(path) || path;
@@ -3558,54 +3713,40 @@ class Cell {
     }
   }
 
+  /** Remote Control has no button of its own any more: its state shows in the session menu, if that is open. */
   renderRemote() {
-    const btn = this.remoteBtn;
-    const hidden = this.backend !== 'claude' || app.remoteAvailable === false || this.remoteState === 'policy';
-    btn.classList.toggle('hidden', hidden);
-    if (hidden) return;
-    const armed = this.remote && this.proc == null;
-    btn.classList.toggle('on', this.remoteState === 'on');
-    btn.classList.toggle('connecting', this.remoteState === 'connecting');
-    btn.classList.toggle('failed', this.remoteState === 'failed');
-    btn.title = this.remoteState === 'on' ? 'Remote Control is on: continue this session from claude.ai/code or the Claude app\nClick for options'
-      : this.remoteState === 'connecting' ? 'Connecting Remote Control…'
-      : this.remoteState === 'failed' ? `Remote Control failed: ${this.remoteDetail}\nClick for options`
-      : armed ? 'Remote Control turns on when Claude starts for this session\nClick for options'
-      : 'Remote Control: off. Click to turn it on';
-    btn.querySelector('.codicon').className = `codicon codicon-${this.remoteState === 'on' || armed ? 'broadcast' : 'circle-slash'}`;
+    if (menuState.cell === this && menuState.anchor) refreshMenu();
   }
 
+  /** Whether the session menu offers Remote Control here. */
+  remoteOffered() {
+    return this.backend === 'claude' && app.remoteAvailable !== false && this.remoteState !== 'policy';
+  }
+
+  /** Remote Control in the session menu: a toggle for this session, then its link while it is on. */
   buildRemoteMenu(menuEl) {
-    menuEl.append(h('div', { class: 'menu-title', text: 'Remote Control' }));
     const item = (name, desc, run, ico) => h('button', { class: 'menu-item', onclick: () => { closeMenu(); run(); } },
       icon(ico), h('span', { class: 'menu-main' }, h('span', { class: 'name', text: name }), desc ? h('span', { class: 'desc', text: desc }) : null));
-    if (this.remoteState === 'on') {
-      if (this.remoteUrl) {
-        menuEl.append(item('Open on claude.ai', this.remoteUrl, () => invoke('open_url', { url: this.remoteUrl }).catch(err => this.notice(String(err), true)), 'link-external'));
-        menuEl.append(item('Copy link', '', () => copyText(this.remoteUrl), 'copy'));
-      } else {
-        menuEl.append(h('div', { class: 'menu-note', text: 'On. Claude gave no link for this session; open it from the list on claude.ai/code.' }));
-      }
-      menuEl.append(item('Turn off', '', () => this.setRemote(false), 'circle-slash'));
-    } else if (this.remoteState === 'connecting') {
-      menuEl.append(h('div', { class: 'menu-note', text: 'Connecting…' }));
-    } else {
-      if (this.remoteState === 'failed') menuEl.append(h('div', { class: 'menu-note error', text: this.remoteDetail || 'The connection failed.' }));
-      if (this.remote && this.proc == null) {
-        menuEl.append(h('div', { class: 'menu-note', text: 'Turns on when Claude starts for this session.' }));
-        menuEl.append(item('Start Claude now', '', () => this.ensureProcess(), 'play'));
-        menuEl.append(item('Turn off', '', () => this.setRemote(false), 'circle-slash'));
-      } else {
-        menuEl.append(item(this.remoteState === 'failed' ? 'Try again' : 'Turn on', 'Continue this session from claude.ai/code or the Claude app', () => {
-          this.remoteState = 'off';
-          this.setRemote(true);
-        }, 'broadcast'));
-      }
+    const on = !!this.remote;
+    const state = this.remoteState === 'on' ? 'Connected' : this.remoteState === 'connecting' ? 'Connecting…'
+      : this.remoteState === 'failed' ? 'Failed' : on && this.proc == null ? 'Turns on when Claude starts' : on ? '' : 'Off';
+    menuEl.append(h('button', {
+      class: `menu-item${on ? ' checked' : ''}`,
+      title: 'Continue this session from claude.ai/code or the Claude app. Settings > Remote Control sets it for every session.',
+      onclick: () => {
+        closeMenu();
+        this.remoteOwn = !on !== !!app.remoteDefault; // back in line with Settings: it follows Settings again
+        if (this.remoteState === 'failed') this.remoteState = 'off';
+        this.setRemote(!on);
+      },
+    }, icon(on ? 'check' : 'blank'), h('span', { class: 'menu-main' }, h('span', { class: 'name', text: 'Remote Control' }),
+      h('span', { class: `desc${this.remoteState === 'failed' ? ' error' : ''}`, text: this.remoteState === 'failed' ? `${state}: ${this.remoteDetail || 'the connection failed'}` : [state, this.remoteOwn || on !== !!app.remoteDefault ? 'set here' : 'from Settings'].filter(Boolean).join(' · ') }))));
+    if (this.remoteState === 'on' && this.remoteUrl) {
+      menuEl.append(item('Open on claude.ai', this.remoteUrl, () => invoke('open_url', { url: this.remoteUrl }).catch(err => this.notice(String(err), true)), 'link-external'));
+      menuEl.append(item('Copy link', '', () => copyText(this.remoteUrl), 'copy'));
+    } else if (on && this.proc == null && this.remoteState !== 'failed') {
+      menuEl.append(item('Start Claude now', 'Remote Control connects once it runs', () => this.ensureProcess(), 'play'));
     }
-    const def = !!app.remoteDefault;
-    menuEl.append(h('div', { class: 'menu-title', text: 'New sessions' }));
-    menuEl.append(h('button', { class: `menu-item${def ? ' checked' : ''}`, onclick: () => { app.remoteDefault = !def; saveState(); refreshMenu(); } },
-      icon(def ? 'check' : 'blank'), h('span', { class: 'menu-main' }, h('span', { class: 'name', text: 'Start with Remote Control on' }))));
   }
 
   // ---------- handoff ----------
@@ -3877,6 +4018,7 @@ const BG_LABELS = { local_agent: 'Agent', local_bash: 'Shell', local_monitor: 'M
 /** Waiting mode ends once a cell has stayed idle this long (a background task's notification can start a new turn). */
 const WAIT_SETTLE_MS = 4000;
 /** Trails a prompt asked to keep a task list; the chat hides it, live and on resume. */
+// The composer's task-list toggle is gone; these wordings stay so older transcripts' hints are still told apart.
 const TASK_HINT = '(HQ: track this work with TaskCreate/TaskUpdate so the user can follow progress.)';
 /** Sent to a session that was working when an update restarted HQ, which stopped its turn and its background tasks. */
 const RESUME_PROMPT = 'HQ restarted to install an update while you were working. That stopped your last turn, including any '
@@ -4288,11 +4430,11 @@ function slashKeydown(cell, e) {
 // ======================================================================================
 
 const menu = $('#menu');
-const menuState = { anchor: null, cell: null, build: null };
+const menuState = { anchor: null, cell: null, build: null, point: null };
 
-function openMenu(anchor, cell, build) {
-  if (menuState.anchor === anchor) { closeMenu(); return; }
-  Object.assign(menuState, { anchor, cell, build });
+function openMenu(anchor, cell, build, point = null) {
+  if (menuState.anchor === anchor && !point) { closeMenu(); return; }
+  Object.assign(menuState, { anchor, cell, build, point }); // point: a right-click's { x, y }, where the menu opens instead
   menu.classList.remove('hidden');
   refreshMenu();
 }
@@ -4311,9 +4453,15 @@ function positionMenu() {
   let anchor = menuState.anchor;
   const head = anchor.closest('.cell-head');
   if (!anchor.getClientRects().length && head) anchor = head.querySelector('.act-more') || anchor;
-  const r = anchor.getBoundingClientRect();
   const width = menu.offsetWidth;
   const height = menu.offsetHeight;
+  if (menuState.point) {
+    const { x, y } = menuState.point;
+    menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - width - 8))}px`;
+    menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - height - 8))}px`;
+    return;
+  }
+  const r = anchor.getBoundingClientRect();
   const left = Math.max(8, Math.min(r.left, window.innerWidth - width - 8));
   let top = r.top - height - 4;
   if (top < 8) top = Math.max(8, Math.min(r.bottom + 4, window.innerHeight - height - 8));
@@ -4323,7 +4471,7 @@ function positionMenu() {
 
 function closeMenu() {
   menu.classList.add('hidden');
-  Object.assign(menuState, { anchor: null, cell: null, build: null });
+  Object.assign(menuState, { anchor: null, cell: null, build: null, point: null });
 }
 
 document.addEventListener('mousedown', e => {
@@ -4362,6 +4510,12 @@ const projectKey = path => normPath(path).toLowerCase();
 function addCell(opts, { restore = false, batch = false, background = false } = {}) {
   // A new cell starts at the detail button's level picked in Settings; a restored one keeps its own.
   if (!restore && opts.detail == null) opts = { ...opts, detail: app.settings.defaultDetail };
+  // A session another session started wears its starter's project colour (see Cell.colorCwd).
+  const parent = !restore && opts.spawnedBy ? app.cells.find(c => c.hqId === opts.spawnedBy) : null;
+  if (parent) opts = { ...opts, colorCwd: parent.colorCwd || parent.cwd };
+  // Settings > Started sessions: smaller than their starter, or tucked in the dock, as they rarely need the user.
+  if (!restore && opts.spawnedBy && app.settings.childCells === 'dock') opts = { ...opts, collapsed: true };
+  if (!restore && opts.spawnedBy && app.settings.childCells === 'small') opts = { ...opts, flexW: 0.5, flexH: 0.5 };
   const cell = new Cell(opts);
   // A session another session started joins its group, made now if it has none, so related work sits together.
   const starter = !restore && cell.spawnedBy && !cell.group ? app.cells.find(c => c.hqId === cell.spawnedBy) : null;
@@ -4479,8 +4633,9 @@ function setProjectColor(path, color) {
   if (color && /^#[0-9a-f]{6}$/i.test(color)) projectColorPicks[key] = color.toLowerCase();
   else delete projectColorPicks[key];
   for (const c of app.cells) {
-    if (projectKey(c.cwd) !== projectKey(path)) continue;
-    c.color = projectColor(c.cwd);
+    const own = c.colorCwd || c.cwd;
+    if (projectKey(own) !== projectKey(path)) continue;
+    c.color = projectColor(own);
     c.el.style.setProperty('--proj', c.color);
   }
   for (const c of app.cells) if (c.group) c.applyGroup(); // a group wears its first session's project colour
@@ -4621,11 +4776,11 @@ function renderSidebar() {
     app.cells.forEach((cell, i) => {
       if (!matchesQuery(cell, terms)) return;
       const [cls, label] = stateOf(cell);
-      const row = h('button', { class: `session ${cls}${cell === app.focused ? ' active' : ''}`, title: cell.cwd },
+      const row = h('button', { class: `session ${cls}${cell === app.focused ? ' active' : ''}${cell.parentCell() ? ' child' : ''}`, title: cell.cwd },
         h('span', { class: 'status-dot' }),
         h('span', { class: 'session-main' },
           h('span', { class: 'session-line' },
-            h('span', { class: 'session-name', text: baseName(cell.cwd) || cell.cwd }),
+            h('span', { class: 'session-name', text: baseName(cell.colorCwd || cell.cwd) || cell.cwd }),
             h('span', { class: 'session-state', text: label })),
           h('span', { class: 'session-title', text: cell.displayTitle() || 'No messages yet' }),
           cell.sideTaskLine ? h('span', { class: 'session-tasks', text: cell.sideTaskLine }) : null,
@@ -4635,12 +4790,31 @@ function renderSidebar() {
       row.style.setProperty('--proj', cell.color);
       row.cell = cell;
       row.addEventListener('click', () => revealCell(cell));
+      row.addEventListener('contextmenu', e => { e.preventDefault(); openMenu(row, cell, menuEl => buildSessionMenu(menuEl, cell), { x: e.clientX, y: e.clientY }); });
       rows.push(row);
     });
     if (!rows.length) rows.push(h('div', { class: 'session-empty', text: app.cells.length ? 'No sessions match.' : 'No sessions yet.' }));
     sessionList.replaceChildren(...rows);
     $('#session-count').textContent = app.cells.length ? String(app.cells.length) : '';
   });
+}
+
+/** The sessions a starter started, each a link to its cell. */
+function buildKidsMenu(menuEl, cell) {
+  menuEl.append(h('div', { class: 'menu-title', text: 'Sessions it started' }));
+  for (const c of cell.childCells()) {
+    const [, label] = stateOf(c);
+    const item = h('button', { class: 'menu-item', onclick: () => { closeMenu(); revealCell(c); } },
+      h('span', { class: 'status-dot' }),
+      h('span', { class: 'menu-main' }, h('span', { class: 'name', text: c.displayTitle() || 'New session' }), h('span', { class: 'desc', text: `${label} · ${c.agent}` })));
+    const [cls] = stateOf(c);
+    if (cls) item.classList.add(cls); // its dot shows the state, like the sessions list
+    menuEl.append(item);
+  }
+  const kids = cell.childCells();
+  const docked = kids.every(c => c.collapsed);
+  menuEl.append(h('button', { class: 'menu-item', onclick: () => { closeMenu(); for (const c of kids) if (c.collapsed !== !docked) collapseCell(c, !docked); } },
+    icon(docked ? 'screen-normal' : 'chrome-minimize'), h('span', { class: 'menu-main' }, h('span', { class: 'name', text: docked ? 'Open them all' : 'Dock them all' }))));
 }
 
 /** Lightly marks the cell a sessions-list row points at while the row is hovered or focused. */
@@ -4729,8 +4903,10 @@ async function openPicker() {
       saveState();
       openPicker();
     });
-    list.append(h('button', { class: 'picker-item', 'data-path': path, onclick: () => { closePicker(); addNewCell({ cwd: path, backend: pickerBackend() }); } },
-      icon('folder'), h('span', { class: 'name', text: baseName(path) || path }), h('span', { class: 'path', text: path }), forget));
+    const row = h('button', { class: 'picker-item', 'data-path': path, onclick: () => { closePicker(); addNewCell({ cwd: path, backend: pickerBackend() }); } },
+      icon('folder'), h('span', { class: 'name', text: baseName(path) || path }), h('span', { class: 'path', text: path }), forget);
+    row.style.setProperty('--proj', projectColor(path)); // the colour its cells will wear
+    list.append(row);
   });
   pickerIndex = -1;
   agentPickerSwitch(picker);
@@ -5843,6 +6019,9 @@ function sanitizeSettings(x) {
     mcpSpawn: v.mcpSpawn !== false, // agents may start sessions
     mcpExternal: v.mcpExternal === true, // installed machine-wide: agents outside HQ may call the tools too
     // The most sessions started by agents that are open at once.
+    // How sessions an agent starts open: 'full' like any other, 'small' (half the width, smaller text) or 'dock' (collapsed).
+    reviewAll: v.reviewAll === true, // the approval reviewer in every session, at once (afk.js reviewOn); set from the UI only
+    childCells: ['full', 'small', 'dock'].includes(v.childCells) ? v.childCells : 'small',
     mcpMaxSpawned: Number.isInteger(v.mcpMaxSpawned) && v.mcpMaxSpawned >= 0 && v.mcpMaxSpawned <= MCP_MAX_SPAWNED_CAP ? v.mcpMaxSpawned : MCP_DEFAULT_MAX_SPAWNED,
   };
 }
@@ -5885,6 +6064,7 @@ function applyAppearance() {
     `.cell-head > .act-more { order: ${2 * (firstWindow < 0 ? shown.length : firstWindow)}; }`].join('\n');
   document.body.classList.toggle('fade-buttons', buttonReveal === 'near');
   document.body.classList.toggle('hover-buttons', buttonReveal === 'hover');
+  document.body.classList.toggle('small-children', app.settings.childCells === 'small');
   if (buttonReveal !== 'near') clearButtonFade();
   renderUsage();
 }
@@ -5978,12 +6158,81 @@ function buildMoreMenu(menuEl, cell) {
   });
   menuEl.append(h('div', { class: 'menu-title', text: 'More' }),
     ...(items.length ? items : [h('div', { class: 'menu-empty', text: 'Every button is pinned to the header.' })]));
+  menuEl.append(h('div', { class: 'menu-title', text: 'This session' }),
+    h('button', { class: 'menu-item', onclick: () => openMenu(cell.titleEl, cell, m => buildSessionMenu(m, cell)) },
+      icon('settings-gear'), h('span', { class: 'menu-main' }, h('span', { class: 'name', text: 'Session settings…' }),
+        h('span', { class: 'desc', text: 'Permissions, Remote Control, approval reviews (or right-click the header)' }))));
+}
+
+/** The permission modes Settings offers: Claude's (the composer template's list). */
+function claudeModes() {
+  return [...$('#cell-template').content.querySelectorAll('select.mode option')].map(o => [o.value, o.textContent]);
+}
+
+/** Whether Settings' global choices reach this session: one an agent or a command line started keeps what it was started with. */
+function followsGlobal(cell) {
+  return cell.backend === 'claude' && !cell.spawnedBy && !cell.launched;
+}
+
+/** Whether a session is in Settings' permission mode and not set on its own (the session menu's Follow Settings). */
+function followsGlobalMode(cell) {
+  return followsGlobal(cell) && !cell.modeOwn && cell.permissionMode === (app.defaults.permissionMode || 'default');
+}
+
+/**
+ * Settings > Permissions: the default for new Claude sessions, and the mode of every open one
+ * that follows it. One in another mode (set before this setting, or switched by Claude, as plan
+ * mode is) keeps its mode.
+ */
+function setGlobalMode(mode) {
+  const following = app.cells.filter(followsGlobalMode);
+  rememberChoice({ permissionMode: mode });
+  for (const c of following) if (c.permissionMode !== mode) c.setMode(mode);
+}
+
+/** Settings > Remote Control: new Claude sessions, and every open one not set on its own. */
+function setGlobalRemote(on) {
+  app.remoteDefault = on;
+  saveState();
+  for (const c of app.cells) {
+    if (c.backend !== 'claude' || c.remoteOwn || !!c.remote === on) continue;
+    if (on && c.procOnApi) continue; // a session on HQ's API key never turns it on by itself (autoEnableRemote)
+    if (c.remoteState === 'failed') c.remoteState = 'off';
+    c.setRemote(on);
+  }
+}
+
+/**
+ * The header's right-click menu: what this one session does differently from Settings. Its
+ * permission mode, Remote Control, and whether approvals go to the reviewer.
+ */
+function buildSessionMenu(menuEl, cell) {
+  const check = (on, name, desc, run, title) => h('button', { class: `menu-item${on ? ' checked' : ''}`, title: title || '', onclick: () => { closeMenu(); run(); } },
+    icon(on ? 'check' : 'blank'), h('span', { class: 'menu-main' }, h('span', { class: 'name', text: name }), desc ? h('span', { class: 'desc', text: desc }) : null));
+  menuEl.append(h('div', { class: 'menu-title', text: cell.displayTitle() || 'This session' }));
+  if (cell.backend !== 'cloud') {
+    menuEl.append(h('div', { class: 'menu-title', text: 'Permissions' }));
+    const global = app.defaults.permissionMode || 'default';
+    const follows = followsGlobalMode(cell);
+    if (followsGlobal(cell)) {
+      const label = (claudeModes().find(([v]) => v === global) || [global, global])[1];
+      menuEl.append(check(follows, 'Follow Settings', label, () => { cell.modeOwn = false; cell.setMode(global); }));
+    }
+    for (const o of cell.modeSel.options) {
+      menuEl.append(check(!follows && cell.permissionMode === o.value, o.textContent, '', () => { cell.modeOwn = true; cell.setMode(o.value); }));
+    }
+  }
+  if (cell.remoteOffered()) {
+    menuEl.append(h('div', { class: 'menu-title', text: 'Remote Control' }));
+    cell.buildRemoteMenu(menuEl);
+  }
   if (reviewBackend(cell)) {
-    menuEl.append(h('div', { class: 'menu-title', text: 'This session' }),
-      h('button', { class: `menu-item${cell.review ? ' checked' : ''}`, onclick: () => { closeMenu(); setCellReview(cell, !cell.review); },
-        title: 'A permission that has waited a minute goes to a separate Claude call first. It can approve it once or leave it for you; it never refuses.' },
-      icon(cell.review ? 'check' : 'blank'),
-      h('span', { class: 'menu-main' }, h('span', { class: 'name', text: 'Review approvals' }), h('span', { class: 'desc', text: 'Harmless ones go ahead after a minute' }))));
+    const on = cell.review || reviewAllCovers(cell);
+    menuEl.append(h('div', { class: 'menu-title', text: 'Approvals' }),
+      check(on, 'Review approvals', cell.review ? 'Set here' : reviewAllCovers(cell) ? 'From Settings, at once' : 'Harmless ones go ahead after a minute', () => {
+        cell.reviewOff = on && app.settings.reviewAll; // off here even while Settings reviews every session
+        setCellReview(cell, !on);
+      }, 'A permission prompt goes to a separate Claude call. It can approve it once or leave it for you; it never refuses.'));
   }
 }
 
@@ -6045,7 +6294,29 @@ async function saveApiKey(key) {
   if (!settingsPanel.classList.contains('hidden')) renderSettings();
 }
 
+/** Whether "Open in HQ" is on Explorer's folder menus; null where HQ cannot offer it (macOS, a dev build). */
+const explorerMenu = { on: null, asked: false };
+function loadExplorerMenu() {
+  if (explorerMenu.asked) return;
+  explorerMenu.asked = true;
+  invoke('explorer_menu_status').then(on => {
+    explorerMenu.on = typeof on === 'boolean' ? on : null;
+    if (explorerMenu.on != null && !settingsPanel.classList.contains('hidden')) renderSettings();
+  }).catch(() => {});
+}
+async function setExplorerMenu(on) {
+  try {
+    await invoke('set_explorer_menu', { on });
+    explorerMenu.on = on;
+  } catch (err) {
+    console.warn('explorer menu', err);
+    explorerMenu.asked = false; // ask again: the registry is the truth
+  }
+  if (!settingsPanel.classList.contains('hidden')) renderSettings();
+}
+
 function renderSettings() {
+  loadExplorerMenu();
   const row = (name, desc, control) => h('div', { class: 'setting' }, h('div', { class: 'setting-main' }, h('span', { class: 'name', text: name }), desc ? h('span', { class: 'desc', text: desc }) : null), control);
   const toggle = (on, onChange) => {
     const sw = h('button', { class: `switch${on ? ' on' : ''}`, role: 'switch', 'aria-checked': String(on) });
@@ -6095,16 +6366,24 @@ function renderSettings() {
     IS_MAC && app.settings.notify ? row('Keep buttons on screen', 'Set HQ\'s notification style to Alerts: a banner hides Approve and Deny until you hover over it, then slides away.',
       h('button', { class: 'btn', text: 'Open Settings…', onclick: () => invoke('open_notification_settings').catch(err => console.warn('notification settings', err)) })) : null,
     row('Sound for questions and approvals', 'A chime when a session asks you something or wants approval.', toggle(app.settings.sound, v => changeSetting('sound', v))),
-    row('Remote Control for new sessions', 'Continue sessions from claude.ai/code or the Claude app.', toggle(!!app.remoteDefault, v => { app.remoteDefault = v; saveState(); renderRemoteButtons(); })),
+    row('Permissions', 'For Claude sessions: new ones, and every open one not set on its own. Right-click a session\'s header to give it its own. Sessions an agent or a command line started keep the mode they were started with.',
+      select(app.defaults.permissionMode || 'default', claudeModes(), v => setGlobalMode(v))),
+    app.remoteAvailable !== false ? row('Remote Control', 'Continue Claude sessions from claude.ai/code or the Claude app. Applies to every session not set on its own; right-click a session\'s header to turn it off there.', toggle(!!app.remoteDefault, v => setGlobalRemote(v))) : null,
+    row('Review approvals in every session', 'Each permission prompt in a Claude or Hermes session goes straight to a separate Claude call, with no minute\'s wait. It approves harmless ones once or leaves them for you; it never refuses. Right-click a session\'s header to leave it out. Sessions an agent or a command line started are left out unless turned on there.',
+      toggle(app.settings.reviewAll, v => { changeSetting('reviewAll', v); syncAfk(); })),
     row('Default model for new sessions', 'The same as picking a model in a session. HQ_MODEL still applies when none is picked.',
       select(app.defaults.model || 'default', models, v => rememberChoice({ model: v }))),
     row('Automatic task lists', 'Ask Claude and Hermes to keep a task list on multi-step work. Off saves a few tokens per long job.', toggle(app.settings.autoTasks, v => changeSetting('autoTasks', v))),
     row('Agents per session', 'The most subagents one Claude session runs at once, workflows included; more are refused until one finishes. For sessions started from now on. 0 is no limit.', maxAgents),
     row('HQ tools for sessions', 'Gives every session HQ\'s own MCP server (mcp__hq__*): it can list, start, message and wait for other sessions, share notes, claim files and schedule messages. Starting, messaging and stopping sessions still asks for permission like any other tool. For sessions started from now on.', toggle(app.settings.mcp, v => changeSetting('mcp', v))),
     app.settings.mcp ? row('Let agents start sessions', `A session can open new sessions (Claude, Codex or Hermes) as cells, up to ${MCP_MAX_DEPTH} levels deep. They never bypass permissions.`, toggle(app.settings.mcpSpawn, v => changeSetting('mcpSpawn', v))) : null,
+    app.settings.mcp && app.settings.mcpSpawn ? row('Sessions agents start', 'They join their starter\'s group and wear its project colour. Small and Docked keep them out of the way, as they rarely need you; a docked one still lights up when it asks you something.',
+      select(app.settings.childCells, [['full', 'Full size'], ['small', 'Small'], ['dock', 'Docked']], v => changeSetting('childCells', v))) : null,
     app.settings.mcp && app.settings.mcpSpawn ? row('Sessions agents can open', 'The most sessions started by agents that can be open at once. Closing one makes room.', mcpMax) : null,
     app.settings.mcp ? row('HQ tools everywhere', 'Adds HQ\'s tools to every Claude Code, Codex and Hermes on this computer, so agents started in a terminal or an editor can see and start HQ sessions too while HQ is open. Agents pick it up the next time they start.', mcpInstallControl()) : null,
     row('API key for API credits', "A session that hits your plan's usage limit can carry on with this Claude Console key, from its limit card, until the plan's usage is back. A new Claude session can also run on it from its first message: click the key button next to its MCP button before sending. Max and Team plans' monthly API credits pay only for a key from the Console organization linked in claude.ai's billing settings; any other key is billed as usual. Kept in the system keychain (Credential Manager on Windows, Keychain on macOS), never in the board.", apiKeyControl()),
+    explorerMenu.on != null ? row('Open in HQ in Explorer', 'Adds "Open in HQ" to Explorer\'s right-click menu on folders: it opens a new session there. Like any session a command line opens, AFK and the approval reviewer leave it alone until you turn them on in it.',
+      toggle(explorerMenu.on, v => setExplorerMenu(v))) : null,
     row('Check for HQ updates automatically', 'The Check for updates button in the sessions list always works.', toggle(app.settings.autoUpdate, v => changeSetting('autoUpdate', v))),
     row('Claude command', 'Path to the claude program, for sessions started from now on. Empty uses HQ_CLAUDE, else claude on PATH.', path),
     codexAvailable() ? row('Codex command', 'Path to the codex program, for Codex sessions started from now on. Empty uses HQ_CODEX, else codex on PATH. HQ keeps Codex up to date while no Codex session runs.', codexPath) : null,
@@ -6354,7 +6633,7 @@ async function installUpdate() {
   renderUpdate();
   // Decided now, while the cells still show their work: installing stops every session, after which none looks busy.
   for (const c of app.cells) {
-    c.resumeMark = c.busy() && !c.missing && c.sessionId ? { queued: c.queuedTexts.map(q => q.text).filter(Boolean) } : null;
+    c.resumeMark = c.busy() && !c.missing && c.sessionId ? { queued: [...c.queuedTexts, ...c.held].map(q => q.text).filter(Boolean) } : null;
     // A prompt the agent has not answered may not be in its transcript yet; it goes with the resume, not back to the composer.
     const sent = c.lastSent;
     if (c.resumeMark && sent) {
@@ -6565,12 +6844,17 @@ function flushState() {
       afk: c.afk ?? undefined,
       afkLog: c.afkLog.length ? c.afkLog : undefined,
       review: c.review || undefined,
+      reviewOff: c.reviewOff || undefined,
+      modeOwn: c.modeOwn || undefined,
+      remoteOwn: c.remoteOwn || undefined,
+      busySend: c.busySend || undefined,
       launched: c.launched || undefined,
       // Only in the save just before an update restarts HQ; the first save after it drops the mark.
       resumeAfterUpdate: c.resumeMark ? true : undefined,
       resumeQueued: c.resumeMark && c.resumeMark.queued.length ? c.resumeMark.queued : undefined,
       hqId: c.hqId,
       spawnedBy: c.spawnedBy || undefined,
+      colorCwd: c.colorCwd || undefined,
       depth: c.depth || undefined,
     })),
     recent: app.recent,
@@ -6826,7 +7110,9 @@ async function openLaunch(r) {
   if (r.model) opts.model = r.model;
   if (r.effort) opts.effort = r.effort;
   // Never bypassPermissions from a command line: whoever runs hq.exe must not skip the prompts.
-  if (LAUNCH_MODES.includes(r.permissionMode)) opts.permissionMode = r.permissionMode;
+  // Nor through Settings > Permissions: a plain launch (Explorer's Open in HQ) takes the global mode only when it is not bypass.
+  const global = app.defaults.permissionMode || 'default';
+  opts.permissionMode = LAUNCH_MODES.includes(r.permissionMode) ? r.permissionMode : LAUNCH_MODES.includes(global) ? global : 'default';
   const cell = addNewCell(opts);
   if (r.prompt) {
     cell.launchPrompt = r.prompt.trim(); // as submit() reads the composer

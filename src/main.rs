@@ -19,6 +19,8 @@ mod review;
 mod secret;
 mod session;
 mod setup;
+mod shell;
+mod skills;
 mod store;
 mod update;
 mod usage;
@@ -718,12 +720,21 @@ fn parse_launch(args: &[String]) -> Option<LaunchRequest> {
         args.get(i + 1).filter(|v| !v.is_empty() && !v.starts_with("--")).cloned()
     };
     Some(LaunchRequest {
-        cwd: value("--new-session")?,
+        cwd: value("--new-session").map(|c| drive_root_fix(&c))?,
         model: value("--model"),
         effort: value("--effort"),
         permission_mode: value("--permission-mode"),
         prompt: value("--prompt"),
     })
+}
+
+/// Explorer's "Open in HQ" on a drive root passes `"D:\"`, which Windows' argument rules read as
+/// `D:"` (the backslash escapes the closing quote). Puts the root back.
+fn drive_root_fix(cwd: &str) -> String {
+    match cwd.strip_suffix('"') {
+        Some(root) if root.len() == 2 && root.ends_with(':') => format!("{root}\\"),
+        _ => cwd.to_string(),
+    }
 }
 
 /// Hands the UI the sessions asked for on the command line since it last looked.
@@ -966,6 +977,8 @@ fn main() {
             kill_all_sessions,
             build_info,
             take_launches,
+            shell::explorer_menu_status,
+            shell::set_explorer_menu,
             #[cfg(not(target_os = "macos"))]
             icon::pick_app_icon,
             #[cfg(not(target_os = "macos"))]
@@ -977,6 +990,11 @@ fn main() {
             mcp::start(app.handle(), app.state::<Profile>().0.as_deref());
             let pruner = app.handle().clone();
             std::thread::spawn(move || activity::prune(&pruner));
+            // Off the UI thread: small file and registry writes that must not delay the window.
+            std::thread::spawn(|| {
+                skills::install_missing();
+                shell::refresh_explorer_menu();
+            });
             // Finds the sessions an earlier HQ left running and starts this build's host, off the
             // UI thread; the first spawn or `host_sessions` waits for it.
             let (handle, profile) = (app.handle().clone(), app.state::<Profile>().0.clone());
@@ -1017,6 +1035,13 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn launch_on_a_drive_root() {
+        assert_eq!(super::drive_root_fix(r#"D:""#), r"D:\");
+        assert_eq!(super::drive_root_fix(r"D:\Repos"), r"D:\Repos");
+        assert_eq!(super::drive_root_fix(r#"odd""#), r#"odd""#);
+    }
+
     use super::*;
 
     #[test]

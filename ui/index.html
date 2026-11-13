@@ -171,7 +171,7 @@
         <div class="progress-panel"></div>
       </div>
       <div class="waiting-view">
-        <div class="wv-hero"><div class="wv-loader" aria-hidden="true"></div><svg class="wv-check" viewBox="0 0 40 40" aria-hidden="true"><path d="M10 21l7 7 13-15" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="wv-hero"><div class="wv-loader" aria-hidden="true"></div><button class="wv-check" type="button" title="Show the chat" aria-label="Done. Show the chat"><svg class="wv-tick" viewBox="0 0 40 40" aria-hidden="true"><path d="M10 21l7 7 13-15" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg><svg class="wv-chat" viewBox="0 0 40 40" aria-hidden="true"><path d="M9 11.5a3.5 3.5 0 0 1 3.5-3.5h15a3.5 3.5 0 0 1 3.5 3.5v10a3.5 3.5 0 0 1-3.5 3.5H18l-6 5v-5h0.5A3.5 3.5 0 0 1 9 21.5z" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linejoin="round"/><path d="M15 14.5h10M15 19h6" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg></button></div>
         <div class="wv-busy"></div>
         <div class="wv-body"></div>
       </div>
@@ -191,7 +191,9 @@
         <div class="attachments"></div>
         <textarea rows="1" placeholder="Ask Claude…  (Enter to send, Shift+Enter for new line, paste or drop images)"></textarea>
         <div class="composer-bar">
-          <select class="mode" title="Permission mode">
+          <button class="chip act-busysend hidden"><span class="codicon codicon-list-ordered"></span><span class="label"></span></button>
+          <button class="chip act-mode hidden"><span class="codicon codicon-shield"></span><span class="label"></span></button>
+          <select class="mode hidden" title="Permission mode" aria-hidden="true" tabindex="-1">
             <option value="default">Ask before edits</option>
             <option value="acceptEdits">Edit automatically</option>
             <option value="plan">Plan mode</option>
@@ -201,9 +203,7 @@
           <button class="chip act-model" title="Model and effort"><span class="label"></span><span class="codicon codicon-chevron-down"></span></button>
           <button class="chip act-api hidden"><span class="codicon codicon-key"></span><span class="label">API</span></button>
           <button class="icon-btn act-apikey hidden"><span class="codicon codicon-key"></span></button>
-          <button class="icon-btn act-mcp" title="MCP servers"><span class="codicon codicon-plug"></span></button>
-          <button class="icon-btn act-tasklist" title="Ask for a task list on this prompt"><span class="codicon codicon-tasklist"></span></button>
-          <button class="icon-btn act-remote hidden"><span class="codicon codicon-broadcast"></span></button>
+          <button class="icon-btn act-mcp" title="MCP servers"><span class="codicon codicon-mcp"></span></button>
           <button class="ctx-btn act-context hidden" aria-label="Context window"><span class="ctx-ring"></span><span class="ctx-text"></span></button>
           <span class="cache-age hidden"><span class="codicon codicon-history"></span><span class="cache-text"></span></span>
           <span class="spacer"></span>

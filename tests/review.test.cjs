@@ -522,3 +522,16 @@ test('spawn_session and the command line cannot set the reviewer', () => {
   const launch = appSource.slice(appSource.indexOf('const LAUNCH_MODES'));
   assert.doesNotMatch(launch.slice(0, launch.indexOf('function', 400)), /\breview\b/);
 });
+
+test('Settings > Review approvals in every session covers a session at once, but not a started or opted-out one', async () => {
+  const t = harness();
+  t.context.app.settings = { reviewAll: true };
+  const own = t.make(), spawned = t.make({ spawnedBy: 's0001' }), launched = t.make({ launched: true }), out = t.make({ reviewOff: true });
+  assert.equal(t.context.reviewOn(own), true);
+  assert.equal(t.context.reviewOn(spawned), false);
+  assert.equal(t.context.reviewOn(launched), false);
+  assert.equal(t.context.reviewOn(out), false);
+  assert.equal(t.context.reviewOn(t.make({ spawnedBy: 's0001', review: true })), true); // turned on in that session
+  t.context.app.settings = { reviewAll: false };
+  assert.equal(t.context.reviewOn(own), false);
+});
