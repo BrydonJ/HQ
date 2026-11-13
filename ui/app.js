@@ -277,6 +277,18 @@ const nextRequestId = () => `hq-${Date.now().toString(36)}-${++reqSeq}`;
 // Cell: one chat session bound to one folder
 // ======================================================================================
 
+/** Writes one line to HQ's timesheet log (src/activity.rs; /log-hours reads it): when a session
+ *  started working, went idle, exited or was closed, in the local day's file. */
+function logActivity(cell, state) {
+  const now = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  const day = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  const off = -now.getTimezoneOffset();
+  const t = `${day}T${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}${off < 0 ? '-' : '+'}${pad(Math.floor(Math.abs(off) / 60))}:${pad(Math.abs(off) % 60)}`;
+  const line = JSON.stringify({ t, state, id: cell.hqId, agent: cell.backend, session: cell.sessionId || undefined, cwd: cell.cwd || undefined, title: (cell.customTitle || cell.title || '').slice(0, 200) || undefined });
+  invoke('log_activity', { day, line }).catch(() => {});
+}
+
 class Cell {
   constructor({ cwd, sessionId = null, permissionMode = 'default', model = null, effort = null, title = '', aiTitle = false,
     customTitle = null, renamePending = false, detail, clean, progress = false, fork = false, collapsed = false,
@@ -1741,6 +1753,7 @@ class Cell {
   setStatus(status) {
     if (status === 'running' && this.status !== 'running') this.startTurn();
     if (status === 'running') this.lastTurnOk = false;
+    if (status !== this.status && !this.quiet) logActivity(this, status);
     this.status = status;
     this.refreshState();
     if (status !== 'running' && this.held.length) queueMicrotask(() => this.sendHeld());
@@ -2445,6 +2458,7 @@ class Cell {
   }
 
   dispose() {
+    if (!this.closing) logActivity(this, 'closed');
     this.closing = true;
     if (menuState.cell === this) closeMenu();
     if (this.proc != null) invoke('kill_session', { id: this.proc });
@@ -6709,18 +6723,23 @@ setInterval(() => {
 // Keyboard
 // ======================================================================================
 
+// A reload restarts HQ's page, which stops every claude, so the webview's own F5 and Ctrl+R (with or
+// without Shift) never reload. Dev builds read the UI from disk and keep Ctrl+R (not F5, too easy to
+// hit) to show edits. It listens on window in the capture phase so it runs before any other handler:
+// fields that stop their keys (rename, compact) used to let F5 through to the webview.
+window.addEventListener('keydown', e => {
+  const mod = IS_MAC ? e.metaKey : e.ctrlKey;
+  if (e.key !== 'F5' && !(mod && (e.key === 'r' || e.key === 'R' || (e.code === 'KeyR' && !e.altKey)))) return; // code: R on any layout; AltGr (Ctrl+Alt) types
+  e.preventDefault();
+  e.stopPropagation();
+  if (build.liveUi && e.key !== 'F5' && !e.repeat) flushState().then(() => location.reload());
+}, true);
+
 document.addEventListener('keydown', e => {
   const cell = app.focused;
   const typing = e.target.matches?.('input, textarea, select'); // the target is document when nothing has focus
-  // A reload restarts HQ's page, which stops every claude, so the webview's own F5 and Ctrl+R never
-  // reload. Dev builds read the UI from disk and keep Ctrl+R (not F5, too easy to hit) to show edits.
   // Cmd on a Mac (Ctrl+B, N, O there are text-field cursor keys), Ctrl elsewhere.
   const mod = IS_MAC ? e.metaKey : e.ctrlKey;
-  if (e.key === 'F5' || (mod && (e.key === 'r' || e.key === 'R'))) {
-    e.preventDefault();
-    if (build.liveUi && e.key !== 'F5') flushState().then(() => location.reload());
-    return;
-  }
   if (e.key === 'Escape' && menuState.anchor) {
     e.preventDefault();
     closeMenu();

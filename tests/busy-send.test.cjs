@@ -22,7 +22,7 @@ function harness(backend, busySend = null) {
   const context = vm.createContext({
     h: (tag, attrs) => Object.assign(node(attrs && attrs.class), { addEventListener() {} }), icon: () => ({}),
     userBubble: text => Object.assign(node('user'), { text }), autoGrow() {}, slashClose() {}, saveState() {},
-    queueMicrotask: fn => fn(),
+    queueMicrotask: fn => fn(), logActivity() {},
   });
   vm.runInContext(`class BusyCell { ${methods} }`, context);
   const cell = vm.runInContext('new BusyCell()', context);
