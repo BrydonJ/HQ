@@ -2891,25 +2891,35 @@ mod live {
         h.stop();
     }
 
-    /// Restarts Hermes' gateway, which every Hermes profile shares: any turn running elsewhere is
-    /// lost too. So it runs only with HQ_LIVE_GATEWAY_RESTART=1, when no other Hermes cell is busy.
+    /// Kills Hermes' gateway mid-turn, as a crash or an HQ update can, which every Hermes profile
+    /// shares: any turn running elsewhere is lost too. So it runs only with
+    /// HQ_LIVE_GATEWAY_RESTART=1, when no other Hermes cell is busy. Windows only (taskkill).
     #[test]
     #[ignore]
-    fn live_a_turn_lost_in_a_gateway_restart_does_not_block_the_cell() {
+    fn live_a_turn_lost_in_a_gateway_crash_does_not_block_the_cell() {
         if std::env::var_os("HQ_LIVE_GATEWAY_RESTART").is_none() {
-            return eprintln!("skipped: set HQ_LIVE_GATEWAY_RESTART=1 to restart Hermes' gateway");
+            return eprintln!("skipped: set HQ_LIVE_GATEWAY_RESTART=1 to kill Hermes' gateway");
         }
+        let run = |args: &[&str]| String::from_utf8_lossy(&Command::new(hermes_program()).args(args).output().unwrap().stdout).into_owned();
         let mut h = start(None, false);
-        h.prompt("Without using any tools, write the numbers 1 to 300 in words, one per line.");
-        h.until("the turn's first text", 120, |v| v["type"] == "stream_event" || v["type"] == "assistant");
-        let restart = Command::new(hermes_program()).args(["gateway", "restart"]).output().unwrap();
-        println!("restart: {} {}", String::from_utf8_lossy(&restart.stdout), String::from_utf8_lossy(&restart.stderr));
+        h.prompt("Use your terminal tool to run exactly: powershell -c Start-Sleep 60 ; then reply done.");
+        let session = h.until("the turn's start", 120, |v| v["type"] == "system")["session_id"].as_str().unwrap().to_owned();
+        h.until("the tool call", 120, |v| v.to_string().contains("tool_use") || v["type"] == "control_request");
+        let status = run(&["gateway", "status"]);
+        let pid = status.split("PID: ").nth(1).and_then(|r| r.split(')').next()).expect("the gateway's pid").trim().to_owned();
+        let killed = Command::new("taskkill").args(["/F", "/T", "/PID", &pid]).output().unwrap();
+        assert!(killed.status.success(), "could not kill the gateway");
         let lost = h.result();
         println!("lost turn ended: {lost}");
-        // Whatever the lost turn reported, the next message must get through rather than "Internal error".
-        h.prompt("Reply with just: ok");
-        let next = h.result();
-        assert_eq!(next["subtype"], "success", "{next}");
+        assert!(run(&["gateway", "ensure"]).contains("ready"), "the gateway did not come back");
+        h.stop();
+        // Unfixed, every message from here on fails with "Internal error" until the turn is discarded.
+        let mut h = start(Some(&session), false);
+        for text in ["Reply with just: ok", "Reply with just: ok2"] {
+            h.prompt(text);
+            let next = h.result();
+            assert_eq!(next["subtype"], "success", "{next}");
+        }
         h.stop();
     }
 
