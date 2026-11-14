@@ -47,7 +47,7 @@ function harness() {
       return new Promise((resolve, reject) => reviews.push({ name, req: args.req, resolve, reject }));
     },
     saveState() {}, closeMenu() {}, notifyWaiting() {}, firstLine: s => String(s).split('\n')[0], relPath: p => p,
-    openMenu() {}, afkPillStub: null,
+    openMenu() {}, afkPillStub: null, deputyCovers: () => false, deputyWatch() {}, deputyUnwatch() {},
   });
   vm.runInContext(`${afkSource}\nclass CardCell { ${methods}
     syncPromptsBar() {} refreshState() {}
