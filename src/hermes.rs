@@ -183,6 +183,9 @@ const HELD_ANSWER: Duration = Duration::from_secs(60);
 /// turn runs in the gateway, so ending `hermes acp` (Force stop) leaves it running too.
 const OWN_TURN_STOP: &str = "Hermes started this turn itself, to act on a background task or watch notice, and Hermes lets HQ stop only the turns HQ sent. It runs on in Hermes, and this cell shows it until it ends; denying its next approval ends it sooner.";
 
+/// A turn's end when Hermes accepted its prompt and then lost it in a gateway restart.
+const LOST_ACCEPTED_TURN: &str = "Hermes lost this turn when its gateway restarted, after it had started on your message, so it may have run in part. HQ cleared the lost turn; check what was done and send again to continue.";
+
 /// Why a session will not open while Hermes holds a turn it lost, and what clears it by hand.
 fn lost_turn_message(session: &str, why: &str) -> String {
     format!(
@@ -526,7 +529,8 @@ enum Call {
     Initialize,
     /// `session/new`, `session/load` or `session/fork` for the cell's own session.
     Open { loaded: Option<String>, fork_of: Option<String> },
-    Prompt { started: Instant },
+    /// A cell turn. `prompt` is kept so a prompt refused for a lost turn can be resent once.
+    Prompt { started: Instant, prompt: Value, retried: bool },
     /// `session/fork` for a side question (Handoff, the progress button).
     SideFork { request_id: String, question: String },
     /// `session/set_mode` putting a side question's fork back to asking before edits.
@@ -592,6 +596,9 @@ struct Bridge {
     loading: bool,
     /// Whether the session's lost turn was already discarded, so opening it is retried only once.
     discarded_lost_turn: bool,
+    /// A turn's prompt held while HQ discards a turn Hermes lost mid-session, and whether Hermes
+    /// took none of it (so it is resent) rather than accepting it before losing it (it is not).
+    lost_turn_prompt: Option<(Instant, Value, bool)>,
     /// The bridge's own event queue, for work finished on another thread.
     events: mpsc::Sender<Event>,
     /// Frontend lines that arrived before the session was open.
@@ -672,6 +679,7 @@ impl Bridge {
             session: None,
             loading: false,
             discarded_lost_turn: false,
+            lost_turn_prompt: None,
             events,
             early: Vec::new(),
             setup: 0,
@@ -773,13 +781,24 @@ impl Bridge {
                 Event::FrontendClosed => self.hermes = None,
                 Event::Hermes(line) => self.from_hermes(&line),
                 Event::HermesClosed => break,
-                Event::LostTurnDiscarded { session, result } => match result {
-                    Ok(()) => self.open_session(),
-                    Err(why) => self.fatal(&lost_turn_message(&session, &why)),
-                },
+                Event::LostTurnDiscarded { session, result } => self.lost_turn_discarded(&session, result),
             }
         }
         // Dropping the writer ends the frontend's stream, which then reports the exit.
+    }
+
+    /// `discard_lost_turn` finished: reopen the session, or carry on the turn whose prompt it refused.
+    fn lost_turn_discarded(&mut self, session: &str, result: Result<(), String>) {
+        match (self.lost_turn_prompt.take(), result) {
+            (None, Ok(())) => self.open_session(),
+            (None, Err(why)) => self.fatal(&lost_turn_message(session, &why)),
+            (Some((started, prompt, true)), Ok(())) => self.call("session/prompt", prompt, Call::Prompt { started, prompt: Value::Null, retried: true }),
+            (Some((started, _, false)), Ok(())) => self.turn_ended(started, "error", &Value::Null, Some(LOST_ACCEPTED_TURN)),
+            (Some((started, ..)), Err(why)) => {
+                let error = format!("Hermes lost a turn when its gateway restarted and HQ could not clear it ({why}). Run `hermes sessions discard {session} --yes` in a terminal, then send again.");
+                self.turn_ended(started, "error", &Value::Null, Some(&error));
+            }
+        }
     }
 
     // ---------- writing ----------
@@ -857,7 +876,7 @@ impl Bridge {
         match call {
             Call::Initialize => self.open_session(),
             Call::Open { loaded, fork_of } => self.opened(result, loaded, fork_of),
-            Call::Prompt { started } => self.turn_ended(started, result["stopReason"].as_str().unwrap_or("end_turn"), &result["usage"], None),
+            Call::Prompt { started, .. } => self.turn_ended(started, result["stopReason"].as_str().unwrap_or("end_turn"), &result["usage"], None),
             Call::SideFork { request_id, question } => {
                 let Some(fork) = result["sessionId"].as_str().map(str::to_owned) else {
                     return self.reply_err(&request_id, "Hermes did not fork the session");
@@ -924,7 +943,28 @@ impl Bridge {
                 }
             }
             Call::Initialize | Call::Open { .. } => self.fatal(&format!("Hermes could not start the session: {error}")),
-            Call::Prompt { started } => self.turn_ended(started, "error", &Value::Null, Some(error)),
+            // The same lost turn, met mid-session (the gateway restarted under an open cell): every
+            // prompt is refused until it is discarded, and a `/discard` HQ wraps in a note or task
+            // prompt is not one Hermes recognises. HQ discards it and resends a prompt Hermes took
+            // none of; one Hermes accepted and then lost may have run in part, so it is not resent.
+            Call::Prompt { started, prompt, retried: false } if details.is_some_and(|d| d.starts_with("unknown_execution")) && self.session.as_deref().is_some_and(valid_session_id) => {
+                let session = self.session.clone().unwrap_or_default();
+                let untouched = details.is_some_and(|d| d.contains("nothing was submitted"));
+                self.lost_turn_prompt = Some((started, prompt, untouched));
+                let (cwd, events) = (self.opts.cwd.clone(), self.events.clone());
+                std::thread::spawn(move || {
+                    let result = discard_lost_turn(&session, &cwd);
+                    let _ = events.send(Event::LostTurnDiscarded { session, result });
+                });
+            }
+            // Hermes' ACP layer reports its own refusals as "Internal error" and puts the reason in details.
+            Call::Prompt { started, .. } => {
+                let error = match details {
+                    Some(d) if error == "Internal error" && !d.is_empty() => d,
+                    _ => error,
+                };
+                self.turn_ended(started, "error", &Value::Null, Some(error));
+            }
             // Hermes forks only an idle session (`session_busy` mid-turn) and has no /btw over ACP
             // yet, so a side question asked mid-turn goes to a fresh session. That session cannot
             // see the conversation, only what `side_prompt` put in the question.
@@ -1537,7 +1577,7 @@ impl Bridge {
         self.own_turn = None;
         self.turn_prompt = prompt_text(&content);
         self.turn_tools.clear();
-        self.call("session/prompt", prompt, Call::Prompt { started: Instant::now() });
+        self.call("session/prompt", prompt.clone(), Call::Prompt { started: Instant::now(), prompt, retried: false });
     }
 
     /// Answers the frontend's initialize requests once Hermes has listed its commands.
@@ -2354,6 +2394,49 @@ mod tests {
         let result = read_all(lines).into_iter().find(|v| v["type"] == "result").expect("an error result");
         assert_eq!(result["is_error"], true);
         assert!(result["result"].as_str().unwrap().contains("did not open the session"), "{result}");
+        let _ = child.kill();
+    }
+
+    #[test]
+    fn a_turn_lost_mid_session_is_discarded_and_its_prompt_resent() {
+        let dir = std::env::temp_dir().join(format!("hq-hermes-lost-turn-{}", std::process::id()));
+        let opts = SpawnOptions { cwd: dir.to_string_lossy().into_owned(), resume: None, permission_mode: None, model: None, effort: None, fork: false, auto_tasks: false, max_agents: None, api_key: false, mcp: false, cell_key: None };
+        let mut sink = if cfg!(windows) { Command::new("findstr") } else { Command::new("cat") };
+        if cfg!(windows) {
+            sink.arg("^");
+        }
+        sink.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+        hide_console(&mut sink);
+        let mut child = sink.spawn().unwrap();
+        let (lines, out) = std::io::pipe().unwrap();
+        let mut b = Bridge::new(child.stdin.take().unwrap(), out, dir, opts, json!([]), mpsc::channel().0);
+        b.session = Some("local-abc".into());
+        let prompt = json!({ "sessionId": "local-abc", "prompt": [{ "type": "text", "text": "go" }] });
+
+        // Hermes took none of the prompt: once the lost turn is discarded it goes again, once.
+        b.in_turn = true;
+        b.lost_turn_prompt = Some((Instant::now(), prompt.clone(), true));
+        b.lost_turn_discarded("local-abc", Ok(()));
+        let (_, resent) = b.calls.iter().next().expect("the prompt resent");
+        assert!(matches!(resent, Call::Prompt { retried: true, .. }));
+        assert!(b.in_turn);
+        b.calls.clear();
+
+        // Hermes had accepted it before losing it: not resent, the turn ends saying so.
+        b.lost_turn_prompt = Some((Instant::now(), prompt.clone(), false));
+        b.lost_turn_discarded("local-abc", Ok(()));
+        assert!(b.calls.is_empty() && !b.in_turn);
+
+        // A refusal Hermes reports as "Internal error" shows its reason instead.
+        b.in_turn = true;
+        b.failed(Call::Prompt { started: Instant::now(), prompt: Value::Null, retried: true }, "Internal error", Some("admitted_turn_failed"));
+        drop(b);
+        let results: Vec<String> = BufReader::new(lines).lines()
+            .map(|l| serde_json::from_str::<Value>(&l.unwrap()).unwrap())
+            .filter(|v| v["type"] == "result")
+            .map(|v| v["result"].as_str().unwrap_or_default().to_owned())
+            .collect();
+        assert_eq!(results, [LOST_ACCEPTED_TURN.to_owned(), "admitted_turn_failed".to_owned()]);
         let _ = child.kill();
     }
 
