@@ -491,6 +491,30 @@ const TOOLS: &[Tool] = &[
         }),
     },
     Tool {
+        name: "list_prompts",
+        description: "Deputy only: lists the prompts (permissions, questions, plans) other sessions are waiting on that HQ has sent you to answer.",
+        auto_allow: true,
+        schema: || json!({ "type": "object", "properties": {} }),
+    },
+    Tool {
+        name: "answer_prompt",
+        description: "Deputy only: answers a prompt HQ sent you from another session, for the user. allow approves it once (a question needs answers), deny refuses it with a reason the session reads, leave hands it back to the user.",
+        // Safe up front: mcp.js refuses every caller but the session the user made their deputy in HQ's UI.
+        auto_allow: true,
+        schema: || json!({
+            "type": "object",
+            "properties": {
+                "prompt": { "type": "string", "description": "The prompt id HQ gave you, such as p1a2b." },
+                "session": { "type": "string", "description": "The id of the session that is waiting, as HQ gave it." },
+                "decision": { "type": "string", "enum": ["allow", "deny", "leave"] },
+                "reason": { "type": "string", "description": "Why. Required for deny." },
+                "answers": { "type": "object", "additionalProperties": { "type": "string" }, "description": "For a question: each answer, keyed by the exact question text." },
+                "answer": { "type": "string", "description": "For a question: one answer for every question not in answers." }
+            },
+            "required": ["prompt", "session", "decision"]
+        }),
+    },
+    Tool {
         name: "get_usage",
         description: "The user's Claude plan usage: each limit's percent used and when it resets, and whether the plan is out now. Use it to decide how many sessions to start, or which model.",
         auto_allow: true,
@@ -546,7 +570,7 @@ const TOOLS: &[Tool] = &[
 ];
 
 /// The tools that change nothing at all.
-const READ_ONLY: [&str; 8] = ["show_image", "list_sessions", "read_session", "wait_for_sessions", "get_usage", "list_scheduled", "list_claims", "note_get"];
+const READ_ONLY: [&str; 9] = ["show_image", "list_sessions", "read_session", "wait_for_sessions", "get_usage", "list_scheduled", "list_claims", "note_get", "list_prompts"];
 
 fn tool_list() -> Value {
     let tools: Vec<Value> = TOOLS

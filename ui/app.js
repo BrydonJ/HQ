@@ -293,7 +293,7 @@ class Cell {
   constructor({ cwd, sessionId = null, permissionMode = 'default', model = null, effort = null, title = '', aiTitle = false,
     customTitle = null, renamePending = false, detail, clean, progress = false, fork = false, collapsed = false,
     missing = false, remote = null, bridgeSessionId = null, draft = '', backend = 'claude', resumeAfterUpdate = false, resumeQueued = null, api = false, apiKey = false, afk = null, afkLog = null, review = false, reviewOff = false, launched = false, modeOwn = false, remoteOwn = false, busySend = null,
-    hqId = null, spawnedBy = null, colorCwd = null, depth = 0, hosted = null, spot = false, group = null, flexW = 1, flexH = 1 }) {
+    hqId = null, spawnedBy = null, lineage = null, drivenBy = null, deputyLeftIds = null, colorCwd = null, depth = 0, hosted = null, spot = false, group = null, flexW = 1, flexH = 1 }) {
     this.cwd = cwd;
     // A session a session host kept running while HQ restarted: { id, startedMs }. reattach() connects to it.
     this.hosted = hosted;
@@ -305,6 +305,12 @@ class Cell {
     // HQ's MCP tools (mcp.js): the id they know this session by, the session that started it, and how deep that goes.
     this.hqId = typeof hqId === 'string' && /^s[0-9a-z]{4}$/.test(hqId) && !app.cells.some(c => c.hqId === hqId) ? hqId : newHqId();
     this.spawnedBy = typeof spawnedBy === 'string' ? spawnedBy : null;
+    this.lineage = deputyIds(lineage);   // every session above it, kept when they close (deputy.js)
+    // Every session whose words ever reached it, never cleared (deputy.js). A board saved before this
+    // field existed starts it empty, so messages sent before the upgrade are not counted: a one-time
+    // window, closed by picking a fresh session as the deputy.
+    this.drivenBy = deputyIds(drivenBy);
+    this.deputyLeftIds = Array.isArray(deputyLeftIds) ? deputyLeftIds.filter(x => typeof x === 'string').slice(-50) : []; // prompts the deputy left to the user
     // The folder whose project colour and name it wears: a session another one started (often in a
     // worktree) wears its starter's, so a red project's helper stays red after its starter closes.
     this.colorCwd = typeof colorCwd === 'string' && colorCwd && colorCwd !== cwd ? colorCwd : null;
@@ -3113,6 +3119,7 @@ class Cell {
     if (card) {
       afkUnwatch(card);
       reviewUnwatch(card);
+      deputyUnwatch(card);
       card.remove();
     }
     this.pending.delete(requestId);
@@ -3786,6 +3793,15 @@ class Cell {
 
   /** The header's AFK button: lit while this session is AFK, struck through when it never is. */
   renderAfk() {
+    const isDeputy = !!app.deputy && app.deputy === this.hqId;
+    this.el.classList.toggle('is-deputy', isDeputy);
+    if (isDeputy && !this.deputyBadge) {
+      this.deputyBadge = h('span', { class: 'deputy-badge', text: 'Deputy', title: 'Your deputy: answers prompts from the other sessions (right-click the header to stop)' });
+      this.titleEl.after(this.deputyBadge);
+    } else if (!isDeputy && this.deputyBadge) {
+      this.deputyBadge.remove();
+      this.deputyBadge = null;
+    }
     const until = afkUntil(this);
     this.afkBtn.classList.toggle('on', until > 0);
     this.afkBtn.classList.toggle('never', this.afk === false);
@@ -4647,6 +4663,7 @@ function closeCell(cell) {
   clearTimeout(cell.afkNudgeTimer);
   cell.dispose();
   mcpCellClosed(cell);
+  deputyCellClosed(cell);
   if (peeked === cell) peeked = null;
   const i = app.cells.indexOf(cell);
   if (i >= 0) app.cells.splice(i, 1);
@@ -6234,6 +6251,12 @@ function buildSessionMenu(menuEl, cell) {
         setCellReview(cell, !on);
       }, 'A permission prompt goes to a separate Claude call. It can approve it once or leave it for you; it never refuses.'));
   }
+  if (cell.backend === 'claude' || cell.backend === 'codex') {
+    const on = !!app.deputy && app.deputy === cell.hqId;
+    menuEl.append(h('div', { class: 'menu-title', text: 'Deputy' }),
+      check(on, 'Answer prompts for me', on ? 'This session is your deputy' : "Other sessions' prompts come here after a minute", () => setDeputy(on ? null : cell),
+        'This session answers the permissions, questions and plans that wait in your other sessions, once each, or leaves them for you. Works beside AFK. A session set to never go AFK is left to you.'));
+  }
 }
 
 function changeSetting(key, value) {
@@ -6329,7 +6352,7 @@ function renderSettings() {
     el.addEventListener('change', () => onChange(el.value));
     return el;
   };
-  const tabs = [['general', 'General'], ['appearance', 'Appearance']];
+  const tabs = [['general', 'General'], ['appearance', 'Appearance'], ['deputy', 'Deputy']];
   settingsPanel.querySelector('#settings-tabs').replaceChildren(...tabs.map(([key, label]) => h('button', {
     class: `settings-tab${settingsTab === key ? ' on' : ''}`, role: 'tab', 'aria-selected': String(settingsTab === key), text: label,
     onclick: () => { settingsTab = key; renderSettings(); },
@@ -6337,6 +6360,10 @@ function renderSettings() {
   const body = settingsPanel.querySelector('#settings-body');
   if (settingsTab === 'appearance') {
     body.replaceChildren(...renderAppearanceSettings(row, toggle, select));
+    return;
+  }
+  if (settingsTab === 'deputy') {
+    body.replaceChildren(...renderDeputySettings(row).filter(Boolean));
     return;
   }
   const path = h('input', { type: 'text', value: app.settings.claudePath, placeholder: 'claude', spellcheck: 'false' });
@@ -6854,6 +6881,9 @@ function flushState() {
       resumeQueued: c.resumeMark && c.resumeMark.queued.length ? c.resumeMark.queued : undefined,
       hqId: c.hqId,
       spawnedBy: c.spawnedBy || undefined,
+      lineage: c.lineage.length ? c.lineage : undefined,
+      drivenBy: c.drivenBy.length ? c.drivenBy : undefined,
+      deputyLeftIds: c.deputyLeftIds.length ? c.deputyLeftIds : undefined,
       colorCwd: c.colorCwd || undefined,
       depth: c.depth || undefined,
     })),
@@ -6871,6 +6901,8 @@ function flushState() {
     remoteDefault: app.remoteDefault == null ? undefined : app.remoteDefault,
     planLimitedUntil: app.planLimitedUntil > Date.now() ? app.planLimitedUntil : undefined,
     afk: app.afk || undefined,
+    deputy: app.deputy || undefined,
+    deputyRules: app.deputyRules && (app.deputyRules.all || app.deputyRules.projects.length) ? app.deputyRules : undefined,
     mcp: mcpSaved(),
     settings: app.settings,
     sidebarOpen: app.sidebarOpen,
@@ -7035,6 +7067,8 @@ async function restore() {
   app.remoteDefault = state && typeof state.remoteDefault === 'boolean' ? state.remoteDefault : null;
   app.planLimitedUntil = state && Number.isFinite(state.planLimitedUntil) ? state.planLimitedUntil : 0;
   app.afk = sanitizeAfk(state && state.afk);
+  app.deputy = state && typeof state.deputy === 'string' ? state.deputy : null;
+  app.deputyRules = sanitizeDeputyRules(state && state.deputyRules);
   app.apiKeyHint = await invoke('api_key_hint').catch(() => null);
   app.settings = sanitizeSettings(state && state.settings);
   applySettings();

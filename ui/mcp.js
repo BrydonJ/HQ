@@ -198,8 +198,15 @@ function mcpLatest(cell, n) {
 }
 
 /** Sends HQ's own prompt to a cell and marks it as owing an answer until its turn ends. */
-function mcpSend(cell, text) {
+// `from`: the session whose words these are. It, the sessions above it and whoever drove it are
+// added to the cell's drivenBy for good (its words stay in that context), so the deputy (deputy.js)
+// never answers prompts its own messages caused, however they were relayed.
+function mcpSend(cell, text, from = null) {
   cell.mcpExpect = true;
+  if (from) {
+    cell.drivenBy = deputyIds([...cell.drivenBy, from.hqId, ...(from.lineage || []), ...(from.drivenBy || [])]);
+    saveState(); // a restart must not forget it
+  }
   cell.submit(text);
 }
 
@@ -301,14 +308,14 @@ const MCP_TOOLS = {
         fail(String(err));
       }
     }
-    const opts = { cwd: folder, backend: agent, spawnedBy: caller.hqId, depth, collapsed: a.collapsed === true };
+    const opts = { cwd: folder, backend: agent, spawnedBy: caller.hqId, lineage: [...(caller.lineage || []), caller.hqId], depth, collapsed: a.collapsed === true };
     if (typeof a.model === 'string' && a.model.trim()) opts.model = a.model.trim();
     if (a.effort) opts.effort = a.effort;
     opts.permissionMode = mode;
     if (typeof a.name === 'string' && a.name.trim()) opts.customTitle = a.name.trim().slice(0, 80);
     const cell = addNewCell(opts, { background: true });
     const from = caller.external ? 'an agent outside HQ' : `session "${mcpName(caller)}" (${caller.hqId})`;
-    mcpSend(cell, `${MCP_PREFIX} you were started by ${from}, which reads your final reply. You are session ${cell.hqId}; HQ's tools (mcp__hq__*) let you coordinate with other sessions.)\n\n${prompt}`);
+    mcpSend(cell, `${MCP_PREFIX} you were started by ${from}, which reads your final reply. You are session ${cell.hqId}; HQ's tools (mcp__hq__*) let you coordinate with other sessions.)\n\n${prompt}`, caller);
     return { session: cell.hqId, agent, folder, permissionMode: mode, note: 'Started. Call wait_for_sessions, then read_session, to get its result.' };
   },
 
@@ -316,6 +323,7 @@ const MCP_TOOLS = {
     const cell = mcpTarget(a.session, caller);
     if (cell.missing) fail(`Session ${cell.hqId}'s folder is missing, so it cannot run.`);
     const text = mcpString(a.message, 'message');
+    deputyRefuseMessage(caller, cell);
     // Sessions inside HQ message each other freely, by the user's choice, even though the target may
     // run freer than the caller. An agent outside HQ still needs a yes for a session it did not start.
     if (caller.external && !mcpOwns(caller, cell)) {
@@ -326,7 +334,7 @@ const MCP_TOOLS = {
     }
     const from = caller.external ? 'an agent outside HQ' : `session "${mcpName(caller)}" (${caller.hqId})`;
     const state = mcpState(cell);
-    mcpSend(cell, `${MCP_PREFIX} message from ${from}, which can read your reply.)\n\n${text}`);
+    mcpSend(cell, `${MCP_PREFIX} message from ${from}, which can read your reply.)\n\n${text}`, caller);
     return `Sent to ${cell.hqId} (${state}${state === 'working' ? '; it reads the message at its next step' : ''}). Use wait_for_sessions, then read_session, for its answer.`;
   },
 
@@ -433,9 +441,11 @@ const MCP_TOOLS = {
     } else {
       fail('Give delay_minutes, at, or after_usage_reset.');
     }
+    deputyRefuseMessage(caller, target);
     if (mcp.schedule.length >= MCP_SCHEDULE_MAX) fail(`${MCP_SCHEDULE_MAX} messages are already scheduled. Cancel some first.`);
     const id = 'm' + Math.random().toString(36).slice(2, 7);
-    mcp.schedule.push({ id, to: target.hqId, from: caller.hqId, text, at });
+    // `via`: whose words these are, kept now in case the sender has closed when it is sent (deputy.js).
+    mcp.schedule.push({ id, to: target.hqId, from: caller.hqId, via: deputyIds([...(caller.lineage || []), ...(caller.drivenBy || [])]), text, at });
     saveState();
     return { id, session: target.hqId, sendsAt: isoTime(at) };
   },
@@ -617,8 +627,9 @@ function mcpTick() {
   for (const s of due) {
     const cell = mcpCell(s.to);
     if (!cell || cell.missing) continue;
+    if (s.from !== s.to && cell === deputyCell()) continue; // it became the deputy since: dropped (deputy.js)
     const from = s.from === s.to ? 'you scheduled earlier' : s.from === MCP_EXTERNAL ? 'an agent outside HQ scheduled' : `session ${s.from} scheduled`;
-    mcpSend(cell, `${MCP_PREFIX} a message ${from}.)\n\n${s.text}`);
+    mcpSend(cell, `${MCP_PREFIX} a message ${from}.)\n\n${s.text}`, s.from === s.to ? null : { hqId: s.from, drivenBy: s.via || [] });
   }
   saveState();
 }
@@ -639,7 +650,7 @@ function mcpRestore(saved) {
   mcp.schedule = (Array.isArray(s.schedule) ? s.schedule : [])
     .filter(x => x && typeof x.id === 'string' && typeof x.to === 'string' && typeof x.text === 'string' && Number.isFinite(x.at))
     .slice(0, MCP_SCHEDULE_MAX)
-    .map(x => ({ id: x.id, to: x.to, from: String(x.from || ''), text: x.text, at: x.at }));
+    .map(x => ({ id: x.id, to: x.to, from: String(x.from || ''), via: deputyIds(x.via), text: x.text, at: x.at }));
   if (!mcp.timer) mcp.timer = setInterval(mcpTick, MCP_SCHEDULE_TICK_MS);
 }
 

@@ -203,6 +203,7 @@ const AFK_ACTIONS = { question: 'Answering for you', plan: 'Holding the plan', p
 /** A prompt arrived (onControlRequest): answered after the grace period if the user has not. The card counts it down. */
 function afkWatch(cell, requestId, card) {
   if (reviewDue(cell, requestId, card)) return reviewWatch(cell, requestId, card); // one countdown, not two
+  if (deputyCovers(cell, requestId, card)) return deputyWatch(cell, requestId, card); // deputy.js: before AFK's deferral
   if (!cell.afkOn) return;
   const count = promptCountdown(card, Date.now() + AFK_GRACE_MS, `AFK: ${AFK_ACTIONS[card.dataset.kind] || 'Deferring'} in `, 'You are AFK. Answer it yourself before then to keep it.');
   card.afkCount = count.el;
@@ -247,6 +248,7 @@ async function afkHandle(cell, requestId, card) {
     if (card.onAfk) card.onAfk();
     return;
   }
+  if (deputyCovers(cell, requestId, card)) return deputyWatch(cell, requestId, card); // deferred only if the deputy leaves it
   // Claude reads the reason given below; Codex and Hermes only the note, which must reach them first.
   if (cell.backend !== 'claude') {
     if (!cell.afkNoted) afkSendNote(cell);
@@ -339,7 +341,9 @@ function reviewDue(cell, requestId, card) {
 function reviewWatch(cell, requestId, card) {
   // A replayed card waits for armPrompt, once the replay has drawn the rest of the session.
   if (card.reviewState || card.replayed) return;
+  if (card.deputy && card.deputy.id) return; // already with the deputy (deputy.js): one answerer at a time
   afkUnwatch(card);
+  deputyUnwatch(card); // still counting down to the deputy: the reviewer goes first
   card.reviewState = 'waiting';
   // Settings > Review approvals in every session skips the minute's wait.
   const due = (card.armedAt || Date.now()) + (reviewAll() ? 0 : AFK_GRACE_MS);
@@ -370,7 +374,7 @@ function reviewSync(cell) {
   for (const [requestId, card] of [...cell.pending]) {
     if (!reviewable(cell, requestId, card)) continue;
     if (reviewDue(cell, requestId, card)) reviewWatch(cell, requestId, card);
-    else if (!reviewOn(cell) && reviewUnwatch(card) && cell.afkOn) afkWatch(cell, requestId, card);
+    else if (!reviewOn(cell) && reviewUnwatch(card) && (cell.afkOn || deputyCovers(cell, requestId, card))) afkWatch(cell, requestId, card);
   }
 }
 
@@ -384,7 +388,7 @@ function setCellReview(cell, on) {
 function reviewDrop(cell, requestId, card) {
   reviewUnwatch(card);
   // Not while review is still on: afkWatch would hand it straight back, in a loop.
-  if (!reviewOn(cell) && cell.afkOn && cell.pending.get(requestId) === card && !cell.closing) afkWatch(cell, requestId, card);
+  if (!reviewOn(cell) && (cell.afkOn || deputyCovers(cell, requestId, card)) && cell.pending.get(requestId) === card && !cell.closing) afkWatch(cell, requestId, card);
 }
 
 async function reviewRun(cell, requestId, card) {
@@ -428,7 +432,8 @@ async function reviewRun(cell, requestId, card) {
   }
   cell.notice(`Reviewer left ${what} for you (${verdict ? verdict.reason : 'no answer'})`);
   invoke('request_attention').catch(() => {});
-  if (cell.afkOn) afkHandle(cell, requestId, card);
+  if (deputyCovers(cell, requestId, card)) deputyWatch(cell, requestId, card);
+  else if (cell.afkOn) afkHandle(cell, requestId, card);
 }
 
 // ---------- turns ----------
@@ -475,6 +480,7 @@ function afkUserSent(cell) {
 const AFK_KINDS = {
   permission: ['Deferred', 'circle-slash'],
   approved: ['Approved by the reviewer', 'pass'],
+  deputy: ['Answered by your deputy', 'person'],
   question: ['Answered for you', 'question'],
   plan: ['Plan held', 'checklist'],
   nudge: ['Asked to carry on', 'debug-continue'],
