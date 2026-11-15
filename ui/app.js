@@ -6903,6 +6903,7 @@ function flushState() {
     afk: app.afk || undefined,
     deputy: app.deputy || undefined,
     deputyRules: app.deputyRules && (app.deputyRules.all || app.deputyRules.projects.length) ? app.deputyRules : undefined,
+    deputyLog: app.deputyLog && app.deputyLog.length ? app.deputyLog : undefined,
     mcp: mcpSaved(),
     settings: app.settings,
     sidebarOpen: app.sidebarOpen,
@@ -7069,6 +7070,7 @@ async function restore() {
   app.afk = sanitizeAfk(state && state.afk);
   app.deputy = state && typeof state.deputy === 'string' ? state.deputy : null;
   app.deputyRules = sanitizeDeputyRules(state && state.deputyRules);
+  app.deputyLog = sanitizeDeputyLog(state && state.deputyLog);
   app.apiKeyHint = await invoke('api_key_hint').catch(() => null);
   app.settings = sanitizeSettings(state && state.settings);
   applySettings();

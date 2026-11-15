@@ -544,3 +544,40 @@ test('stray spaces in a project name still match; Codex permission grants stay w
   assert.equal(t.sent.length, 1);
   assert.doesNotMatch(t.sent[0].text, /approved this already/);
 });
+
+test('every decision is logged with the session it was for, and told in the deputy\'s own cell', async () => {
+  const { t, boss, cell, call, promptId } = setup();
+  t.arm(cell, 'r1', t.card(cell));
+  await t.tick(GRACE);
+  assert.match(boss.notices.at(-1), /From "swrkx"/);
+  await call(boss, 'answer_prompt', { prompt: promptId(), decision: 'allow', reason: 'tests' });
+  t.arm(cell, 'r3', t.card(cell, 'r3'));
+  await t.tick(GRACE);
+  await call(boss, 'answer_prompt', { prompt: promptId(), decision: 'deny', reason: 'not now' });
+  t.arm(cell, 'r4', t.card(cell, 'r4', 'permission', { tool_name: 'Bash', input: { command: 'git push' } }));
+  await t.tick(GRACE);
+  await t.tick(3 * 60_000);
+  assert.match(boss.notices.at(-1), /^Gave back for "swrkx": Bash: git push/);
+  // Last: once the deputy answers a question there, that session's prompts stay with the user.
+  t.arm(cell, 'r2', t.card(cell, 'r2', 'question', { tool_name: 'AskUserQuestion', input: { questions: [{ question: 'Which db?' }] } }));
+  await t.tick(GRACE);
+  await call(boss, 'answer_prompt', { prompt: promptId(), decision: 'allow', answers: { 1: 'Postgres' } });
+  const log = t.app.deputyLog;
+  assert.deepEqual([...log.map(e => e.decision)], ['approved', 'declined', 'left', 'answered']);
+  assert.ok(log.every(e => e.session === 'swrkx' && e.name === 'swrkx'));
+  assert.match(log[0].what, /cargo test/);
+  assert.equal(log[0].reason, 'tests');
+  assert.deepEqual(JSON.parse(JSON.stringify(log[3].answers)), [{ q: 'Which db?', a: 'Postgres' }]);
+  assert.match(log[2].what, /git push/);
+  assert.match(log[2].reason, /did not answer/);
+  assert.equal(t.run('deputyLogText')('curl -H "Authorization: Bearer abc123" https://x?token=s3cr3t'), 'curl -H "Authorization: [hidden]" https://x?token=[hidden]');
+  assert.equal(t.run('deputyLabel')({ hqId: 'a\n"b"' }), "a 'b'");
+  const mask = t.run('deputyLogText');
+  assert.equal(mask('DB_PASSWORD=hunter2 STRIPE_API_KEY=sk_live_abc12 npm start'), 'DB_PASSWORD=[hidden] STRIPE_API_KEY=[hidden] npm start');
+  assert.equal(mask('export GITHUB_TOKEN=ghp_short; mysql -phunter2 -u root'), 'export GITHUB_TOKEN=[hidden]; mysql -p[hidden] -u root');
+  assert.equal(mask('{"password":"x1"}'), '{"password":"[hidden]"}');
+  assert.ok(!mask('x'.repeat(120) + ' ghp_' + 'A1'.repeat(19)).includes('A1A1'));
+  // What is saved comes back the same, and junk is dropped.
+  const saved = t.run('sanitizeDeputyLog')(JSON.parse(JSON.stringify([...log, { at: 'x' }, { at: 1, decision: 'nope' }])));
+  assert.deepEqual(JSON.parse(JSON.stringify(saved)), JSON.parse(JSON.stringify(log)));
+});
