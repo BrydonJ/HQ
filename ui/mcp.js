@@ -223,9 +223,13 @@ function mcpBubble(text, ms) {
   const m = /^\(HQ: ([\s\S]*?)\)\n\n([\s\S]*)$/.exec(text);
   const head = m ? m[1] : '';
   const who = /session "[^"\n]*" \([^)\n]*\)|session \S+(?= scheduled)|an agent outside HQ|you scheduled earlier/.exec(head);
+  // The deputy's prompts name a session by id only (its title is untrusted, so it stays in the fence): show its name.
+  const forSession = /^deputy for session (s[0-9a-z]{4})$/.exec(head);
+  const named = forSession && app.cells.find(c => c.hqId === forSession[1]);
+  const tag = forSession ? `HQ deputy · for "${named ? deputyLabel(named) : forSession[1]}"` : head.startsWith('deputy') ? 'HQ deputy' : who ? `Via HQ · ${who[0]}` : 'Via HQ';
   const bubble = userBubble(m ? m[2] : text, [], ms);
   bubble.classList.add('hq-msg');
-  bubble.querySelector('.bubble').prepend(h('span', { class: 'remote-tag', text: who ? `Via HQ · ${who[0]}` : 'Via HQ', title: head }));
+  bubble.querySelector('.bubble').prepend(h('span', { class: 'remote-tag', text: tag, title: head }));
   return bubble;
 }
 
