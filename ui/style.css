@@ -287,6 +287,7 @@ body:not(.fade-buttons):not(.hover-buttons) .cell.wm-on .cell-head:hover > .icon
 @media (prefers-reduced-motion: reduce) { .group-ring, .group-ring.smooth { transition: none; } }
 .group-swatch { display: grid; place-items: center; width: 16px; flex: none; color: var(--group, var(--fg-muted)); }
 .act-afk.on { color: var(--waiting); }
+.deputy-badge { margin-left: 6px; padding: 0 5px; border: 1px solid var(--waiting); border-radius: 3px; color: var(--waiting); font-size: 10px; line-height: 14px; text-transform: uppercase; letter-spacing: .04em; flex: none; }
 .act-afk.never { color: var(--fg-faint); text-decoration: line-through; }
 /* The task list at a glance ("3/7") on the progress button, in place of its icon while a list is under way. */
 .act-progress .btn-count { display: none; }
@@ -1112,6 +1113,12 @@ body:not(.fade-buttons):not(.hover-buttons) .cell.wm-on .cell-head:hover > .icon
 .setting-buttons { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; max-width: 50%; }
 .setting-error { flex-basis: 100%; text-align: right; color: var(--error); font-size: 11px; }
 .setting:hover { background: var(--hover); }
+.deputy-block { flex-direction: column; align-items: stretch; }
+.deputy-project-head { display: flex; gap: 6px; align-items: center; }
+.deputy-project-head input[type=text] { flex: 1; width: auto; }
+.deputy-sub { padding: 10px 8px 2px; }
+textarea.deputy-rules { width: 100%; box-sizing: border-box; resize: vertical; padding: 4px 6px; font: inherit; color: var(--fg); background: var(--input-bg); border: 1px solid var(--border-strong); border-radius: 3px; outline: none; }
+textarea.deputy-rules:focus { border-color: var(--accent); }
 .setting-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .setting-main .name { color: var(--fg-strong); }
 .setting-main .desc { color: var(--fg-faint); font-size: 11px; overflow-wrap: anywhere; }
