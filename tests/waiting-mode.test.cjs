@@ -8,11 +8,11 @@ const start = source.indexOf('  setWaitingMode(on) {');
 const methods = source.slice(start, source.indexOf('  setWmView(view) {', start));
 
 function harness() {
-  let pending = null;
+  let pending = null, delay = 0;
   const schedule = [];
   const context = vm.createContext({
-    WAIT_SETTLE_MS: 4000, mcp: { schedule },
-    setTimeout: fn => { pending = fn; return 1; },
+    WAIT_SETTLE_MS: 4000, WAIT_OPEN_TASKS_MS: 300000, mcp: { schedule },
+    setTimeout: (fn, ms) => { pending = fn; delay = ms; return 1; },
     clearTimeout: () => { pending = null; },
   });
   vm.runInContext(`class WaitCell { ${methods} }`, context);
@@ -20,7 +20,8 @@ function harness() {
   const classes = new Set();
   Object.assign(cell, {
     hqId: 'me', closing: false, wmArmed: false, wmWorked: false, wmTimer: 0, wmDone: false, wmView: false, wmNews: false, lastTurnOk: false,
-    status: 'idle', pending: new Map(), bgTasks: [], limitHit: false, limitResume: null,
+    status: 'idle', pending: new Map(), bgTasks: [], tasks: [],
+    hasOpenTasks() { return this.tasks.some(t => t.status !== 'completed' && t.status !== 'deleted'); }, limitHit: false, limitResume: null,
     waitBtn: { classList: { toggle() {} } },
     el: { classList: { toggle: (name, on) => { if (on) classes.add(name); else classes.delete(name); } } },
     syncWaitingBusy() {}, renderProgress() {},
@@ -28,7 +29,7 @@ function harness() {
   });
   const fire = () => { const fn = pending; pending = null; assert.ok(fn, 'a settle timeout is running'); fn(); };
   const set = changes => { Object.assign(cell, changes); cell.syncWaiting(); };
-  return { cell, classes, schedule, fire, set, timing: () => pending != null };
+  return { cell, classes, schedule, fire, set, timing: () => pending != null, delay: () => delay };
 }
 
 /** Armed during a turn that then ended cleanly, so the settle timeout is running. */
@@ -141,4 +142,20 @@ test('arming an idle cell waits for work and never says done first', () => {
   set({ lastTurnOk: true });
   assert.equal(cell.wmView, false);
   assert.equal(cell.wmDone, false);
+});
+
+test('idle with a task still open waits the longer bound before done', () => {
+  const { cell, set, fire, delay } = harness();
+  set({ status: 'running', tasks: [{ status: 'pending' }] });
+  cell.setWaitingMode(true);
+  set({ status: 'idle', lastTurnOk: true });
+  assert.equal(delay(), 300000);
+  assert.equal(cell.wmDone, false);
+  fire();
+  assert.equal(cell.wmDone, true, 'a forgotten task cannot keep it busy forever');
+});
+
+test('idle with no open task waits the short settle', () => {
+  const { delay } = finished();
+  assert.equal(delay(), 4000);
 });
