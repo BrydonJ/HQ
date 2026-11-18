@@ -293,7 +293,7 @@ class Cell {
   constructor({ cwd, sessionId = null, permissionMode = 'default', model = null, effort = null, title = '', aiTitle = false,
     customTitle = null, renamePending = false, detail, clean, progress = false, fork = false, collapsed = false,
     missing = false, remote = null, bridgeSessionId = null, draft = '', backend = 'claude', resumeAfterUpdate = false, resumeQueued = null, api = false, apiKey = false, afk = null, afkLog = null, review = false, reviewOff = false, launched = false, modeOwn = false, remoteOwn = false, busySend = null,
-    hqId = null, spawnedBy = null, lineage = null, drivenBy = null, deputyLeftIds = null, colorCwd = null, depth = 0, hosted = null, spot = false, group = null, flexW = 1, flexH = 1 }) {
+    hqId = null, spawnedBy = null, lineage = null, drivenBy = null, deputyLeftIds = null, colorCwd = null, depth = 0, hosted = null, spot = false, orch = false, group = null, flexW = 1, flexH = 1 }) {
     this.cwd = cwd;
     // A session a session host kept running while HQ restarted: { id, startedMs }. reattach() connects to it.
     this.hosted = hosted;
@@ -354,6 +354,7 @@ class Cell {
     this.sideTaskLine = '';        // the same without the live tool name, for the sidebar (which a change rebuilds)
     this.collapsed = !!collapsed;  // only the header shows, in the dock under the grid
     this.spot = !!spot;            // in the spotlight: the main pane, with the other sessions in a strip beside it (layout.js)
+    this.orch = !!orch;            // pinned as an orchestrator: a full-height column of its own (layout.js)
     this.group = typeof group === 'string' && /^g[0-9a-z]{1,8}$/.test(group) ? group : null; // cells in a group sit together
     this.flexW = sanitizeWeight(flexW); // its share of a row's width, dragged with a splitter
     this.flexH = sanitizeWeight(flexH); // its share of the spotlight strip's height
@@ -466,6 +467,18 @@ class Cell {
     this.waitEl = el.querySelector('.waiting-view');
     this.waitBody = el.querySelector('.wv-body');
     this.loader = null;            // the waiting view's current loader, a fresh one each time the view opens
+    this.composerEl = el.querySelector('.composer');
+    // The tray: the docked sessions this one started, listed above the composer (in the waiting view
+    // while that shows) instead of the dock. Each is its bare header, and a question or permission it
+    // asks opens under it, to answer without opening the session (layout.js fills it).
+    this.trayText = h('span', { class: 'tray-text' });
+    this.trayWaiting = h('span', { class: 'tray-waiting' });
+    this.trayToggle = h('button', { class: 'link-btn tray-toggle', type: 'button' });
+    this.trayList = h('div', { class: 'tray-list' });
+    this.trayEl = h('div', { class: 'kids-tray hidden', role: 'region', 'aria-label': 'Sessions it started' },
+      h('div', { class: 'tray-head' }, icon('type-hierarchy-sub'), this.trayText, this.trayWaiting, h('span', { class: 'spacer' }), this.trayToggle),
+      this.trayList);
+    this.composerEl.before(this.trayEl);
     this.stateEl = el.querySelector('.cell-state');
     this.codeBtn = el.querySelector('.act-code');
     this.collapseBtn = el.querySelector('.act-collapse');
@@ -476,6 +489,7 @@ class Cell {
     this.missingBar = el.querySelector('.missing-bar');
     this.afkBtn = el.querySelector('.act-afk');
     this.spotBtn = el.querySelector('.act-spot');
+    this.orchBtn = el.querySelector('.act-orch');
     this.groupBtn = el.querySelector('.act-group');
 
     el.style.setProperty('--proj', this.color);
@@ -493,6 +507,7 @@ class Cell {
     this.applyWaitingMode();
     this.applyCollapsed();
     this.applySpot();
+    this.applyOrch();
     this.applyGroup();
     this.applyMissing();
     this.stateEl.textContent = stateOf(this)[1];
@@ -520,7 +535,15 @@ class Cell {
       autoGrow(this.input);
     }
 
-    el.addEventListener('mousedown', () => focusCell(this, false));
+    // A press in the tray belongs to the session its row stands for (trayRow), which takes the focus:
+    // keys then never reach the starter, and none act on a docked session.
+    el.addEventListener('mousedown', e => { if (!e.target.closest('.kids-tray')) focusCell(this, false); });
+    this.trayToggle.addEventListener('click', e => {
+      e.stopPropagation();
+      const kids = this.childCells();
+      const dock = kids.some(c => !c.collapsed); // some are open: dock them all; else open them all
+      for (const c of kids) if (c.collapsed !== dock) collapseCell(c, dock);
+    });
     const head = el.querySelector('.cell-head');
     // A collapsed cell opens on a click anywhere in its header except its buttons.
     head.addEventListener('click', e => {
@@ -548,6 +571,7 @@ class Cell {
     moreBtn.addEventListener('click', e => { e.stopPropagation(); openMenu(moreBtn, this, menuEl => buildMoreMenu(menuEl, this)); });
     el.querySelector('.act-max').addEventListener('click', () => toggleMaximize(this));
     this.spotBtn.addEventListener('click', () => toggleSpot(this));
+    this.orchBtn.addEventListener('click', () => toggleOrch(this));
     this.groupBtn.addEventListener('click', e => { e.stopPropagation(); openMenu(this.groupBtn, this, menuEl => buildGroupMenu(menuEl, this)); });
     wireCellDrag(this);
     el.querySelector('.act-close').addEventListener('click', e => this.requestClose(e.currentTarget));
@@ -727,6 +751,58 @@ class Cell {
     this.kidsEl.querySelector('.n').textContent = kids.length ? String(kids.length) : '';
     this.kidsEl.classList.toggle('attention', kids.some(c => c.pending.size > 0));
     this.kidsEl.title = `Started ${kids.length} session${kids.length === 1 ? '' : 's'}. Click to list them.`;
+    // A steady amber edge while one of them waits on the user: they sit in the tray, out of sight of the grid.
+    const waiting = kids.filter(c => c.pending.size > 0).length;
+    this.el.classList.toggle('kid-waiting', waiting > 0);
+    this.trayText.textContent = `Started ${kids.length} session${kids.length === 1 ? '' : 's'}`;
+    this.trayWaiting.textContent = waiting ? `· ${waiting} waiting on you` : '';
+    this.trayToggle.textContent = kids.some(c => !c.collapsed) ? 'Dock all' : 'Open all';
+    this.trayToggle.title = kids.some(c => !c.collapsed) ? 'Dock every session it started into this tray' : 'Open every session it started in the grid';
+    this.trayEl.classList.toggle('attention', waiting > 0);
+    this.trayEl.classList.toggle('hidden', !this.trayList.children.length);
+    for (const c of kids) c.renderTrayRow();
+    renderOrchHead(this, kids, waiting);
+  }
+
+  /** The row standing for this session in its starter's tray: its state, and its prompts while it is there. */
+  trayRow() {
+    if (!this.trayRowEl) {
+      this.trayDot = h('span', { class: 'tray-dot' });
+      this.trayName = h('span', { class: 'tray-name' });
+      this.trayState = h('span', { class: 'tray-state' });
+      this.trayRowEl = h('div', { class: 'tray-row' },
+        h('button', { class: 'tray-row-head', type: 'button', onclick: () => revealCell(this) }, this.trayDot, this.trayName, this.trayState));
+      this.trayRowEl.addEventListener('mousedown', () => focusCell(this, false));
+    }
+    this.renderTrayRow();
+    return this.trayRowEl;
+  }
+
+  renderTrayRow() {
+    if (!this.trayRowEl) return;
+    const [cls, label] = stateOf(this);
+    this.trayRowEl.className = `tray-row${cls ? ` ${cls}` : ''}`;
+    this.trayName.textContent = this.displayTitle() || 'New session';
+    this.trayState.textContent = label;
+    this.trayRowEl.firstChild.title = `Open "${this.trayName.textContent}" (${this.agent})`;
+  }
+
+  /** A session in its starter's tray asks its questions there; back in the grid or the dock, in its own cell. */
+  placePrompts(inTray) {
+    if (inTray) {
+      if (this.prompts.parentElement !== this.trayRowEl) this.trayRow().append(this.prompts);
+    } else if (this.prompts.parentElement !== this.el) {
+      this.promptsBar.after(this.prompts);
+    }
+  }
+
+  /** The tray sits above the composer, or at the foot of the waiting view while that shows. */
+  placeTray() {
+    if (this.wmView) {
+      if (this.trayEl.parentElement !== this.waitEl) this.waitEl.append(this.trayEl);
+    } else if (this.trayEl.nextElementSibling !== this.composerEl) {
+      this.composerEl.before(this.trayEl);
+    }
   }
 
   startRename() {
@@ -882,6 +958,14 @@ class Cell {
     this.spotBtn.classList.toggle('on', this.spot);
     this.spotBtn.querySelector('.codicon').className = `codicon codicon-${this.spot ? 'star-full' : 'star-empty'}`;
     this.spotBtn.title = this.spot ? 'Leave the spotlight' : 'Spotlight: give this session the main pane';
+  }
+
+  /** The pin button: lit while the session has an orchestrator column of its own. */
+  applyOrch() {
+    this.el.classList.toggle('orch', this.orch);
+    this.orchBtn.classList.toggle('on', this.orch);
+    this.orchBtn.querySelector('.codicon').className = `codicon codicon-${this.orch ? 'pinned' : 'pin'}`;
+    this.orchBtn.title = this.orch ? 'Unpin: back among the other sessions' : 'Pin as an orchestrator: a full-height column of its own, with the sessions it starts in its tray';
   }
 
   /** A group's cells are ringed in the group's colour (style.css, .cell.grouped). */
@@ -1381,6 +1465,7 @@ class Cell {
       this.el.classList.toggle('unread', this.unread && this.pending.size === 0);
     }
     this.el.classList.toggle('wm-on', view);
+    this.placeTray();
     if (!view && !this.collapsed) {
       if (this.live) this.scheduleLiveRender(); // text that streamed in while hidden was not drawn
       this.stickToBottom = this.wmStick;
@@ -1859,6 +1944,8 @@ class Cell {
     this.stateEl.textContent = stateOf(this)[1]; // shown while collapsed, where the chat cannot say it
     const parent = this.parentCell();
     if (parent) parent.renderLineage(); // its count lights up while this one waits on the user
+    // Answered from its starter's tray: the focus goes back to the starter, whose chat is on screen.
+    if (parent && app.focused === this && this.collapsed && !waiting && this.trayRowEl && this.trayRowEl.isConnected) focusCell(parent, false);
     this.syncWaiting();
     this.syncWaitingBusy();
     this.renderProgress();
@@ -4529,7 +4616,7 @@ function addCell(opts, { restore = false, batch = false, background = false } = 
   // A session another session started wears its starter's project colour (see Cell.colorCwd).
   const parent = !restore && opts.spawnedBy ? app.cells.find(c => c.hqId === opts.spawnedBy) : null;
   if (parent) opts = { ...opts, colorCwd: parent.colorCwd || parent.cwd };
-  // Settings > Started sessions: smaller than their starter, or tucked in the dock, as they rarely need the user.
+  // Settings > Started sessions: smaller than their starter, or tucked in its tray, as they rarely need the user.
   if (!restore && opts.spawnedBy && app.settings.childCells === 'dock') opts = { ...opts, collapsed: true };
   if (!restore && opts.spawnedBy && app.settings.childCells === 'small') opts = { ...opts, flexW: 0.5, flexH: 0.5 };
   const cell = new Cell(opts);
@@ -5987,10 +6074,10 @@ const CUSTOM_COLORS = [['--accent', 'Accent'], ['--link', 'Links'], ['--claude',
   ['--hl-keyword', 'Code: keywords'], ['--hl-string', 'Code: strings'], ['--hl-function', 'Code: functions'], ['--hl-comment', 'Code: comments']];
 // The cell header's buttons that can be hidden: [class, label].
 const HEAD_BUTTONS = [['act-afk', 'AFK'], ['act-handoff', 'Handoff'], ['act-detail', 'Detail level'], ['act-progress', 'Progress'], ['act-waiting', 'Waiting mode'], ['act-code', 'VS Code'],
-  ['act-terminal', 'Terminal'], ['act-reveal', FILE_MANAGER], ['act-group', 'Group'], ['act-spot', 'Spotlight'], ['act-collapse', 'Collapse'], ['act-max', 'Maximize'], ['act-close', 'Close']];
-const DEFAULT_PINNED = ['act-waiting', 'act-progress', 'act-spot', 'act-collapse', 'act-close'];
+  ['act-terminal', 'Terminal'], ['act-reveal', FILE_MANAGER], ['act-group', 'Group'], ['act-spot', 'Spotlight'], ['act-orch', 'Orchestrator column'], ['act-collapse', 'Collapse'], ['act-max', 'Maximize'], ['act-close', 'Close']];
+const DEFAULT_PINNED = ['act-waiting', 'act-progress', 'act-spot', 'act-orch', 'act-collapse', 'act-close'];
 /** Buttons a collapsed cell hides (style.css, .cell.collapsed); its "…" menu leaves them out too. */
-const COLLAPSED_HIDES = ['act-detail', 'act-handoff', 'act-progress', 'act-waiting', 'act-code', 'act-reveal', 'act-spot', 'act-max'];
+const COLLAPSED_HIDES = ['act-detail', 'act-handoff', 'act-progress', 'act-waiting', 'act-code', 'act-reveal', 'act-spot', 'act-orch', 'act-max'];
 /** The header's window buttons: "…" sits just before the first of them. */
 const WINDOW_BUTTONS = ['act-collapse', 'act-max', 'act-close'];
 const HEX = /^#[0-9a-f]{6}$/i;
@@ -6036,9 +6123,10 @@ function sanitizeSettings(x) {
     mcpSpawn: v.mcpSpawn !== false, // agents may start sessions
     mcpExternal: v.mcpExternal === true, // installed machine-wide: agents outside HQ may call the tools too
     // The most sessions started by agents that are open at once.
-    // How sessions an agent starts open: 'full' like any other, 'small' (half the width, smaller text) or 'dock' (collapsed).
+    // How sessions an agent starts open: 'full' like any other, 'small' (half the width, smaller text) or 'dock' (collapsed,
+    // into the starter's tray while the starter is open, else the dock).
     reviewAll: v.reviewAll === true, // the approval reviewer in every session, at once (afk.js reviewOn); set from the UI only
-    childCells: ['full', 'small', 'dock'].includes(v.childCells) ? v.childCells : 'small',
+    childCells: ['full', 'small', 'dock'].includes(v.childCells) ? v.childCells : 'dock',
     mcpMaxSpawned: Number.isInteger(v.mcpMaxSpawned) && v.mcpMaxSpawned >= 0 && v.mcpMaxSpawned <= MCP_MAX_SPAWNED_CAP ? v.mcpMaxSpawned : MCP_DEFAULT_MAX_SPAWNED,
   };
 }
@@ -6404,7 +6492,7 @@ function renderSettings() {
     row('Agents per session', 'The most subagents one Claude session runs at once, workflows included; more are refused until one finishes. For sessions started from now on. 0 is no limit.', maxAgents),
     row('HQ tools for sessions', 'Gives every session HQ\'s own MCP server (mcp__hq__*): it can list, start, message and wait for other sessions, share notes, claim files and schedule messages. Starting, messaging and stopping sessions still asks for permission like any other tool. For sessions started from now on.', toggle(app.settings.mcp, v => changeSetting('mcp', v))),
     app.settings.mcp ? row('Let agents start sessions', `A session can open new sessions (Claude, Codex or Hermes) as cells, up to ${MCP_MAX_DEPTH} levels deep. They never bypass permissions.`, toggle(app.settings.mcpSpawn, v => changeSetting('mcpSpawn', v))) : null,
-    app.settings.mcp && app.settings.mcpSpawn ? row('Sessions agents start', 'They join their starter\'s group and wear its project colour. Small and Docked keep them out of the way, as they rarely need you; a docked one still lights up when it asks you something.',
+    app.settings.mcp && app.settings.mcpSpawn ? row('Sessions agents start', 'They join their starter\'s group and wear its project colour. Small and Docked keep them out of the way, as they rarely need you. Docked ones sit in a tray in their starter, where a question or permission one asks opens for you to answer without opening it.',
       select(app.settings.childCells, [['full', 'Full size'], ['small', 'Small'], ['dock', 'Docked']], v => changeSetting('childCells', v))) : null,
     app.settings.mcp && app.settings.mcpSpawn ? row('Sessions agents can open', 'The most sessions started by agents that can be open at once. Closing one makes room.', mcpMax) : null,
     app.settings.mcp ? row('HQ tools everywhere', 'Adds HQ\'s tools to every Claude Code, Codex and Hermes on this computer, so agents started in a terminal or an editor can see and start HQ sessions too while HQ is open. Agents pick it up the next time they start.', mcpInstallControl()) : null,
@@ -6859,6 +6947,7 @@ function flushState() {
       fork: c.fork || undefined,
       collapsed: c.collapsed || undefined,
       spot: c.spot || undefined,
+      orch: c.orch || undefined,
       group: c.group || undefined,
       flexW: c.flexW !== 1 ? c.flexW : undefined,
       flexH: c.flexH !== 1 ? c.flexH : undefined,
@@ -7161,3 +7250,43 @@ async function openLaunch(r) {
 window.__TAURI__.event.listen('launch', openLaunches).catch(err => console.error('launch listener failed', err));
 
 restore();
+
+// ======================================================================================
+// Closing HQ: the window's close button asks first while sessions are working (main.rs, CloseGuard)
+// ======================================================================================
+
+let quitDialog = null;
+
+function closeHq() {
+  flushState().catch(() => {}).finally(() => invoke('close_window').catch(err => console.error('close failed', err)));
+}
+
+/** Names what closing would stop, and closes only on a yes. Esc or a click outside keeps HQ open. */
+function confirmClose(working) {
+  if (quitDialog) { quitDialog.querySelector('.quit-stay').focus(); return; }
+  const names = working.slice(0, 4).map(c => `${baseName(c.colorCwd || c.cwd) || c.cwd} · ${c.displayTitle() || 'New session'} (${stateOf(c)[1].toLowerCase()})`);
+  const more = working.length - names.length;
+  const close = () => { if (!quitDialog) return; quitDialog.remove(); quitDialog = null; };
+  const stay = h('button', { class: 'btn primary quit-stay', type: 'button', onclick: close }, 'Keep HQ open');
+  const quit = h('button', { class: 'btn danger', type: 'button', onclick: () => { close(); closeHq(); } }, 'Close HQ anyway');
+  quitDialog = h('div', { class: 'setup', role: 'alertdialog', 'aria-modal': 'true', 'aria-labelledby': 'quit-title' },
+    h('div', { class: 'setup-card' },
+      h('div', { class: 'setup-title', id: 'quit-title', text: `${working.length} session${working.length === 1 ? ' is' : 's are'} still working` }),
+      h('div', { class: 'setup-text', text: 'Closing HQ stops them, with any turn, question or background task in flight.' }),
+      h('ul', { class: 'quit-list' }, names.map(n => h('li', { text: n })), more > 0 ? h('li', { text: `and ${more} more` }) : null),
+      h('div', { class: 'setup-actions' }, stay, quit)));
+  quitDialog.addEventListener('mousedown', e => { if (e.target === quitDialog) close(); });
+  quitDialog.addEventListener('keydown', e => {
+    e.stopPropagation(); // Esc must not also stop a session
+    if (e.key === 'Escape') { e.preventDefault(); close(); }
+  });
+  document.body.append(quitDialog);
+  stay.focus();
+}
+
+window.__TAURI__.event.listen('close-requested', () => {
+  invoke('close_ack').catch(() => {});
+  const working = app.cells.filter(c => c.busy() || c.spawning);
+  if (working.length) confirmClose(working);
+  else closeHq();
+}).catch(err => console.error('close listener failed', err));

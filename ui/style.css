@@ -97,6 +97,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .spot-main { display: flex; flex-direction: column; flex: 1 1 0; min-width: 0; min-height: 0; }
 .spot-strip { display: flex; flex-direction: column; flex: 1 1 0; min-width: 0; min-height: 0; }
 #grid.maximized > :not(.has-max), #grid.maximized .row:not(.has-max), #grid.maximized .cell:not(.max), #grid.maximized .split { display: none; }
+#grid.maximized .orch-col:not(.has-max) { display: none; }
 /* Alone on the board, the maximized cell and the boxes around it take all of it, whatever their weights. */
 #grid.maximized .has-max, #grid.maximized .cell.max { flex-grow: 1 !important; }
 
@@ -311,13 +312,80 @@ body:not(.fade-buttons):not(.hover-buttons) .cell.wm-on .cell-head:hover > .icon
 .act-code { position: relative; }
 .act-code.linked::after { content: ""; position: absolute; right: 2px; bottom: 2px; width: 5px; height: 5px; border-radius: 50%; background: var(--link); }
 
+/* ---------- orchestrator columns (layout.js): a full-height column per pinned session ---------- */
+#grid.columns { flex-direction: row; }
+#grid.columns .spot-main { flex-direction: row; }
+.orch-col { display: flex; flex-direction: column; flex: 1 1 0; min-width: 0; min-height: 0; }
+.orch-head {
+  flex: none; display: flex; align-items: center; gap: 8px; height: 24px; padding: 0 2px 4px 4px;
+  font-size: 11px; color: var(--fg-muted); white-space: nowrap;
+}
+.orch-tag {
+  flex: none; padding: 0 5px; border-radius: 3px; font-size: 10px; line-height: 15px; font-weight: 600; letter-spacing: 0.04em;
+  text-transform: uppercase; color: var(--on-accent); background: color-mix(in srgb, var(--proj, var(--accent)) 80%, var(--fg-strong));
+}
+.orch-count { flex: none; }
+.orch-head.attention .orch-count { color: var(--waiting); }
+.orch-bar { flex: 1; min-width: 30px; height: 4px; border-radius: 2px; background: var(--input-bg); overflow: hidden; }
+.orch-bar > span { display: block; height: 100%; border-radius: 2px; background: var(--proj, var(--link)); transition: width 0.4s ease; }
+.orch-head.attention .orch-bar > span { background: var(--waiting); }
+.orch-unpin { flex: none; width: 18px; height: 18px; opacity: 0.5; }
+.orch-unpin:hover, .orch-unpin:focus-visible { opacity: 1; }
+.orch-unpin .codicon { font-size: 12px; }
+.act-orch.on { color: var(--fg-strong); }
+
+/* ---------- the tray: docked sessions a session started, inside it instead of the dock (layout.js) ---------- */
+.kids-tray { flex: none; max-height: 45%; overflow-y: auto; padding: 0 6px 6px; border-top: 1px solid var(--border); background: var(--bg-alt); }
+.kids-tray.attention { border-top-color: color-mix(in srgb, var(--waiting) 60%, var(--border)); }
+.tray-head { display: flex; align-items: center; gap: 6px; padding: 3px 2px; font-size: 11px; color: var(--fg-muted); white-space: nowrap; }
+.tray-head .codicon { font-size: 12px; }
+.tray-waiting { color: var(--waiting); }
+.tray-toggle { font-size: 11px; color: var(--fg-muted); }
+.tray-list { display: flex; flex-direction: column; gap: 4px; }
+/* A row per session: its state, then any question or permission it asks, to answer without opening it. */
+.tray-row {
+  border-radius: 4px; background: color-mix(in srgb, var(--proj, var(--accent)) 7%, var(--bg));
+  box-shadow: inset 2px 0 0 var(--proj, var(--accent));
+}
+.tray-row.state-waiting { background: color-mix(in srgb, var(--waiting) 6%, var(--bg)); box-shadow: inset 2px 0 0 var(--waiting), inset 0 0 0 1px color-mix(in srgb, var(--waiting) 55%, transparent); }
+.tray-row-head {
+  display: flex; align-items: center; gap: 8px; width: 100%; height: 26px; padding: 0 10px 0 12px;
+  border: 0; background: transparent; font: inherit; font-size: 12px; text-align: left; cursor: pointer; white-space: nowrap;
+}
+.tray-row-head:hover .tray-name { color: var(--fg-strong); text-decoration: underline; }
+.tray-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--fg-faint); }
+.tray-row.state-running > .tray-row-head > .tray-dot { background: var(--link); animation: pulse 1s ease-in-out infinite; }
+.tray-row.state-waiting > .tray-row-head > .tray-dot { background: var(--waiting); animation: pulse 0.8s ease-in-out infinite; }
+.tray-row.state-bg > .tray-row-head > .tray-dot { background: transparent; box-shadow: inset 0 0 0 2px var(--link); }
+.tray-row.unread > .tray-row-head > .tray-dot { background: var(--done); }
+.tray-row.state-exited > .tray-row-head > .tray-dot { background: var(--error); }
+.tray-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--fg); }
+.tray-state { flex: none; margin-left: auto; font-size: 11px; color: var(--fg-muted); }
+.tray-row:is(.state-running, .state-bg) .tray-state { color: var(--link); }
+.tray-row.state-waiting .tray-state { color: var(--waiting); }
+.tray-row.unread .tray-state { color: var(--done); }
+.tray-row .prompts { max-height: none; }
+.tray-row .prompt { margin: 0 6px 6px; }
+.cell.collapsed .kids-tray { display: none; }
+/* Room under the tray for the busy line, which floats over the composer's top edge. */
+.cell.state-running > .kids-tray { margin-bottom: 18px; border-bottom: 1px solid var(--border); }
+/* In the waiting view the tray is one of its cards, under the tasks and agents. */
+.cell.wm-on .kids-tray {
+  width: min(460px, 100%); max-height: none; overflow: visible; margin-top: 12px; padding: 4px 8px 8px; user-select: none;
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent); border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-alt) 70%, transparent);
+}
+.cell.wm-on .kids-tray.attention { border-color: color-mix(in srgb, var(--waiting) 55%, transparent); }
+/* One of the sessions it started waits on the user: a steady amber edge, quieter than the cell's own pulsing glow. */
+.cell.kid-waiting:not(.state-waiting) { border-color: color-mix(in srgb, var(--waiting) 60%, var(--border)); }
+
 /* ---------- collapsed cells: bare headers in the dock under the grid ---------- */
 #dock { flex: none; display: flex; flex-wrap: wrap; gap: 6px; padding: 0 6px 6px; }
 #dock:empty { display: none; }
 #dock .cell { flex: 0 1 300px; min-width: 190px; }
 .cell.collapsed .stage, .cell.collapsed .prompts, .cell.collapsed .prompts-bar, .cell.collapsed .composer, .cell.collapsed .cell-path,
 .cell.collapsed .act-detail, .cell.collapsed .act-handoff, .cell.collapsed .act-progress, .cell.collapsed .act-waiting, .cell.collapsed .waiting-view, .cell.collapsed .act-code, .cell.collapsed .act-reveal,
-.cell.collapsed .act-spot, .cell.collapsed .act-max { display: none; }
+.cell.collapsed .act-spot, .cell.collapsed .act-orch, .cell.collapsed .act-max { display: none; }
 .cell.collapsed .cell-head { border-bottom: 0; cursor: pointer; }
 .cell:not(.collapsed) .cell-project { cursor: pointer; }
 .cell.collapsed .cell-title { flex: 1 1 0; cursor: pointer; }
@@ -693,7 +761,7 @@ body:not(.fade-buttons):not(.hover-buttons) .cell.wm-on .cell-head:hover > .icon
 }
 .prompts-bar:hover { color: var(--fg-strong); background: color-mix(in srgb, var(--waiting) 14%, transparent); }
 .prompts-bar .codicon { font-size: 12px; color: var(--waiting); }
-.cell.prompts-min .prompts { display: none; }
+.cell.prompts-min > .prompts { display: none; }
 .prompt {
   margin: 6px 10px; padding: 8px 10px; border-radius: 6px;
   border: 1px solid var(--waiting); background: color-mix(in srgb, var(--waiting) 6%, transparent);
@@ -1423,3 +1491,7 @@ input[type=color]::-webkit-color-swatch { border: 0; border-radius: 2px; }
 @keyframes afk-drain { from { transform: scaleX(1); } to { transform: scaleX(0); } }
 @media (prefers-reduced-motion: reduce) { .afk-count-bar { animation: none; } }
 
+
+/* ---------- closing HQ while sessions work (app.js, confirmClose) ---------- */
+.quit-list { margin: 10px 0 0; padding-left: 18px; color: var(--fg-muted); font-size: 12px; }
+.quit-list li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

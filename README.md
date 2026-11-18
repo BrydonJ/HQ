@@ -387,6 +387,18 @@ the repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the contents of the updater 
   - A reply that finishes while collapsed gets the green glow, even if the cell had focus.
   - Click the header to expand it. Ctrl+1…9, the sessions list and maximize expand it too.
   - Keys 1/2/3 and Esc never act on a collapsed cell, since its prompts are not on screen.
+  - A collapsed session that another open session started sits in that session's **tray**
+    instead of the dock (see [HQ tools](#hq-tools-mcp)).
+- **Orchestrator columns:** the pin button in the cell header pins a session as an orchestrator.
+  Each pinned session gets a full-height column, side by side, and the other sessions stack in a
+  strip on the right (drag the gaps to resize). Pinned columns take the place of the spotlight
+  while any is open.
+  - Above each column, a bar shows how many of the sessions it started are done, and turns amber
+    while one of them waits on you. The × there unpins it.
+  - Pinning is your choice and is kept across restarts: starting sessions never pins one.
+- **Closing HQ** while sessions are working (a turn, a question or permission, background
+  tasks) asks first, and lists them. Esc or **Keep HQ open** keeps it. If the page does not
+  answer, a second close a few seconds later goes through.
 - **Sessions list** (Ctrl+B, or the button at the top left) shows every session in one column:
   - Each row has its status, first prompt and latest reply.
   - Type to search by folder, path, prompt or reply. Press Enter to jump to the first match.
@@ -613,8 +625,13 @@ the board: start a Codex session for one part of a job, wait for it, read its an
 - **Started sessions:** a session an agent started joins its starter's group and wears the
   starter's project colour and name, even in a worktree. Its header links back to the starter
   ("↳ name"); the starter's header counts what it started, pulses while one waits on you, and
-  lists them (with **Dock them all**). **Sessions agents start** in Settings opens them full size,
-  small (half width, smaller text; the default) or docked.
+  lists them (with **Dock them all**). **Sessions agents start** in Settings opens them docked
+  (the default), full size or small (half width, smaller text).
+- **The tray:** docked sessions sit in a tray inside their starter, above its composer (or as a
+  card in its waiting view), one row each with its state. A question or permission one asks opens
+  in its row, to answer there without opening it; meanwhile the starter's border turns amber.
+  Click a row to open that session in the grid; **Open all** and **Dock all** move them together.
+  When the starter is collapsed or closed, they go back to the dock.
 - **Coordination:** shared notes (`note_set`, `note_get`, `note_delete`) kept across restarts;
   advisory file claims (`claim_files`, `release_files`, `list_claims`) held until released or
   the session's cell closes; `schedule_message` (after a delay, at a time, or once the plan's
