@@ -508,8 +508,7 @@ body:not(.fade-buttons):not(.hover-buttons) .cell.wm-on .cell-head:hover > .icon
     radial-gradient(1px 1px at 38% 8%, color-mix(in srgb, var(--fg) 30%, transparent), transparent),
     radial-gradient(ellipse 70% 45% at 50% 0%, color-mix(in srgb, var(--proj, var(--link)) 9%, transparent), transparent);
 }
-/* Centred when it fits, scrolls from the top when it does not. */
-.waiting-view > :first-child { margin-top: auto; }
+/* Anchored to the top so the loader and progress bar line up across cells whatever the content below them. */
 .waiting-view > :last-child { margin-bottom: auto; }
 /* One of the loaders in loaders.css on a soft halo; hovering it says which one it is. */
 .wv-hero {
