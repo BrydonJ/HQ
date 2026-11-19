@@ -1175,11 +1175,14 @@ fn codex_edit(config: &str, block: Option<&str>) -> String {
 
 /// Hermes' state folder: `HERMES_HOME`, else `%LOCALAPPDATA%\hermes` on Windows (where its installer
 /// puts it), else `~/.hermes`.
-fn hermes_config() -> Option<PathBuf> {
+pub(crate) fn hermes_home() -> Option<PathBuf> {
     let set = std::env::var_os("HERMES_HOME").filter(|d| !d.is_empty()).map(PathBuf::from);
     let local = if cfg!(windows) { std::env::var_os("LOCALAPPDATA").filter(|d| !d.is_empty()).map(|d| PathBuf::from(d).join("hermes")).filter(|d| d.is_dir()) } else { None };
-    let dir = set.or(local).or_else(|| home().map(|h| h.join(".hermes")))?;
-    Some(dir.join("config.yaml"))
+    set.or(local).or_else(|| home().map(|h| h.join(".hermes")))
+}
+
+fn hermes_config() -> Option<PathBuf> {
+    Some(hermes_home()?.join("config.yaml"))
 }
 
 /// Hermes' config.yaml, edited as text: an `hq:` entry under the top-level `mcp_servers:` map.

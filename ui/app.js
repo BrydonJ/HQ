@@ -5729,8 +5729,8 @@ setInterval(() => {
 // Token usage: where the tokens went, by session, folder and model
 // ======================================================================================
 
-// Read from the usage Claude Code writes into its transcripts (usage.rs), so looking costs no
-// tokens. The backend keeps what it read, and only reads a file again once it has changed.
+// Read from the usage Claude Code writes into its transcripts and from Hermes' own history
+// (usage.rs), so looking costs no tokens. The backend keeps what it read, and only reads a file again once it has changed.
 const tokensPanel = $('#tokens');
 const tokensBody = $('#tokens-body');
 const TOKEN_VIEWS = [['sessions', 'Sessions'], ['folders', 'Folders'], ['models', 'Models']];
@@ -5821,8 +5821,9 @@ function tokenGroups(sessions) {
     const folder = tokens.view === 'folders';
     const g = group(folder ? projectKey(s.cwd || '') : s.sessionId, () => folder
       ? { name: baseName(s.cwd || '') || s.cwd || '(unknown folder)', title: s.cwd || '', cwd: s.cwd, open: s.cwd ? () => setTokensFolder(s.cwd) : null }
-      : { name: s.title || '(no title)', title: `${s.cwd || ''}\n${s.sessionId}`, cwd: s.cwd, modifiedMs: s.modifiedMs,
-          open: s.cwd ? () => { closeTokens(); resumeSession({ sessionId: s.sessionId, cwd: s.cwd, title: s.title, modifiedMs: s.modifiedMs }); } : null });
+      : { name: s.title || '(no title)', title: `${s.cwd || ''}\n${s.sessionId}`, cwd: s.cwd, modifiedMs: s.modifiedMs, agent: s.agent,
+          // Resuming is Claude's; a Hermes session's id is Hermes' own.
+          open: s.cwd && s.agent !== 'hermes' ? () => { closeTokens(); resumeSession({ sessionId: s.sessionId, cwd: s.cwd, title: s.title, modifiedMs: s.modifiedMs }); } : null });
     for (const row of s.rows) g.rows.push(row);
     g.sessions.add(s.sessionId);
   }
@@ -5940,7 +5941,8 @@ function renderTokens() {
     const breakdown = `Input ${formatTokens(t.input)} · Output ${formatTokens(t.output)} · Cache write ${formatTokens(t.cacheWrite)} · Cache read ${formatTokens(t.cacheRead)}`
       + (t.subCost ? `\nSubagents ${formatCost(t.subCost)}` : '');
     const row = h(g.open ? 'button' : 'div', { class: `tk-row${g.open ? '' : ' static'}`, title: `${g.title ? `${g.title}\n` : ''}${breakdown}`, onclick: g.open },
-      h('span', { class: 'tk-name' }, h('span', { class: 'name', text: g.name }), h('span', { class: 'path', text: path })),
+      h('span', { class: 'tk-name' }, h('span', { class: 'name', text: g.name }),
+        h('span', { class: 'path' }, g.agent === 'hermes' ? h('span', { class: 'agent-tag', text: 'Hermes', title: 'Hermes Agent session', style: 'margin-right:6px' }) : null, path)),
       h('span', { class: 'tk-num', text: formatTokens(t.tokens) }),
       h('span', { class: 'tk-num cost', text: t.unpriced && !t.cost ? '—' : formatCost(t.cost) }),
       h('span', { class: 'tk-share' }, h('span', { class: 'bar' }, h('span', { style: `width:${Math.min(100, share)}%` })),
@@ -5950,8 +5952,9 @@ function renderTokens() {
   }
   if (!groups.length) rows.push(h('div', { class: 'session-empty', text: tokens.loading ? 'Reading transcripts…' : 'No usage in this period.' }));
   parts.push(h('div', { class: 'tk-list' }, rows));
-  parts.push(h('div', { class: 'usage-foot', text: 'Estimated at API list prices from the Claude Code transcripts on this computer; '
-    + 'a Pro or Max plan is not billed these amounts. Requests Claude Code keeps out of its transcripts, and Codex and Hermes cells, '
+  parts.push(h('div', { class: 'usage-foot', text: 'Estimated at API list prices from the Claude Code transcripts and the Hermes Agent history on this computer; '
+    + 'a Pro or Max plan is not billed these amounts. Hermes counts a session by the day it was last used, and models without '
+    + 'a known price use the cost Hermes recorded. Requests Claude Code keeps out of its transcripts, and Codex cells, '
     + 'are not counted. Reading them costs no tokens.' }));
   tokensBody.replaceChildren(...parts);
 }
