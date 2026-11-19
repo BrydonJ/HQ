@@ -179,8 +179,8 @@ the repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the contents of the updater 
     missing folder keeps the prompt as a draft. `/full-send` uses this to hand a ticket to Sonnet.
   - From Explorer (Windows, the installed app): turn on **Open in HQ in Explorer** in Settings,
     then right-click a folder, or the empty space inside one, and pick **Open in HQ**. It runs the
-    command line above, so AFK and the approval reviewer leave that session alone until you turn
-    them on in it. The menu lives under HKCU and needs no admin.
+    command line above, so AFK leaves that session alone until you turn it on in it, and a
+    deputy never answers for it. The menu lives under HKCU and needs no admin.
   - `claude update` runs in the background, at most once every 6 hours (the time of the last run
     is kept in the board), and a first message does not wait for it. If a start fails while the
     update replaces the program, HQ waits for the update and tries once more.
@@ -363,7 +363,7 @@ the repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the contents of the updater 
   and shows the first line of its reply when a turn finishes, or says that Claude needs you.
   Coming back to HQ soon after one opens that cell. Turn them off in Settings.
 - **Settings** (the gear in the top bar, or Ctrl+,): theme (auto, dark or light), notifications,
-  permissions, Remote Control, reviewing approvals in every session, the default model,
+  permissions, Remote Control, the default model,
   automatic HQ updates, the Explorer menu, and the path of the `claude` program.
 - **Steer or Queue** (Claude and Hermes): the toggle in the composer bar sets what a message
   sent while the agent works does in that chat. **Steer** reaches the running turn: Claude reads
@@ -372,8 +372,8 @@ the repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the contents of the updater 
   prompt. Claude starts on Steer and Hermes on Queue, as before. A held message is not kept
   across a closed HQ, though an update's restart sends it on.
 - **Session menu:** right-click a session's header, or its row in the sessions list, for what
-  that one session does differently from Settings: its permission mode, Remote Control, and
-  whether its approvals are reviewed. **Session settings…** in the header's "…" menu opens it too.
+  that one session does differently from Settings: its permission mode and Remote Control.
+  **Session settings…** in the header's "…" menu opens it too.
 - **Bundled skills:** HQ ships the `one-sentence` Claude Code skill and its `/1s` command
   (`skills/`) and writes each to `~/.claude` (or `CLAUDE_CONFIG_DIR`) at each start when it is
   missing. A copy already there is never overwritten, so your edits stay.
@@ -444,29 +444,13 @@ the repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the contents of the updater 
     that session waiting for you even while the rest of HQ is AFK.
   - AFK, and what was done while it lasted, is kept in the board, so a restart (or an update)
     loses neither.
-- **Approval reviewer:** off by default, and for Claude and Hermes sessions only (on Hermes it
-  reviews real terminal commands and plain file edits that give a full path; anything else stays
-  with you). Turn it on for one
-  session with **Review approvals** in its session menu (right-click its header), or tick
-  **Review approvals while away** in the AFK menu, which lasts as long as that AFK and skips
-  sessions set to **Never AFK** and sessions an agent started. **Review approvals in every
-  session** in Settings turns it on everywhere and reviews each card at once, with no minute's
-  wait; it leaves out sessions an agent or a command line started, and any you turn it off for
-  in their session menu. It can only be set here: not from the command line, and not by an agent.
-  - A permission card you leave for a minute (no wait with the Settings switch) counts down ("Reviewing in 0:42"), then goes to a
-    separate Claude call (Haiku, with no tools, using your Claude login, so it counts towards your
-    plan). Answer the card yourself at any time and the review is dropped.
-  - The reviewer can only approve or leave the card for you; it never refuses. An approval answers
-    **Yes** for that one request, never for the whole session, and shows in the chat. If it leaves
-    the card, the chat says why and HQ asks for your attention again. While AFK, the card is then
-    deferred as usual, and approvals are listed in the **While you were away** card.
-  - It judges the raw command, not the agent's description of it. Some requests always stay with
-    you without asking the model: pushes and other outward-facing commands, recursive deletes,
-    `sudo`, MCP tools and web fetches, anything naming a credential file, anything touching git
-    config or files such as `.claude`, `.git`, `.husky` or `CLAUDE.md` (where an approval could
-    outlast the one request), and any path outside the session's folder. Any error or timeout also
-    leaves the card with you, and so does starting to type in the card.
-  - Questions and plans are never reviewed, and an edit over 200 lines stays with you.
+- **Deputy while away:** tick **Make a deputy to answer approvals and questions while I'm
+  away** in the AFK menu. If you already have a deputy (**Answer prompts for me** in a session's
+  menu) it is kept as it is. Otherwise HQ starts a Claude session in the same folder, makes it the
+  deputy and tells it what to do. It answers the permissions, questions and plans that wait in
+  your other sessions after their minute, once each, or leaves them for you; what it did is listed
+  in Settings > Deputy. When that AFK ends, the session stops being the deputy and stays open. A
+  deputy you made yourself is never ended by AFK.
 - Keys:
   - Esc: stop the focused session. If Claude has not stopped 10 seconds later, the chat offers
     **Force stop**, which ends the process; the session resumes when you next send a message.

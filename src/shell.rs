@@ -2,7 +2,7 @@
 //! space inside one, runs `hq.exe --new-session "<folder>"`, which the single-instance plugin hands
 //! to the running HQ (main.rs `parse_launch`). Written under HKCU, so it needs no admin and no
 //! installer change, and only by the installed app: a dev build would point Explorer at `target\`.
-//! A session opened this way is `launched`, so AFK and the approval reviewer leave it alone.
+//! A session opened this way is `launched`, so AFK and the deputy leave it alone.
 
 /// The two menus: a folder's own, and the background of an open folder.
 #[cfg(windows)]
