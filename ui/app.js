@@ -3311,7 +3311,10 @@ class Cell {
 
     const choices = [choice('1', 'Yes', null, allow)];
     const suggestions = Array.isArray(req.permission_suggestions) ? req.permission_suggestions : [];
-    if (suggestions.length) choices.push(choice('2', suggestionLabel(suggestions), null, allowAlways));
+    if (suggestions.length) {
+      choices.push(choice('2', suggestionLabel(suggestions), null, allowAlways));
+      choices[1].title = suggestionLabel(suggestions); // shortened when the choices sit in one row
+    }
     choices.push(choice(String(choices.length + 1), 'No', null, deny));
 
     const card = h('div', { class: 'prompt' }, title, reason, preview, h('div', { class: 'choices' }, choices), feedback);

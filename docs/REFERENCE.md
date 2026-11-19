@@ -19,13 +19,14 @@ Everything HQ does, in detail. New to HQ? Start with the [README](../README.md).
     bubble is marked **Not sent**.
   - From a script or another session: `hq.exe --new-session <folder> [--model m] [--effort e]
     [--permission-mode p] [--prompt text]` opens a cell in that folder and sends the prompt
-    (`--permission-mode` takes default, acceptEdits, plan or auto; never bypassPermissions). If
+    (`--permission-mode` takes default, acceptEdits, plan or auto; never bypassPermissions;
+    without it the session starts in auto). If
     HQ is running, the running copy of that profile opens it; otherwise HQ starts first. A
     missing folder keeps the prompt as a draft. `/full-send` uses this to hand a ticket to Sonnet.
   - From Explorer (Windows, the installed app): turn on **Open in HQ in Explorer** in Settings,
     then right-click a folder, or the empty space inside one, and pick **Open in HQ**. It runs the
-    command line above, so AFK and the approval reviewer leave that session alone until you turn
-    them on in it. The menu lives under HKCU and needs no admin.
+    command line above with no mode given, so the session starts in auto, and AFK leaves it alone
+    until you turn it on in it. The menu lives under HKCU and needs no admin.
   - `claude update` runs in the background, at most once every 6 hours (the time of the last run
     is kept in the board), and a first message does not wait for it. If a start fails while the
     update replaces the program, HQ waits for the update and tries once more.
@@ -68,6 +69,7 @@ Everything HQ does, in detail. New to HQ? Start with the [README](../README.md).
     Click a session to open it; click a folder to see only its sessions.
   - It reads the `usage` Claude Code saves with every reply in its own transcripts, subagents'
     included, and counts each reply once. Nothing is asked of Claude, so looking costs no tokens.
+    Hermes sessions are included too, read from Hermes' own state database and tagged Hermes.
     A transcript is read again only once it has changed, and one last changed before the period
     is not read at all.
   - Costs are estimates at the Claude API's list prices (`src/usage.rs` has the table, with cache
@@ -158,7 +160,8 @@ Everything HQ does, in detail. New to HQ? Start with the [README](../README.md).
   3. Replies only: your prompts and Claude's replies. Thinking and the grey narration between
      steps are hidden too; the last words of a stopped turn stay.
 
-  The level is set per cell and kept across restarts.
+  The level is set per cell and kept across restarts. The button is pinned to the header by
+  default, and existing installs got it pinned once; unpin it and it stays unpinned.
 - **Progress view:** the checklist button next to the eye opens a small card in the top-right
   corner of the chat, which stays readable and scrollable beside it, showing how far Claude
   has got. Close it with its X or the button. It is set per cell and kept across restarts.
@@ -208,8 +211,8 @@ Everything HQ does, in detail. New to HQ? Start with the [README](../README.md).
   and shows the first line of its reply when a turn finishes, or says that Claude needs you.
   Coming back to HQ soon after one opens that cell. Turn them off in Settings.
 - **Settings** (the gear in the top bar, or Ctrl+,): theme (auto, dark or light), notifications,
-  permissions, Remote Control, reviewing approvals in every session, the default model,
-  automatic HQ updates, the Explorer menu, and the path of the `claude` program.
+  Remote Control, the default model, **Offer waiting mode** (General), automatic HQ updates,
+  the Explorer menu, and the path of the `claude` program. There is no global permission mode.
 - **Steer or Queue** (Claude and Hermes): the toggle in the composer bar sets what a message
   sent while the agent works does in that chat. **Steer** reaches the running turn: Claude reads
   it at its next step; Hermes stops its turn and the message goes next. **Queue** holds it (marked
@@ -217,11 +220,15 @@ Everything HQ does, in detail. New to HQ? Start with the [README](../README.md).
   prompt. Claude starts on Steer and Hermes on Queue, as before. A held message is not kept
   across a closed HQ, though an update's restart sends it on.
 - **Session menu:** right-click a session's header, or its row in the sessions list, for what
-  that one session does differently from Settings: its permission mode, Remote Control, and
-  whether its approvals are reviewed. **Session settings…** in the header's "…" menu opens it too.
+  that one session does differently from Settings: its permission mode, Remote Control and
+  whether it is your deputy. The header's "…" menu has the same choices (a Permissions section),
+  and **Session settings…** there opens the menu too.
 - **Bundled skills:** HQ ships the `one-sentence` Claude Code skill and its `/1s` command
   (`skills/`) and writes each to `~/.claude` (or `CLAUDE_CONFIG_DIR`) at each start when it is
-  missing. A copy already there is never overwritten, so your edits stay.
+  missing. A copy already there is never overwritten, so your edits stay. `/1s` and
+  `/one-sentence` also work in Hermes sessions: HQ sends the skill's rules to Hermes and trails
+  each later prompt with a short reminder (hidden in the chat) until `/1s off`. Both show in a
+  Hermes cell's slash menu.
 - **Questions:** when Claude asks you something, the chat keeps a one-line record of the
   question and your answer. Click it to see every option and which ones you picked. No detail
   level hides it.
@@ -232,6 +239,25 @@ Everything HQ does, in detail. New to HQ? Start with the [README](../README.md).
   - A reply that finishes while collapsed gets the green glow, even if the cell had focus.
   - Click the header to expand it. Ctrl+1…9, the sessions list and maximize expand it too.
   - Keys 1/2/3 and Esc never act on a collapsed cell, since its prompts are not on screen.
+- **Waiting mode:** the hourglass button in the cell header (pinned by default, and existing
+  installs got it pinned once) hides the chat behind a waiting view that shows the task list
+  and a loader. Turning it on while a session is idle but still has open tasks (or background
+  tasks) shows the view straight away.
+  - When a turn has run 45 seconds without you clicking or typing in that session, a slim bar
+    above the composer offers waiting mode (**Yes** or **No**), once per turn. It goes away
+    when the turn ends.
+  - **Offer waiting mode** in Settings > General turns the offer off. Three **No**s in a row
+    turn it off by themselves.
+- **Orchestrator columns:** the pin button in the cell header pins a session as an
+  orchestrator. Each pinned session gets a full-height column, side by side, and the other
+  sessions stack in a strip on the right (drag the gaps to resize). Pinned columns take the
+  place of the spotlight while any is open. Above each column, a bar shows how many of the
+  sessions it started are done, and turns amber while one of them waits on you; the × there
+  unpins it. Pinning is your choice and is kept across restarts: starting sessions never pins
+  one.
+- **Closing HQ** while sessions are working (a turn, a question or permission, background
+  tasks) asks first, and lists them. Esc or **Keep HQ open** keeps it. If the page does not
+  answer, a second close a few seconds later goes through.
 - **Sessions list** (Ctrl+B, or the button at the top left) shows every session in one column:
   - Each row has its status, first prompt and latest reply.
   - Type to search by folder, path, prompt or reply. Press Enter to jump to the first match.
@@ -257,13 +283,20 @@ Everything HQ does, in detail. New to HQ? Start with the [README](../README.md).
   - **No**: deny, with optional feedback for Claude.
   - Keys 1…9 answer the top card. With several questions, they answer the highlighted one,
     and move on to the next after a single-choice answer. Click a question to highlight it.
-- **Permissions** (Settings): ask before edits, edit automatically, plan, auto, bypass. It sets
-  new Claude sessions and every open one not set on its own; sessions an agent or a command line
-  started keep the mode they were started with. Right-click a session's header to give it its own
-  mode, or **Follow Settings** again. A session not in its usual mode shows it in the composer
-  bar (bypass in red); click it for the session menu. If Claude rejects a switch, the cell shows
-  the reason and keeps the old mode. For example, bypass can't be turned on mid-session, and auto
-  isn't available on every model.
+  - A lone card fits the space under the chat with one scroll area (the command or diff), its
+    choices always in view, and long commands wrap. The expand button in the card's title gives
+    the card the whole cell.
+- **Permissions:** every new session, whether you or an agent started it, starts in Claude's
+  **auto** mode. Hermes has no auto mode, so new Hermes sessions start in **Edit
+  automatically**: edits in the folder go ahead and commands follow Hermes' own approval
+  settings. Settings has no global permission choice, and there is no "Follow Settings".
+  - A session's own mode is set from the Permissions section of the header's "…" menu (the
+    right-click header menu has it too). The composer bar has no permission button.
+  - Boards saved before this move their open sessions that were in the old default modes to
+    auto, once. Sessions set on their own, started by an agent or the command line, or still
+    running in a session host are left alone.
+  - If Claude rejects a switch, the cell shows the reason and keeps the old mode. For example,
+    bypass can't be turned on mid-session, and auto isn't available on every model.
 - **AFK:** going away for a while? The coffee button in the top bar tells every session you are
   AFK for 30 minutes to 8 hours, until a time you pick, or until you are back. Sessions then carry
   on with what they can do without you, instead of stopping at the first question.
@@ -289,29 +322,21 @@ Everything HQ does, in detail. New to HQ? Start with the [README](../README.md).
     that session waiting for you even while the rest of HQ is AFK.
   - AFK, and what was done while it lasted, is kept in the board, so a restart (or an update)
     loses neither.
-- **Approval reviewer:** off by default, and for Claude and Hermes sessions only (on Hermes it
-  reviews real terminal commands and plain file edits that give a full path; anything else stays
-  with you). Turn it on for one
-  session with **Review approvals** in its session menu (right-click its header), or tick
-  **Review approvals while away** in the AFK menu, which lasts as long as that AFK and skips
-  sessions set to **Never AFK** and sessions an agent started. **Review approvals in every
-  session** in Settings turns it on everywhere and reviews each card at once, with no minute's
-  wait; it leaves out sessions an agent or a command line started, and any you turn it off for
-  in their session menu. It can only be set here: not from the command line, and not by an agent.
-  - A permission card you leave for a minute (no wait with the Settings switch) counts down ("Reviewing in 0:42"), then goes to a
-    separate Claude call (Haiku, with no tools, using your Claude login, so it counts towards your
-    plan). Answer the card yourself at any time and the review is dropped.
-  - The reviewer can only approve or leave the card for you; it never refuses. An approval answers
-    **Yes** for that one request, never for the whole session, and shows in the chat. If it leaves
-    the card, the chat says why and HQ asks for your attention again. While AFK, the card is then
-    deferred as usual, and approvals are listed in the **While you were away** card.
-  - It judges the raw command, not the agent's description of it. Some requests always stay with
-    you without asking the model: pushes and other outward-facing commands, recursive deletes,
-    `sudo`, MCP tools and web fetches, anything naming a credential file, anything touching git
-    config or files such as `.claude`, `.git`, `.husky` or `CLAUDE.md` (where an approval could
-    outlast the one request), and any path outside the session's folder. Any error or timeout also
-    leaves the card with you, and so does starting to type in the card.
-  - Questions and plans are never reviewed, and an edit over 200 lines stays with you.
+- **Deputy:** a session that answers for you while you are away. Pick one with **Answer
+  prompts for me** in a session's menu (right-click its header; Claude and Codex sessions), or
+  tick **Make a deputy to answer approvals and questions while I'm away** in the AFK menu.
+  - A permission, question or plan that waits in another session goes to the deputy after a
+    minute. It allows it once, denies it with a reason, or leaves it for you. It works beside
+    AFK: what it leaves falls to AFK's deferral. It never answers for its own prompts, sessions
+    tied to it, cloud cells or sessions a command line opened.
+  - The AFK menu option uses an existing deputy as it is. If there is none, it starts a new
+    Claude session named Deputy in an empty folder of HQ's own (never a project folder, so no
+    project `CLAUDE.md`, settings or hooks reach it), set to Never AFK, and makes it the deputy.
+    When no AFK that asked for it is left, it stops being the deputy; the session stays open.
+    A deputy you picked yourself is kept and never ended by AFK.
+  - The deputy sees long commands, edits and plans in full. Only extremely large inputs (over
+    60,000 characters, or 100,000 for plans) are still too long to allow; it can only deny or
+    leave those.
 - Keys:
   - Esc: stop the focused session. If Claude has not stopped 10 seconds later, the chat offers
     **Force stop**, which ends the process; the session resumes when you next send a message.
@@ -421,8 +446,9 @@ left it. A Hermes cell has a **Hermes** tag in its header.
   of action for the rest of the session. When Hermes' own `approvals.timeout` runs out, Hermes
   denies the request and the card goes away.
 - The model menu lists the models Hermes offers. Permission modes are Ask before edits, Edit
-  automatically and Don't ask (still asks for sensitive paths); Hermes has no plan mode.
-- The compact button sends `/compress`. Typing `/` lists Hermes' own commands.
+  automatically and Don't ask (still asks for sensitive paths); Hermes has no plan mode or auto
+  mode, so new Hermes sessions start in Edit automatically.
+- The compact button sends `/compress`. Typing `/` lists Hermes' own commands, plus `/1s` and `/one-sentence`.
 - Handoff and the progress button ask in a throwaway fork of the session, which stays in
   Hermes' session list.
 - Restored cells draw their history from HQ's own copy of the conversation, kept in a
@@ -446,8 +472,15 @@ the board: start a Codex session for one part of a job, wait for it, read its an
 - **Started sessions:** a session an agent started joins its starter's group and wears the
   starter's project colour and name, even in a worktree. Its header links back to the starter
   ("↳ name"); the starter's header counts what it started, pulses while one waits on you, and
-  lists them (with **Dock them all**). **Sessions agents start** in Settings opens them full size,
-  small (half width, smaller text; the default) or docked.
+  lists them. **Sessions agents start** in Settings opens them docked (the default), full size
+  or small (half width, smaller text).
+  - **The tray:** docked sessions sit in a tray inside their starter, above its composer (or as
+    a card in its waiting view), one row each with its state. A question or permission one asks
+    opens in its row, to answer there without opening it; meanwhile the starter's border turns
+    amber. Click a row to open that session in the grid; **Open all** and **Dock all** move
+    them together. When the starter is collapsed or closed, they go back to the dock. A
+    collapsed session that another open session started sits in that session's tray instead of
+    the dock.
 - **Coordination:** shared notes (`note_set`, `note_get`, `note_delete`) kept across restarts;
   advisory file claims (`claim_files`, `release_files`, `list_claims`) held until released or
   the session's cell closes; `schedule_message` (after a delay, at a time, or once the plan's
@@ -464,8 +497,9 @@ Guard rails:
   the session's permission mode or rules already allow them.
 - A session can start sessions, and those one more level, but no deeper. At most 6 sessions
   started by agents are open at once (Settings > **Sessions agents can open**).
-- A session started by an agent never bypasses permissions: it gets the starter's mode, or
-  default when that is Bypass permissions.
+- A session started by an agent never bypasses permissions and is never freer than the
+  starter's own mode. It defaults to auto for Claude and Edit automatically (acceptEdits) for
+  Hermes.
 - An agent may only interrupt, close or reconfigure sessions it started, directly or through
   sessions it started.
 - Settings > **HQ tools for sessions** turns the server off for sessions started from then on;

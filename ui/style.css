@@ -795,14 +795,23 @@ body:not(.fade-buttons):not(.hover-buttons) .cell.wm-on .cell-head:hover > .icon
 .prompts > .prompt:only-child { display: flex; flex-direction: column; min-height: 0; }
 .prompts > .prompt:only-child > * { flex: none; }
 .prompts > .prompt:only-child > pre, .prompts > .prompt:only-child > .preview { flex: 0 1 auto; min-height: 3.5em; max-height: none; }
+/* A lone permission card puts its choices side by side, so the command gets the height. */
+.prompts > .prompt[data-kind="permission"]:only-child .choices { flex-direction: row; }
+.prompts > .prompt[data-kind="permission"]:only-child .choices { flex-wrap: nowrap; }
+.prompts > .prompt[data-kind="permission"]:only-child .choice { flex: 0 1 auto; min-width: 0; white-space: nowrap; }
+.prompts > .prompt[data-kind="permission"]:only-child .choice > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* Yes and No keep their width; the "don't ask again" rule between them shortens (its title has it all). */
+.prompts > .prompt[data-kind="permission"]:only-child .choice:first-child, .prompts > .prompt[data-kind="permission"]:only-child .choice:last-child { flex-shrink: 0; }
 /* Several cards share the prompts' own scroll, so each preview stays short. */
 .prompts > .prompt:not(:only-child) > pre, .prompts > .prompt:not(:only-child) > .preview { max-height: 7.5em; }
 .prompt-title { display: flex; align-items: flex-start; gap: 6px; }
 .prompt-title .pt-main { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .prompt-grow { flex: none; margin: -3px -4px 0 0; }
 /* Expanded: the card has the whole cell, the chat hides until it is answered or shrunk. */
-.cell.prompts-max:has(.prompts > .prompt) > .stage { display: none; }
+.cell.prompts-max:has(.prompts > .prompt) > .stage, .cell.prompts-max:has(.prompts > .prompt) > .composer { display: none; }
 .cell.prompts-max:has(.prompts > .prompt) > .prompts { flex: 1 1 auto; max-height: none; }
+.cell.prompts-max .prompts > .prompt:only-child { flex: 1 1 auto; }
+.cell.prompts-max .prompts > .prompt:only-child > pre, .cell.prompts-max .prompts > .prompt:only-child > .preview { flex: 1 1 auto; }
 .choices { display: flex; flex-direction: column; gap: 4px; }
 .choice {
   display: flex; align-items: baseline; gap: 8px; text-align: left;

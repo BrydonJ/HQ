@@ -135,10 +135,11 @@ first prompt and latest reply. Type to search, and click a session to jump to it
 
 ### Inside a tile
 
-- **Header buttons:** a few are shown by default (progress, collapse, close). The **…** menu
-  holds the rest: open the folder in VS Code, a terminal or Explorer/Finder, the detail level,
-  a handoff note for a fresh session, and more. Settings lets you choose which buttons stay
-  in the header.
+- **Header buttons:** a few are shown by default (progress, detail level, waiting mode,
+  collapse, close). The **…** menu holds the rest: open the folder in VS Code, a terminal or
+  Explorer/Finder, a handoff note for a fresh session, and more. Settings lets you choose which
+  buttons stay in the header. Detail level and waiting mode were pinned once on existing
+  installs; unpin them and they stay unpinned.
 - **Rename** a session by clicking its name, or with **F2**. VS Code sees the new name too.
 - **Detail level** chooses how much you see: everything, replies without tool calls (the
   default), or replies only.
@@ -149,9 +150,37 @@ first prompt and latest reply. Type to search, and click a session to jump to it
   (**Steer**) or waits until it finishes (**Queue**).
 - **Esc** stops the session. **Ctrl+M** (or double-clicking the header) maximizes it.
   **Ctrl+Shift+M** collapses it into a strip under the board.
-- **Right-click a header** for that session's own settings: permission mode, Remote Control
-  and approval reviews.
+- **Permissions:** every new session starts in Claude's **auto** mode. Hermes has no auto
+  mode, so new Hermes sessions start in **Edit automatically** (edits in the folder go ahead;
+  commands follow Hermes' own approval settings). To change one session, open the **…** menu in
+  its header (or right-click the header) and use the Permissions section.
+- **Right-click a header** for that session's own settings: permission mode and Remote Control.
+- **Waiting mode:** the header button hides the chat behind a waiting view (the task list and a
+  loader) while the session works, and **Show chat** brings it back. Turn it on while
+  a session is idle but still has open tasks (or background tasks) and the waiting view shows
+  straight away. When a turn has run 45 seconds and you have not clicked or typed in that
+  session, a slim bar above the input box offers waiting mode (**Yes** or **No**), once per
+  turn. It goes away when the turn ends. Turn the offer off in Settings > General
+  (**Offer waiting mode**); three **No**s in a row turn it off by themselves.
 - **Slash commands:** type `/` to list Claude's commands, skills and your custom commands.
+  `/1s` (or `/one-sentence`) switches on one-sentence replies, and `/1s off` ends it. It works
+  in Claude and Hermes sessions.
+- **Permission cards:** a lone card fits the space under the chat. Its command or diff is the
+  one scroll area, long commands wrap, and the choices stay in view. The expand button in the
+  card's title gives the card the whole tile.
+- **The tray:** docked sessions sit in a tray inside their starter, above its composer (or as a
+  card in its waiting view), one row each with its state. A question or permission one asks
+  opens in its row, to answer there without opening it; meanwhile the starter's border turns
+  amber. Click a row to open that session in the grid; **Open all** and **Dock all** move them
+  together. When the starter is collapsed or closed, they go back to the dock. A collapsed
+  session that another open session started sits in that session's tray instead of the dock.
+- **Orchestrator columns:** the pin button in the tile header pins a session as an
+  orchestrator. Each pinned session gets a full-height column, side by side, and the other
+  sessions stack in a strip on the right (drag the gaps to resize). Pinned columns take the
+  place of the spotlight while any is open. Above each column, a bar shows how many of the
+  sessions it started are done, and turns amber while one of them waits on you; the × there
+  unpins it. Pinning is your choice and is kept across restarts: starting sessions never pins
+  one.
 
 ### Plan usage
 
@@ -162,7 +191,8 @@ weekly limit as well.
 ![The plan usage pop-up](docs/screenshots/usage.png)
 
 If a session hits the limit, it carries on by itself once usage is back. The graph button next
-to it (**Ctrl+U**) shows where your tokens went, per day, session, folder or model.
+to it (**Ctrl+U**) shows where your tokens went, per day, session, folder or model. Hermes
+sessions are included, tagged Hermes.
 
 ### Going AFK
 
@@ -175,14 +205,19 @@ whatever they can do without you, instead of stopping at the first question:
 - Plans are held for you.
 - Other permission requests are put off until later, and the session works on the rest.
 - Every card waits a minute first, in case you are still there.
+- Tick **Make a deputy to answer approvals and questions while I'm away** to have a session
+  answer for you instead. If no deputy exists, HQ starts a new Claude session named Deputy in
+  an empty folder of its own (never a project folder), set to Never AFK. It stops being the
+  deputy when no AFK that asked for it is left, and the session stays open. A deputy you
+  picked yourself is kept, and AFK never ends it.
 
 When you are back, each session shows a **While you were away** card listing what it did and
 what it put off.
 
 ### Settings
 
-Click the gear (or press **Ctrl+,**) for the theme, notifications, the default permission mode
-and model, Remote Control (continue sessions from claude.ai or the Claude phone app) and
+Click the gear (or press **Ctrl+,**) for the theme, notifications, the default
+model, Remote Control (continue sessions from claude.ai or the Claude phone app) and
 more.
 
 ![The Settings panel](docs/screenshots/settings.png)
@@ -223,6 +258,11 @@ To update straight away, click the **Update** button that appears in the top bar
 
 ## Good to know
 
+- **Closing HQ** while sessions are working (a turn, a question or permission, background
+  tasks) asks first, and lists them. Esc or **Keep HQ open** keeps it. If the page does not
+  answer, a second close a few seconds later goes through.
+- **Sessions agents start:** the setting of that name in Settings opens them docked (the
+  default), full size or small (half width, smaller text).
 - **Your board is saved.** Close HQ and everything comes back next time: tiles, history and
   unsent drafts. A reopened session uses no memory until you send it a message.
 - **Only open folders you trust.** HQ runs Claude without Claude's "do you trust this folder?"
@@ -240,7 +280,7 @@ To update straight away, click the **Update** button that appears in the top bar
 ## More documentation
 
 - **[Feature reference](docs/REFERENCE.md):** everything HQ does, in detail. It covers API
-  credits, Remote Control, the approval reviewer, cloud and Hermes sessions, and HQ's MCP tools
+  credits, Remote Control, the deputy, cloud and Hermes sessions, and HQ's MCP tools
   that let sessions start and talk to each other.
 - **[Building and releasing](docs/DEVELOPMENT.md):** for people working on HQ itself. It covers
   building from source, profiles, tests, releases and the code layout.
