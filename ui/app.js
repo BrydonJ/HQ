@@ -4826,6 +4826,8 @@ function closeCell(cell) {
   cell.dispose();
   mcpCellClosed(cell);
   deputyCellClosed(cell);
+  if (cell.backend === 'hermes') forgetCachedSessions('Hermes'); // so the resume list shows it
+  else if (cell.backend === 'codex') forgetCachedSessions('Codex');
   if (peeked === cell) peeked = null;
   const i = app.cells.indexOf(cell);
   if (i >= 0) app.cells.splice(i, 1);
@@ -5273,9 +5275,34 @@ async function loadResumeSessions() {
  * resolves to all of them, `names` says whose are coming. Null when neither is asked for.
  */
 function otherSessions(cwd) {
-  const sources = [['Codex', codexSessions(cwd)], ['Hermes', hermesSessions(cwd)]].filter(([, p]) => p);
+  const sources = [['Codex', () => codexSessions(cwd)], ['Hermes', () => hermesSessions(cwd)]]
+    .map(([name, read]) => [name, cachedSessions(name, cwd, read)]).filter(([, p]) => p);
   if (!sources.length) return null;
   return { names: sources.map(([n]) => n).join(' and '), list: Promise.all(sources.map(([, p]) => p)).then(lists => lists.flat()) };
+}
+
+// Listing Codex's or Hermes' sessions starts a helper that takes seconds, so a resume dialog reopened
+// soon after reuses the last list for that folder. Closing one of that agent's cells drops it, so the
+// session just closed shows; an empty list (also what a failed read gives) is not kept.
+const OTHER_SESSIONS_TTL_MS = 5 * 60 * 1000;
+const otherSessionsCache = new Map(); // "<agent>\n<folder>" -> { at, list: Promise }
+
+/** The agent's session list for the folder: the one read in the last few minutes, else `read()`'s. */
+function cachedSessions(agent, cwd, read) {
+  const key = `${agent}\n${cwd || ''}`;
+  const hit = otherSessionsCache.get(key);
+  if (hit && Date.now() - hit.at < OTHER_SESSIONS_TTL_MS) return hit.list;
+  const list = read();
+  if (!list) return null;
+  const entry = { at: Date.now(), list };
+  otherSessionsCache.set(key, entry);
+  list.then(l => { if (!l.length && otherSessionsCache.get(key) === entry) otherSessionsCache.delete(key); });
+  return list;
+}
+
+/** Forgets the cached session lists of an agent ('Codex', 'Hermes'), or of all with none given. */
+function forgetCachedSessions(agent) {
+  for (const key of otherSessionsCache.keys()) if (!agent || key.startsWith(`${agent}\n`)) otherSessionsCache.delete(key);
 }
 
 /** Every folder with a recent session, an open cell or a place in the recent list, by name. */
