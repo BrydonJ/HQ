@@ -785,6 +785,24 @@ body:not(.fade-buttons):not(.hover-buttons) .cell.wm-on .cell-head:hover > .icon
   white-space: pre-wrap; word-break: break-word; max-height: 200px; overflow: auto;
 }
 .prompt .preview.md { font-family: var(--font); font-size: 13px; max-height: 320px; }
+/*
+ * One scroll area per card, never three. A lone card is a column: its title, countdown and choices
+ * keep their size and stay in view, and the preview (a command, a diff, a plan) takes the room left
+ * under the prompts' cap and scrolls by itself. Long commands wrap instead of scrolling sideways.
+ */
+.prompt pre { overflow-wrap: anywhere; }
+.prompts:has(> .prompt:only-child) { display: flex; flex-direction: column; overflow: hidden; }
+.prompts > .prompt:only-child { display: flex; flex-direction: column; min-height: 0; }
+.prompts > .prompt:only-child > * { flex: none; }
+.prompts > .prompt:only-child > pre, .prompts > .prompt:only-child > .preview { flex: 0 1 auto; min-height: 3.5em; max-height: none; }
+/* Several cards share the prompts' own scroll, so each preview stays short. */
+.prompts > .prompt:not(:only-child) > pre, .prompts > .prompt:not(:only-child) > .preview { max-height: 7.5em; }
+.prompt-title { display: flex; align-items: flex-start; gap: 6px; }
+.prompt-title .pt-main { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.prompt-grow { flex: none; margin: -3px -4px 0 0; }
+/* Expanded: the card has the whole cell, the chat hides until it is answered or shrunk. */
+.cell.prompts-max:has(.prompts > .prompt) > .stage { display: none; }
+.cell.prompts-max:has(.prompts > .prompt) > .prompts { flex: 1 1 auto; max-height: none; }
 .choices { display: flex; flex-direction: column; gap: 4px; }
 .choice {
   display: flex; align-items: baseline; gap: 8px; text-align: left;

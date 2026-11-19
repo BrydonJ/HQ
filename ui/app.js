@@ -3279,8 +3279,16 @@ class Cell {
   permissionCard(requestId, req) {
     const input = req.input || {};
     const name = req.display_name || req.tool_name;
-    const title = h('div', { class: 'prompt-title' }, `Allow ${name}?`,
-      req.description ? h('span', { class: 'targ', text: '  ' + req.description }) : null);
+    // Expand gives the card the whole cell (the chat hides), for a long command in a small cell.
+    const grow = h('button', { class: 'icon-btn prompt-grow', title: 'Show it all: give this card the whole cell', 'aria-label': 'Expand' }, icon('screen-full'));
+    grow.addEventListener('click', () => {
+      const on = this.el.classList.toggle('prompts-max');
+      grow.replaceChildren(icon(on ? 'screen-normal' : 'screen-full'));
+      grow.title = on ? 'Show the chat again' : 'Show it all: give this card the whole cell';
+    });
+    this.el.classList.remove('prompts-max');
+    const title = h('div', { class: 'prompt-title' }, h('span', { class: 'pt-main' }, `Allow ${name}?`,
+      req.description ? h('span', { class: 'targ', text: '  ' + req.description }) : null), grow);
     let preview;
     if (req.tool_name === 'Edit' || req.tool_name === 'MultiEdit') {
       preview = h('div', { class: 'preview' }, h('div', { text: relPath(input.file_path, this.cwd) }), toolInputView(req.tool_name, input));
