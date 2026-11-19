@@ -295,15 +295,17 @@ function afkToolText(cell, req) {
 // and stays open. A deputy the user made themselves is never ended by AFK.
 
 /** Starts a deputy session for an AFK that asked for one, unless there already is a deputy. */
-function afkMakeDeputy(cell) {
+async function afkMakeDeputy(cell) {
   if (deputyCell() || app.settings.mcp === false || !availableBackends().includes('claude')) return;
-  // The session's own folder, else the one in focus or the first on the board.
-  const base = [cell, app.focused, ...app.cells].find(c => c && !c.missing && c.backend !== 'cloud' && c.cwd);
-  if (!base) return;
+  // An empty folder of HQ's own, not a project's: an approver must not load a project's CLAUDE.md, settings or hooks.
+  const cwd = await invoke('deputy_folder').catch(err => { console.warn('deputy folder', err); return null; });
+  // A deputy may have been picked, or the AFK ended, while the folder was made.
+  if (!cwd || deputyCell() || ![app.afk, ...app.cells.map(c => c.afk)].some(a => a && a.deputy)) return;
   // Never AFK: its own prompts and its idle turns are not for AFK to defer or nudge.
-  const made = addNewCell({ cwd: base.cwd, backend: 'claude', customTitle: 'Deputy', afk: false }, { background: true });
+  const made = addNewCell({ cwd, backend: 'claude', customTitle: 'Deputy', afk: false }, { background: true });
   setDeputy(made);
   app.afkDeputy = made.hqId;
+  saveState();
 }
 
 /** Ends the deputy an AFK made once no AFK that asked for one is left. Safe to run at any time. */

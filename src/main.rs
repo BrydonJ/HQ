@@ -278,6 +278,16 @@ fn folder_exists(path: String) -> bool {
     Path::new(&path).is_dir()
 }
 
+/// An empty folder of HQ's own for a deputy AFK starts: a deputy answers other sessions' prompts,
+/// so it must not pick up a project's CLAUDE.md, settings or hooks, which that project's files decide.
+#[tauri::command]
+fn deputy_folder(app: AppHandle) -> Result<String, String> {
+    let board = store::state_path(&app)?;
+    let dir = board.parent().ok_or("no state folder")?.join("deputy");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 fn load_state(app: AppHandle) -> Result<Option<String>, String> {
     store::load_state(&app)
@@ -979,6 +989,7 @@ fn main() {
             pick_workspace,
             find_workspaces,
             folder_exists,
+            deputy_folder,
             load_state,
             save_state,
             log_activity,

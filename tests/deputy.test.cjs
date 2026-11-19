@@ -45,6 +45,7 @@ function harness() {
     document: { getElementById: () => element('pill') },
     invoke: (name, args) => {
       if (name === 'request_attention') { attention.push(1); return Promise.resolve(); }
+      if (name === 'deputy_folder') return Promise.resolve('C:\\HQ\\deputy');
       return new Promise((resolve, reject) => invoked.push({ name, req: args.req, resolve, reject }));
     },
     // What afk.js needs to start a deputy session of its own (app.js has the real ones).
@@ -586,12 +587,12 @@ test('AFK defers a card by itself when no deputy covers it', async () => {
   assert.equal(cell.answers[0].response.behavior, 'deny');
 });
 
-test('the box starts a fresh Claude deputy in the session\'s folder, and its AFK ending ends it but leaves the session open', () => {
+test('the box starts a fresh Claude deputy in the session\'s folder, and its AFK ending ends it but leaves the session open', async () => {
   const t = harness(), cell = t.make({ hqId: 'swrkx', cwd: '/proj' });
-  t.run('setAfk')(cell, Infinity, true);
+  t.run('setAfk')(cell, Infinity, true); await flush(); // afkMakeDeputy waits for its folder
   const made = t.app.cells.find(c => c.hqId === 'snew1');
   assert.ok(made, 'a new session');
-  assert.equal(made.cwd, '/proj');
+  assert.equal(made.cwd, 'C:\\HQ\\deputy', "HQ's own empty folder, never a project's");
   assert.equal(made.backend, 'claude');
   assert.equal(made.afk, false, 'never AFK itself');
   assert.equal(t.app.deputy, 'snew1');
@@ -616,15 +617,17 @@ test('a deputy that already exists is kept, and AFK never ends it', () => {
   assert.equal(t.app.deputy, boss.hqId);
 });
 
-test('the deputy follows its AFK: kept while one that asked for it lasts, ended once none is left', () => {
+test('the deputy follows its AFK: kept while one that asked for it lasts, ended once none is left', async () => {
   const t = harness(), a = t.make({ hqId: 'swrkx' }), setAfk = t.run('setAfk');
   setAfk(null, Infinity, true); // all of HQ
+  await flush();
   assert.equal(t.app.deputy, 'snew1');
   setAfk(a, Infinity, false); // one session's own AFK, without the box, does not end HQ's
   assert.equal(t.app.deputy, 'snew1');
   setAfk(null, 0);
   assert.equal(t.app.deputy, null, 'only an AFK without the box is left');
   setAfk(null, Infinity, true);
+  await flush();
   assert.equal(t.app.deputy, 'snew2', 'a new AFK with the box starts one again');
   setAfk(null, Infinity, false); // changed to an AFK without it
   assert.equal(t.app.deputy, null);
@@ -644,9 +647,9 @@ test('a restart mid-AFK keeps the deputy; an AFK that ran out while HQ was close
   assert.ok(t.app.cells.includes(d));
 });
 
-test('a deputy the user picks instead is no longer the AFK\'s to end', () => {
+test('a deputy the user picks instead is no longer the AFK\'s to end', async () => {
   const t = harness(), a = t.make({ hqId: 'swrkx' }), mine = t.make({ hqId: 'smine' });
-  t.run('setAfk')(a, Infinity, true);
+  t.run('setAfk')(a, Infinity, true); await flush(); // afkMakeDeputy waits for its folder
   assert.equal(t.app.afkDeputy, 'snew1');
   t.run('setDeputy')(mine);
   assert.equal(t.app.afkDeputy, null);
