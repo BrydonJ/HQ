@@ -159,3 +159,26 @@ test('idle with no open task waits the short settle', () => {
   const { delay } = finished();
   assert.equal(delay(), 4000);
 });
+
+test('armed while idle with open tasks, the view shows at once and stays busy', () => {
+  const { cell, delay } = harness();
+  cell.tasks = [{ status: 'completed' }, { status: 'in_progress' }, { status: 'pending' }];
+  cell.setWaitingMode(true);
+  assert.equal(cell.wmView, true, 'no new turn needed');
+  assert.equal(cell.wmDone, false);
+  assert.equal(delay(), 300000, 'open tasks hold Done back for longer');
+});
+
+test('armed while idle with every task done, the chat stays', () => {
+  const { cell } = harness();
+  cell.tasks = [{ status: 'completed' }];
+  cell.setWaitingMode(true);
+  assert.equal(cell.wmView, false);
+});
+
+test('armed while idle with a background task, the view shows', () => {
+  const { cell } = harness();
+  cell.bgTasks = [{ id: 'b1' }];
+  cell.setWaitingMode(true);
+  assert.equal(cell.wmView, true);
+});

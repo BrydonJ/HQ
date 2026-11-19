@@ -484,7 +484,6 @@ class Cell {
     this.collapseBtn = el.querySelector('.act-collapse');
     this.ctxBtn = el.querySelector('.act-context');
     this.cacheEl = el.querySelector('.cache-age');
-    this.modeChip = el.querySelector('.act-mode');
     this.busyChip = el.querySelector('.act-busysend');
     this.missingBar = el.querySelector('.missing-bar');
     this.afkBtn = el.querySelector('.act-afk');
@@ -585,7 +584,6 @@ class Cell {
     this.ctxBtn.addEventListener('mouseleave', hideContextPop);
     this.ctxBtn.addEventListener('focus', () => showContextPop(this));
     this.ctxBtn.addEventListener('blur', hideContextPop);
-    this.modeChip.addEventListener('click', () => openMenu(this.modeChip, this, menuEl => buildSessionMenu(menuEl, this)));
     this.busyChip.addEventListener('click', () => this.setBusySend(this.busySendMode() === 'steer' ? 'queue' : 'steer'));
     // Right-click the header: this session's own permissions, Remote Control and approval reviews.
     head.addEventListener('contextmenu', e => {
@@ -1395,7 +1393,10 @@ class Cell {
   setWaitingMode(on) {
     if (this.wmArmed === on) return;
     this.wmArmed = on;
-    this.wmWorked = on && (this.status === 'running' || this.bgTasks.length > 0);
+    // Idle with open tasks counts as working too: the view shows at once instead of with the next turn.
+    this.wmWorked = on && (this.status === 'running' || this.bgTasks.length > 0 || this.hasOpenTasks());
+    // Armed by the user while idle with tasks open (after a restart, say, when no turn has ended yet): show the view now.
+    if (on && this.status === 'idle' && this.hasOpenTasks()) this.lastTurnOk = true;
     this.applyWaitingMode();
     this.syncWaiting();
   }
@@ -1423,7 +1424,7 @@ class Cell {
       if (this.status === 'running' || this.bgTasks.length > 0) {
         this.wmWorked = true;
         view = true;
-      } else if (this.wmWorked && this.lastTurnOk && this.status !== 'exited' && !this.limitHit && !this.limitResume) {
+      } else if ((this.wmWorked || this.hasOpenTasks()) && this.lastTurnOk && this.status !== 'exited' && !this.limitHit && !this.limitResume) {
         view = true;
         settling = true;
       }
@@ -2532,16 +2533,11 @@ class Cell {
   }
 
   /**
-   * The permission mode lives in Settings and the header's right-click menu; the composer shows it
-   * only when it is not the agent's usual one (plan, bypass…), so a session that skips prompts says so.
+   * The permission mode is changed from the header's "…" menu (or its right-click menu); the
+   * composer no longer shows it, since nearly every session runs in the same mode (NEW_SESSION_MODE).
    */
   renderMode() {
-    const opt = [...this.modeSel.options].find(o => o.value === this.permissionMode);
-    const usual = this.backend === 'cloud' || this.permissionMode === (this.backend === 'codex' ? CODEX_DEFAULT_MODE : 'default');
-    this.modeChip.classList.toggle('hidden', usual || !opt);
-    this.modeChip.classList.toggle('danger', this.permissionMode === 'bypassPermissions');
-    this.modeChip.querySelector('.label').textContent = opt ? opt.textContent : '';
-    this.modeChip.title = `Permissions: ${opt ? opt.textContent : this.permissionMode}. Click, or right-click the header, to change them for this session.`;
+    this.el.dataset.mode = this.permissionMode;
   }
 
   requestClose(btn) {
@@ -4670,10 +4666,18 @@ function placeCell(cell) {
   keepGroupsTogether();
 }
 
-/** Opens a new session with the permission mode, model and effort the user picked last. */
+/**
+ * The mode every new session starts in, whoever starts it: Claude's auto mode. Hermes has no auto
+ * mode (its modes only govern file edits), so it gets its nearest: edits in the folder go ahead and
+ * commands follow Hermes' own approval settings. A session's own mode is set from its "…" menu.
+ */
+const NEW_SESSION_MODE = { claude: 'auto', hermes: 'acceptEdits' };
+
+/** Opens a new session in NEW_SESSION_MODE, with the model and effort the user picked last. */
 function addNewCell(opts, flags) {
-  const { permissionMode = 'default', model = null, effort = null } = opts.backend === 'hermes' ? hermes.defaults : opts.backend === 'codex' ? codexDefaults() : opts.backend === 'cloud' ? {} : app.defaults;
-  return addCell({ permissionMode, model, effort, ...opts }, flags);
+  const backend = opts.backend || 'claude';
+  const { permissionMode = 'default', model = null, effort = null } = backend === 'hermes' ? hermes.defaults : backend === 'codex' ? codexDefaults() : backend === 'cloud' ? {} : app.defaults;
+  return addCell({ permissionMode: NEW_SESSION_MODE[backend] || permissionMode, model, effort, ...opts }, flags);
 }
 
 /** Remembers a permission mode, model or effort picked in a cell, as the default for new sessions. */
@@ -6083,7 +6087,9 @@ const CUSTOM_COLORS = [['--accent', 'Accent'], ['--link', 'Links'], ['--claude',
 // The cell header's buttons that can be hidden: [class, label].
 const HEAD_BUTTONS = [['act-afk', 'AFK'], ['act-handoff', 'Handoff'], ['act-detail', 'Detail level'], ['act-progress', 'Progress'], ['act-waiting', 'Waiting mode'], ['act-code', 'VS Code'],
   ['act-terminal', 'Terminal'], ['act-reveal', FILE_MANAGER], ['act-group', 'Group'], ['act-spot', 'Spotlight'], ['act-orch', 'Orchestrator column'], ['act-collapse', 'Collapse'], ['act-max', 'Maximize'], ['act-close', 'Close']];
-const DEFAULT_PINNED = ['act-waiting', 'act-progress', 'act-spot', 'act-orch', 'act-collapse', 'act-close'];
+const DEFAULT_PINNED = ['act-detail', 'act-waiting', 'act-progress', 'act-spot', 'act-orch', 'act-collapse', 'act-close'];
+// Pinned once on boards saved before they were pinned by default; unpinning one afterwards sticks.
+const ALWAYS_PINNED_ONCE = ['act-detail', 'act-waiting'];
 /** Buttons a collapsed cell hides (style.css, .cell.collapsed); its "…" menu leaves them out too. */
 const COLLAPSED_HIDES = ['act-detail', 'act-handoff', 'act-progress', 'act-waiting', 'act-code', 'act-reveal', 'act-spot', 'act-orch', 'act-max'];
 /** The header's window buttons: "…" sits just before the first of them. */
@@ -6122,11 +6128,14 @@ function sanitizeSettings(x) {
     // How the header buttons show: always, fading in as the pointer nears, or only while the header is hovered.
     buttonReveal: ['always', 'near', 'hover'].includes(v.buttonReveal) ? v.buttonReveal : v.fadeButtons === true ? 'near' : 'always',
     // The buttons shown in the header; the rest live in its "…" menu.
-    pinnedButtons: HEAD_BUTTONS.map(([b]) => b).filter(b => (Array.isArray(v.pinnedButtons) ? v.pinnedButtons : DEFAULT_PINNED).includes(b)),
+    pinnedButtons: HEAD_BUTTONS.map(([b]) => b).filter(b => (Array.isArray(v.pinnedButtons) ? v.pinnedButtons : DEFAULT_PINNED).includes(b)
+      || (v.pinsMigrated !== true && ALWAYS_PINNED_ONCE.includes(b))),
+    pinsMigrated: true,
     // The header buttons' order, dragged into place in any cell and shared by all; unknown names dropped, new buttons appended.
     buttonOrder: [...new Set([...(Array.isArray(v.buttonOrder) ? v.buttonOrder : []), ...HEAD_BUTTONS.map(([b]) => b)])]
       .filter(b => HEAD_BUTTONS.some(([k]) => k === b)),
     colors,
+    autoModes: v.autoModes === true, // open sessions were moved to NEW_SESSION_MODE once (restore)
     mcp: v.mcp !== false, // HQ's MCP server for new sessions (mcp.js)
     mcpSpawn: v.mcpSpawn !== false, // agents may start sessions
     mcpExternal: v.mcpExternal === true, // installed machine-wide: agents outside HQ may call the tools too
@@ -6271,36 +6280,22 @@ function buildMoreMenu(menuEl, cell) {
   });
   menuEl.append(h('div', { class: 'menu-title', text: 'More' }),
     ...(items.length ? items : [h('div', { class: 'menu-empty', text: 'Every button is pinned to the header.' })]));
+  // Nearly every session runs in NEW_SESSION_MODE; this is where one is set apart.
+  if (cell.backend !== 'cloud') menuEl.append(h('div', { class: 'menu-title', text: 'Permissions' }), ...permissionItems(cell, menuCheck));
   menuEl.append(h('div', { class: 'menu-title', text: 'This session' }),
     h('button', { class: 'menu-item', onclick: () => openMenu(cell.titleEl, cell, m => buildSessionMenu(m, cell)) },
       icon('settings-gear'), h('span', { class: 'menu-main' }, h('span', { class: 'name', text: 'Session settings…' }),
-        h('span', { class: 'desc', text: 'Permissions, Remote Control, approval reviews (or right-click the header)' }))));
-}
-
-/** The permission modes Settings offers: Claude's (the composer template's list). */
-function claudeModes() {
-  return [...$('#cell-template').content.querySelectorAll('select.mode option')].map(o => [o.value, o.textContent]);
-}
-
-/** Whether Settings' global choices reach this session: one an agent or a command line started keeps what it was started with. */
-function followsGlobal(cell) {
-  return cell.backend === 'claude' && !cell.spawnedBy && !cell.launched;
-}
-
-/** Whether a session is in Settings' permission mode and not set on its own (the session menu's Follow Settings). */
-function followsGlobalMode(cell) {
-  return followsGlobal(cell) && !cell.modeOwn && cell.permissionMode === (app.defaults.permissionMode || 'default');
+        h('span', { class: 'desc', text: 'Remote Control and more (or right-click the header)' }))));
 }
 
 /**
- * Settings > Permissions: the default for new Claude sessions, and the mode of every open one
- * that follows it. One in another mode (set before this setting, or switched by Claude, as plan
- * mode is) keeps its mode.
+ * The session's permission modes as menu items, the current one checked; the new-session mode says so.
+ * In the header's "…" menu and its right-click menu. `check` builds one item (buildSessionMenu's).
  */
-function setGlobalMode(mode) {
-  const following = app.cells.filter(followsGlobalMode);
-  rememberChoice({ permissionMode: mode });
-  for (const c of following) if (c.permissionMode !== mode) c.setMode(mode);
+function permissionItems(cell, check) {
+  const usual = NEW_SESSION_MODE[cell.backend];
+  return [...cell.modeSel.options].map(o => check(cell.permissionMode === o.value, o.textContent, o.value === usual ? 'Every new session' : '',
+    () => { cell.modeOwn = o.value !== usual; cell.setMode(o.value); }));
 }
 
 /** Settings > Remote Control: new Claude sessions, and every open one not set on its own. */
@@ -6319,21 +6314,17 @@ function setGlobalRemote(on) {
  * The header's right-click menu: what this one session does differently from Settings. Its
  * permission mode, Remote Control, and whether approvals go to the reviewer.
  */
-function buildSessionMenu(menuEl, cell) {
-  const check = (on, name, desc, run, title) => h('button', { class: `menu-item${on ? ' checked' : ''}`, title: title || '', onclick: () => { closeMenu(); run(); } },
+/** A menu item with a tick when `on`; picking it closes the menu and runs `run`. */
+function menuCheck(on, name, desc, run, title) {
+  return h('button', { class: `menu-item${on ? ' checked' : ''}`, title: title || '', onclick: () => { closeMenu(); run(); } },
     icon(on ? 'check' : 'blank'), h('span', { class: 'menu-main' }, h('span', { class: 'name', text: name }), desc ? h('span', { class: 'desc', text: desc }) : null));
+}
+
+function buildSessionMenu(menuEl, cell) {
+  const check = menuCheck;
   menuEl.append(h('div', { class: 'menu-title', text: cell.displayTitle() || 'This session' }));
   if (cell.backend !== 'cloud') {
-    menuEl.append(h('div', { class: 'menu-title', text: 'Permissions' }));
-    const global = app.defaults.permissionMode || 'default';
-    const follows = followsGlobalMode(cell);
-    if (followsGlobal(cell)) {
-      const label = (claudeModes().find(([v]) => v === global) || [global, global])[1];
-      menuEl.append(check(follows, 'Follow Settings', label, () => { cell.modeOwn = false; cell.setMode(global); }));
-    }
-    for (const o of cell.modeSel.options) {
-      menuEl.append(check(!follows && cell.permissionMode === o.value, o.textContent, '', () => { cell.modeOwn = true; cell.setMode(o.value); }));
-    }
+    menuEl.append(h('div', { class: 'menu-title', text: 'Permissions' }), ...permissionItems(cell, check));
   }
   if (cell.remoteOffered()) {
     menuEl.append(h('div', { class: 'menu-title', text: 'Remote Control' }));
@@ -6489,8 +6480,6 @@ function renderSettings() {
     IS_MAC && app.settings.notify ? row('Keep buttons on screen', 'Set HQ\'s notification style to Alerts: a banner hides Approve and Deny until you hover over it, then slides away.',
       h('button', { class: 'btn', text: 'Open Settings…', onclick: () => invoke('open_notification_settings').catch(err => console.warn('notification settings', err)) })) : null,
     row('Sound for questions and approvals', 'A chime when a session asks you something or wants approval.', toggle(app.settings.sound, v => changeSetting('sound', v))),
-    row('Permissions', 'For Claude sessions: new ones, and every open one not set on its own. Right-click a session\'s header to give it its own. Sessions an agent or a command line started keep the mode they were started with.',
-      select(app.defaults.permissionMode || 'default', claudeModes(), v => setGlobalMode(v))),
     app.remoteAvailable !== false ? row('Remote Control', 'Continue Claude sessions from claude.ai/code or the Claude app. Applies to every session not set on its own; right-click a session\'s header to turn it off there.', toggle(!!app.remoteDefault, v => setGlobalRemote(v))) : null,
     row('Review approvals in every session', 'Each permission prompt in a Claude or Hermes session goes straight to a separate Claude call, with no minute\'s wait. It approves harmless ones once or leaves them for you; it never refuses. Right-click a session\'s header to leave it out. Sessions an agent or a command line started are left out unless turned on there.',
       toggle(app.settings.reviewAll, v => { changeSetting('reviewAll', v); syncAfk(); })),
@@ -7191,14 +7180,20 @@ async function restore() {
   // Sessions a session host kept running while HQ was closed (an update), or while this page reloaded.
   const hosted = await invoke('host_sessions').catch(err => { console.warn('host sessions', err); return []; });
   const claimed = new Set();
+  const modesBefore = !app.settings.autoModes; // a board saved before every session started in NEW_SESSION_MODE
   saved.forEach((c, i) => {
     // Version 1 saved the model Claude reported, not one the user picked; drop it so the cell follows the default.
     if ((state.version || 1) < 2) c.model = null;
     const backend = c.backend || 'claude';
     const h = hosted.find(x => x.cellKey && x.cellKey === c.hqId && x.backend === backend && !claimed.has(x.id));
     if (h) claimed.add(h.id);
+    // Once: an open session in the old default modes moves to NEW_SESSION_MODE. Not one set on its own, one an
+    // agent or a command line started (it keeps what it was started with), nor one a session host kept running.
+    if (modesBefore && NEW_SESSION_MODE[backend] && !c.modeOwn && !c.spawnedBy && !c.launched && !h
+      && ['default', 'acceptEdits'].includes(c.permissionMode || 'default')) c.permissionMode = NEW_SESSION_MODE[backend];
     addCell({ ...c, missing: c.backend === 'cloud' ? false : !exists[i], remote: c.remote === true, hosted: h ? { id: h.id, fromMs: h.replayFromMs || h.startedMs } : null }, { restore: true, batch: true });
   });
+  app.settings.autoModes = true;
   // No cell claims these (closed just before HQ went, say): nothing could reach them.
   for (const h of hosted) if (!claimed.has(h.id)) invoke('kill_session', { id: h.id }).catch(() => {});
   // Each restored cell took focus in turn; a collapsed one must not keep it.
@@ -7243,9 +7238,8 @@ async function openLaunch(r) {
   if (r.model) opts.model = r.model;
   if (r.effort) opts.effort = r.effort;
   // Never bypassPermissions from a command line: whoever runs hq.exe must not skip the prompts.
-  // Nor through Settings > Permissions: a plain launch (Explorer's Open in HQ) takes the global mode only when it is not bypass.
-  const global = app.defaults.permissionMode || 'default';
-  opts.permissionMode = LAUNCH_MODES.includes(r.permissionMode) ? r.permissionMode : LAUNCH_MODES.includes(global) ? global : 'default';
+  // A plain launch (Explorer's Open in HQ) starts in NEW_SESSION_MODE, as any new session does.
+  opts.permissionMode = LAUNCH_MODES.includes(r.permissionMode) ? r.permissionMode : NEW_SESSION_MODE.claude;
   const cell = addNewCell(opts);
   if (r.prompt) {
     cell.launchPrompt = r.prompt.trim(); // as submit() reads the composer

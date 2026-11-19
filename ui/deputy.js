@@ -21,9 +21,12 @@
 // A prompt the deputy left, or that timed out, stays with the user, across restarts too (deputyLeftIds).
 
 const DEPUTY_PREFIX = '(HQ: deputy';
-const DEPUTY_INPUT_MAX = 4000;
-const DEPUTY_PLAN_MAX = 8000;
-const DEPUTY_LAST_MAX = 1500;
+// What the deputy is shown of a prompt. Past these it may only deny or leave it, so they are set well above
+// any real command, edit or plan (a deputy that only saw the start of one could not judge it): a cut here
+// used to stop it from reviewing ordinary long edits and scripts.
+const DEPUTY_INPUT_MAX = 60000;
+const DEPUTY_PLAN_MAX = 100000;
+const DEPUTY_LAST_MAX = 4000;
 // What a session is told when the deputy refuses: fixed, so a refusal carries no instructions.
 const DEPUTY_DENY_TEXT = 'The user\'s deputy declined this while the user is away. Don\'t look for another way to do the same thing: note it as pending for the user and carry on with work that doesn\'t depend on it.';
 const DEPUTY_ANYONE = '*';           // in lineage or drivenBy: too many sessions to list, so every one

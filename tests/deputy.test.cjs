@@ -454,13 +454,24 @@ test('the session must match the prompt id', async () => {
 
 test('an input too long to show in full cannot be allowed, only denied or left', async () => {
   const { t, boss, cell, call, promptId } = setup();
-  const c = t.card(cell, 'r1', 'permission', { tool_name: 'Bash', input: { command: '#' + 'x'.repeat(5000) + '\ngit push --force' } });
+  const c = t.card(cell, 'r1', 'permission', { tool_name: 'Bash', input: { command: '#' + 'x'.repeat(70000) + '\ngit push --force' } });
   t.arm(cell, 'r1', c);
   await t.tick(GRACE);
   assert.match(t.sent[0].text, /Only part of what this would do can be shown/);
   await assert.rejects(async () => call(boss, 'answer_prompt', { prompt: promptId(), decision: 'allow' }), /cannot allow/);
   await call(boss, 'answer_prompt', { prompt: promptId(), decision: 'leave' });
   assert.equal(cell.answers.length, 0);
+});
+
+test('a long input (a big edit or script) is shown in full and can be allowed', async () => {
+  const { t, boss, cell, call, promptId } = setup();
+  const command = '#' + 'x'.repeat(20000) + '\nnpm test';
+  t.arm(cell, 'r1', t.card(cell, 'r1', 'permission', { tool_name: 'Bash', input: { command } }));
+  await t.tick(GRACE);
+  assert.doesNotMatch(t.sent[0].text, /Only part of what this would do|more characters cut/);
+  assert.match(t.sent[0].text, /npm test/);
+  await call(boss, 'answer_prompt', { prompt: promptId(), decision: 'allow' });
+  assert.equal(cell.answers.length, 1);
 });
 
 test('a Hermes permission its own check cannot vouch for, and a plan from an agent-started session, stay with the user', async () => {
