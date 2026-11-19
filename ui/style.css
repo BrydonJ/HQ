@@ -521,7 +521,7 @@ body:not(.fade-buttons):not(.hover-buttons) .cell.wm-on .cell-head:hover > .icon
   display: none; max-width: 100%; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: 14px; letter-spacing: 0.01em; color: color-mix(in srgb, var(--claude) 80%, var(--fg-strong));
 }
-.cell.state-running .wv-busy, .cell.state-bg .wv-busy { display: block; }
+.cell.wm-busy .wv-busy { display: block; }
 .cell.wrapping-up .wv-busy { color: var(--waiting); }
 /* Finished, and nothing is happening any more: the project's colour gives way to green and a tick replaces the loader. */
 .cell.wm-done .waiting-view, .cell.wm-done .cell-head { --proj: var(--done); }
@@ -593,7 +593,7 @@ body:not(.fade-buttons):not(.hover-buttons) .cell.wm-on .cell-head:hover > .icon
  * Still when nothing is running (the few seconds before waiting mode lets go), and when nobody is
  * looking. !important because the loaders' own animation shorthands would reset the play state.
  */
-.cell.wm-on:not(.state-running):not(.state-bg) .wv-loader svg * { animation: none !important; }
+.cell.wm-on:not(.wm-busy) .wv-loader svg * { animation: none !important; }
 .doc-hidden .wv-loader svg * { animation-play-state: paused !important; }
 .item { position: relative; padding-left: 16px; margin: 0 0 10px 0; }
 .item::before {
@@ -845,6 +845,8 @@ body:not(.fade-buttons):not(.hover-buttons) .cell.wm-on .cell-head:hover > .icon
   background: var(--bg); border-radius: 10px;
 }
 .cell.state-running .busy { display: flex; }
+/* The waiting-mode offer sits in that gap and already says it is still working, so the line gives way to it. */
+.cell:has(.wait-nudge) .composer .busy { display: none; }
 /* Room under the last message for the line above, so it never covers the chat. */
 .cell.state-running .messages { padding-bottom: 30px; }
 .busy-glyph { display: inline-grid; flex: none; width: 12px; justify-items: center; color: var(--claude); font-size: 13px; }

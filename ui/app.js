@@ -1238,6 +1238,8 @@ class Cell {
 
   /** Redraws at most once per frame: every stream event and task update calls this. */
   renderProgress() {
+    // The waiting view counts idle-with-open-tasks as working (syncWaiting), so the CSS cannot tell busy from state-running alone: animate the loader and show the busy word on this.
+    this.el.classList.toggle('wm-busy', this.wmView && !this.wmDone && (this.status === 'running' || this.bgTasks.length > 0 || this.hasOpenTasks()));
     if (this.replaying || this.progressFrame) return; // loadHistory draws it once the transcript is in
     this.progressFrame = requestAnimationFrame(() => {
       this.progressFrame = 0;
