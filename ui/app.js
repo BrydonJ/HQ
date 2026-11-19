@@ -29,7 +29,8 @@ const app = {
   settings: null,      // the Settings screen; see sanitizeSettings for the keys
   apiKeyHint: null,    // "sk-ant-…abcd" while an API key is saved (the key itself stays in the backend)
   planLimitedUntil: 0, // when the plan's usage comes back (ms), from a plan session's refused request
-  afk: null,           // AFK for every session (afk.js): { until (ms, or null for no set time), since }
+  afk: null,           // AFK for every session (afk.js): { until (ms, or null for no set time), since, deputy }
+  afkDeputy: null,     // the deputy session an AFK's "Make a deputy" started (afk.js), else null: the user's own deputy is never ended by AFK
   sidebarOpen: false,
   query: '',
 };
@@ -292,7 +293,7 @@ function logActivity(cell, state) {
 class Cell {
   constructor({ cwd, sessionId = null, permissionMode = 'default', model = null, effort = null, title = '', aiTitle = false,
     customTitle = null, renamePending = false, detail, clean, progress = false, fork = false, collapsed = false,
-    missing = false, remote = null, bridgeSessionId = null, draft = '', backend = 'claude', resumeAfterUpdate = false, resumeQueued = null, api = false, apiKey = false, afk = null, afkLog = null, review = false, reviewOff = false, launched = false, modeOwn = false, remoteOwn = false, busySend = null,
+    missing = false, remote = null, bridgeSessionId = null, draft = '', backend = 'claude', resumeAfterUpdate = false, resumeQueued = null, api = false, apiKey = false, afk = null, afkLog = null, launched = false, modeOwn = false, remoteOwn = false, busySend = null,
     hqId = null, spawnedBy = null, lineage = null, drivenBy = null, deputyLeftIds = null, colorCwd = null, depth = 0, hosted = null, spot = false, orch = false, group = null, flexW = 1, flexH = 1 }) {
     this.cwd = cwd;
     // A session a session host kept running while HQ restarted: { id, startedMs }. reattach() connects to it.
@@ -411,10 +412,8 @@ class Cell {
     this.limitAutoContinue = true; // only this open chat; uncheck on its usage error to keep it stopped
     this.afk = sanitizeCellAfk(afk); // AFK for this session (afk.js): null follows HQ, false never, else { until, since }
     this.afkLog = sanitizeAfkLog(afkLog); // what HQ did while the user was away, listed once they are back
-    this.review = review === true; // the approval reviewer (afk.js); set from the UI only
-    this.reviewOff = reviewOff === true && !this.review; // left out of Settings > Review approvals in every session
     this.launched = launched === true; // opened by a command line, which may be an agent's
-    this.lastUserText = '';        // what the user last typed here: tells the reviewer what the work is for
+    this.lastUserText = '';        // what the user last typed here: tells the deputy what the work is for
     this.afkOn = false;        // AFK is in force here now (syncAfk)
     this.cost = { usd: 0, tokens: 0, procUsd: 0, procTokens: 0, apiUsd: 0 }; // this HQ run's spend; proc* = last total of the current process; apiUsd = on HQ's API key
     this.apiMode = !!api && this.backend === 'claude'; // the user switched this session to HQ's API key until the plan's usage is back
@@ -585,7 +584,7 @@ class Cell {
     this.ctxBtn.addEventListener('focus', () => showContextPop(this));
     this.ctxBtn.addEventListener('blur', hideContextPop);
     this.busyChip.addEventListener('click', () => this.setBusySend(this.busySendMode() === 'steer' ? 'queue' : 'steer'));
-    // Right-click the header: this session's own permissions, Remote Control and approval reviews.
+    // Right-click the header: this session's own permissions and Remote Control.
     head.addEventListener('contextmenu', e => {
       if (e.defaultPrevented || e.target.closest('.cell-rename')) return; // the VS Code button has its own menu
       e.preventDefault();
@@ -3206,7 +3205,6 @@ class Cell {
     const card = this.pending.get(requestId);
     if (card) {
       afkUnwatch(card);
-      reviewUnwatch(card);
       deputyUnwatch(card);
       card.remove();
     }
@@ -6142,7 +6140,6 @@ function sanitizeSettings(x) {
     // The most sessions started by agents that are open at once.
     // How sessions an agent starts open: 'full' like any other, 'small' (half the width, smaller text) or 'dock' (collapsed,
     // into the starter's tray while the starter is open, else the dock).
-    reviewAll: v.reviewAll === true, // the approval reviewer in every session, at once (afk.js reviewOn); set from the UI only
     childCells: ['full', 'small', 'dock'].includes(v.childCells) ? v.childCells : 'dock',
     mcpMaxSpawned: Number.isInteger(v.mcpMaxSpawned) && v.mcpMaxSpawned >= 0 && v.mcpMaxSpawned <= MCP_MAX_SPAWNED_CAP ? v.mcpMaxSpawned : MCP_DEFAULT_MAX_SPAWNED,
   };
@@ -6312,7 +6309,7 @@ function setGlobalRemote(on) {
 
 /**
  * The header's right-click menu: what this one session does differently from Settings. Its
- * permission mode, Remote Control, and whether approvals go to the reviewer.
+ * permission mode, Remote Control.
  */
 /** A menu item with a tick when `on`; picking it closes the menu and runs `run`. */
 function menuCheck(on, name, desc, run, title) {
@@ -6329,14 +6326,6 @@ function buildSessionMenu(menuEl, cell) {
   if (cell.remoteOffered()) {
     menuEl.append(h('div', { class: 'menu-title', text: 'Remote Control' }));
     cell.buildRemoteMenu(menuEl);
-  }
-  if (reviewBackend(cell)) {
-    const on = cell.review || reviewAllCovers(cell);
-    menuEl.append(h('div', { class: 'menu-title', text: 'Approvals' }),
-      check(on, 'Review approvals', cell.review ? 'Set here' : reviewAllCovers(cell) ? 'From Settings, at once' : 'Harmless ones go ahead after a minute', () => {
-        cell.reviewOff = on && app.settings.reviewAll; // off here even while Settings reviews every session
-        setCellReview(cell, !on);
-      }, 'A permission prompt goes to a separate Claude call. It can approve it once or leave it for you; it never refuses.'));
   }
   if (cell.backend === 'claude' || cell.backend === 'codex') {
     const on = !!app.deputy && app.deputy === cell.hqId;
@@ -6481,8 +6470,6 @@ function renderSettings() {
       h('button', { class: 'btn', text: 'Open Settings…', onclick: () => invoke('open_notification_settings').catch(err => console.warn('notification settings', err)) })) : null,
     row('Sound for questions and approvals', 'A chime when a session asks you something or wants approval.', toggle(app.settings.sound, v => changeSetting('sound', v))),
     app.remoteAvailable !== false ? row('Remote Control', 'Continue Claude sessions from claude.ai/code or the Claude app. Applies to every session not set on its own; right-click a session\'s header to turn it off there.', toggle(!!app.remoteDefault, v => setGlobalRemote(v))) : null,
-    row('Review approvals in every session', 'Each permission prompt in a Claude or Hermes session goes straight to a separate Claude call, with no minute\'s wait. It approves harmless ones once or leaves them for you; it never refuses. Right-click a session\'s header to leave it out. Sessions an agent or a command line started are left out unless turned on there.',
-      toggle(app.settings.reviewAll, v => { changeSetting('reviewAll', v); syncAfk(); })),
     row('Default model for new sessions', 'The same as picking a model in a session. HQ_MODEL still applies when none is picked.',
       select(app.defaults.model || 'default', models, v => rememberChoice({ model: v }))),
     row('Automatic task lists', 'Ask Claude and Hermes to keep a task list on multi-step work. Off saves a few tokens per long job.', toggle(app.settings.autoTasks, v => changeSetting('autoTasks', v))),
@@ -6494,7 +6481,7 @@ function renderSettings() {
     app.settings.mcp && app.settings.mcpSpawn ? row('Sessions agents can open', 'The most sessions started by agents that can be open at once. Closing one makes room.', mcpMax) : null,
     app.settings.mcp ? row('HQ tools everywhere', 'Adds HQ\'s tools to every Claude Code, Codex and Hermes on this computer, so agents started in a terminal or an editor can see and start HQ sessions too while HQ is open. Agents pick it up the next time they start.', mcpInstallControl()) : null,
     row('API key for API credits', "A session that hits your plan's usage limit can carry on with this Claude Console key, from its limit card, until the plan's usage is back. A new Claude session can also run on it from its first message: click the key button next to its MCP button before sending. Max and Team plans' monthly API credits pay only for a key from the Console organization linked in claude.ai's billing settings; any other key is billed as usual. Kept in the system keychain (Credential Manager on Windows, Keychain on macOS), never in the board.", apiKeyControl()),
-    explorerMenu.on != null ? row('Open in HQ in Explorer', 'Adds "Open in HQ" to Explorer\'s right-click menu on folders: it opens a new session there. Like any session a command line opens, AFK and the approval reviewer leave it alone until you turn them on in it.',
+    explorerMenu.on != null ? row('Open in HQ in Explorer', 'Adds "Open in HQ" to Explorer\'s right-click menu on folders: it opens a new session there. Like any session a command line opens, AFK leaves it alone until you turn it on in it, and the deputy never answers for it.',
       toggle(explorerMenu.on, v => setExplorerMenu(v))) : null,
     row('Check for HQ updates automatically', 'The Check for updates button in the sessions list always works.', toggle(app.settings.autoUpdate, v => changeSetting('autoUpdate', v))),
     row('Claude command', 'Path to the claude program, for sessions started from now on. Empty uses HQ_CLAUDE, else claude on PATH.', path),
@@ -6956,8 +6943,6 @@ function flushState() {
       apiKey: c.apiKeyed || undefined,
       afk: c.afk ?? undefined,
       afkLog: c.afkLog.length ? c.afkLog : undefined,
-      review: c.review || undefined,
-      reviewOff: c.reviewOff || undefined,
       modeOwn: c.modeOwn || undefined,
       remoteOwn: c.remoteOwn || undefined,
       busySend: c.busySend || undefined,
@@ -6988,6 +6973,7 @@ function flushState() {
     planLimitedUntil: app.planLimitedUntil > Date.now() ? app.planLimitedUntil : undefined,
     afk: app.afk || undefined,
     deputy: app.deputy || undefined,
+    afkDeputy: app.afkDeputy || undefined,
     deputyRules: app.deputyRules && (app.deputyRules.all || app.deputyRules.projects.length) ? app.deputyRules : undefined,
     deputyLog: app.deputyLog && app.deputyLog.length ? app.deputyLog : undefined,
     mcp: mcpSaved(),
@@ -7155,6 +7141,7 @@ async function restore() {
   app.planLimitedUntil = state && Number.isFinite(state.planLimitedUntil) ? state.planLimitedUntil : 0;
   app.afk = sanitizeAfk(state && state.afk);
   app.deputy = state && typeof state.deputy === 'string' ? state.deputy : null;
+  app.afkDeputy = state && typeof state.afkDeputy === 'string' && state.afkDeputy === app.deputy ? state.afkDeputy : null;
   app.deputyRules = sanitizeDeputyRules(state && state.deputyRules);
   app.deputyLog = sanitizeDeputyLog(state && state.deputyLog);
   app.apiKeyHint = await invoke('api_key_hint').catch(() => null);

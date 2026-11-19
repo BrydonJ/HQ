@@ -1,5 +1,5 @@
 // Deputy mode (ui/deputy.js): one session answers the prompts that wait in the others. Runs the real
-// afk.js and deputy.js with the real prompt methods from app.js, as review.test.cjs does.
+// afk.js and deputy.js with the real prompt methods from app.js, and a clock the tests move by hand.
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -28,8 +28,9 @@ function harness() {
   let now = 1_000_000, nextId = 1;
   const timers = new Map();
   class Clock extends Date { static now() { return now; } }
-  const reviews = [], attention = [], sent = [];
-  const app = { cells: [], afk: null };
+  const invoked = [], attention = [], sent = [];
+  const app = { cells: [], afk: null, deputy: null, afkDeputy: null, settings: {} };
+  let nextCell = 1;
   const set = (fn, ms, repeat) => { timers.set(nextId, { fn, at: now + ms, repeat: repeat ? ms : 0 }); return nextId++; };
   const h = (tag, attrs, ...kids) => {
     const el = element(attrs && attrs.class);
@@ -44,8 +45,10 @@ function harness() {
     document: { getElementById: () => element('pill') },
     invoke: (name, args) => {
       if (name === 'request_attention') { attention.push(1); return Promise.resolve(); }
-      return new Promise((resolve, reject) => reviews.push({ name, req: args.req, resolve, reject }));
+      return new Promise((resolve, reject) => invoked.push({ name, req: args.req, resolve, reject }));
     },
+    // What afk.js needs to start a deputy session of its own (app.js has the real ones).
+    addNewCell: opts => make({ hqId: `snew${nextCell++}`, ...opts }), availableBackends: () => ['claude'],
     saveState() {}, closeMenu() {}, notifyWaiting() {}, firstLine: s => String(s).split('\n')[0], relPath: p => p,
     openMenu() {}, afkPillStub: null, MCP_TOOLS: {}, McpError, fail: m => { throw new McpError(m); }, sent, mcpSend: (cell, text) => sent.push({ to: cell.hqId, text }), mcpName: c => c.hqId,
     // The real mcpString and mcpOwns from mcp.js.
@@ -60,7 +63,7 @@ ${deputySource}\nclass CardCell { ${methods}
   }`, context);
   const make = (options = {}) => {
     const cell = vm.runInContext('new CardCell()', context);
-    Object.assign(cell, { backend: 'claude', cwd: '/repo', proc: 1, pending: new Map(), answers: [], notices: [], afk: null, afkOn: false, afkLog: [], review: false, status: 'idle',
+    Object.assign(cell, { backend: 'claude', cwd: '/repo', proc: 1, pending: new Map(), answers: [], notices: [], afk: null, afkOn: false, afkLog: [], status: 'idle',
       lastUserText: 'run the tests', agent: 'Claude', bgTasks: [], renderAfk() {}, append() {}, markUnread() {}, refreshState() {}, submit: async () => {}, notice(t) { this.notices.push(t); }, ...options });
     app.cells.push(cell);
     return cell;
@@ -87,7 +90,7 @@ ${deputySource}\nclass CardCell { ${methods}
     await flush();
   };
   const run = name => vm.runInContext(name, context);
-  return { sent, app, make, card, arm, tick, reviews, attention, context, run, get now() { return now; } };
+  return { sent, app, make, card, arm, tick, invoked, attention, context, run, get now() { return now; } };
 }
 
 
@@ -190,18 +193,6 @@ test('a prompt the user answers first is dropped from the deputy', async () => {
   assert.equal(call(boss, 'list_prompts', {}).prompts.length, 0);
 });
 
-test('with the reviewer on, it goes first and the deputy gets only what it escalates', async () => {
-  const { t, cell } = setup({ review: true }), c = t.card(cell);
-  t.arm(cell, 'r1', c);
-  await t.tick(GRACE);
-  assert.equal(t.reviews.length, 1);
-  assert.equal(t.sent.length, 0);
-  t.reviews[0].resolve({ approve: false, reason: 'not sure' });
-  await t.tick(1);
-  await t.tick(1); // the escalation sets the deputy's (already due) timer during the first tick's flush
-  assert.equal(t.sent.length, 1);
-});
-
 test('a forwarded prompt the deputy does not answer goes back after 3 minutes, to AFK if on', async () => {
   const { t, boss, cell, call, promptId } = setup({ afkOn: true });
   t.app.afk = { until: null, since: 0 };
@@ -228,17 +219,6 @@ test('no run of backticks in the prompt can close its fence, and the title stays
   const body = t.sent[0].text;
   const fences = body.match(/```/g) || [];
   assert.equal(fences.length, 4, body); // the title and folder, and the tool input
-});
-
-test('turning the reviewer on mid-countdown takes the card off the deputy; one answerer at a time', async () => {
-  const { t, cell } = setup(), c = t.card(cell);
-  t.arm(cell, 'r1', c);
-  await t.tick(10_000);
-  cell.review = true;
-  t.run('reviewSync')(cell);
-  await t.tick(GRACE);
-  assert.equal(t.reviews.length, 1);
-  assert.equal(t.sent.length, 0);
 });
 
 test('list_prompts gives the deputy the fenced details; bad answers are refused', async () => {
@@ -591,4 +571,117 @@ test('every decision is logged with the session it was for, and told in the depu
   // What is saved comes back the same, and junk is dropped.
   const saved = t.run('sanitizeDeputyLog')(JSON.parse(JSON.stringify([...log, { at: 'x' }, { at: 1, decision: 'nope' }])));
   assert.deepEqual(JSON.parse(JSON.stringify(saved)), JSON.parse(JSON.stringify(log)));
+});
+
+// ---------- the AFK menu's "Make a deputy" box (afk.js) ----------
+
+const AWAY = { until: null, since: 0 };
+
+test('AFK defers a card by itself when no deputy covers it', async () => {
+  const t = harness(), cell = t.make({ afkOn: true }), c = t.card(cell);
+  t.app.afk = { ...AWAY };
+  t.arm(cell, 'r1', c);
+  assert.match(text(c), /AFK: Deferring in/);
+  await t.tick(GRACE);
+  assert.equal(cell.answers[0].response.behavior, 'deny');
+});
+
+test('the box starts a fresh Claude deputy in the session\'s folder, and its AFK ending ends it but leaves the session open', () => {
+  const t = harness(), cell = t.make({ hqId: 'swrkx', cwd: '/proj' });
+  t.run('setAfk')(cell, Infinity, true);
+  const made = t.app.cells.find(c => c.hqId === 'snew1');
+  assert.ok(made, 'a new session');
+  assert.equal(made.cwd, '/proj');
+  assert.equal(made.backend, 'claude');
+  assert.equal(made.afk, false, 'never AFK itself');
+  assert.equal(t.app.deputy, 'snew1');
+  assert.equal(t.app.afkDeputy, 'snew1');
+  assert.equal(t.sent.length, 1);
+  assert.equal(t.sent[0].to, 'snew1');
+  assert.match(t.sent[0].text, /^\(HQ: deputy\)/);
+  t.run('setAfk')(cell, 0);
+  assert.equal(t.app.deputy, null);
+  assert.equal(t.app.afkDeputy, null);
+  assert.ok(t.app.cells.includes(made), 'still open');
+  assert.equal(made.afk, null, 'follows HQ again');
+});
+
+test('a deputy that already exists is kept, and AFK never ends it', () => {
+  const { t, boss, cell } = setup();
+  t.run('setAfk')(cell, Infinity, true);
+  assert.equal(t.app.cells.length, 2, 'no new session');
+  assert.equal(t.app.deputy, boss.hqId);
+  assert.equal(t.app.afkDeputy, null);
+  t.run('setAfk')(cell, 0);
+  assert.equal(t.app.deputy, boss.hqId);
+});
+
+test('the deputy follows its AFK: kept while one that asked for it lasts, ended once none is left', () => {
+  const t = harness(), a = t.make({ hqId: 'swrkx' }), setAfk = t.run('setAfk');
+  setAfk(null, Infinity, true); // all of HQ
+  assert.equal(t.app.deputy, 'snew1');
+  setAfk(a, Infinity, false); // one session's own AFK, without the box, does not end HQ's
+  assert.equal(t.app.deputy, 'snew1');
+  setAfk(null, 0);
+  assert.equal(t.app.deputy, null, 'only an AFK without the box is left');
+  setAfk(null, Infinity, true);
+  assert.equal(t.app.deputy, 'snew2', 'a new AFK with the box starts one again');
+  setAfk(null, Infinity, false); // changed to an AFK without it
+  assert.equal(t.app.deputy, null);
+});
+
+test('a restart mid-AFK keeps the deputy; an AFK that ran out while HQ was closed ends it', () => {
+  const t = harness(), a = t.make({ hqId: 'swrkx' }), d = t.make({ hqId: 'sdepu' }), sync = t.run('syncAfk');
+  t.app.deputy = 'sdepu';
+  t.app.afkDeputy = 'sdepu';
+  t.app.afk = { until: null, since: 0, deputy: true };
+  sync();
+  assert.equal(t.app.deputy, 'sdepu');
+  t.app.afk = { until: 1, since: 0, deputy: true }; // the clock is far past that
+  sync();
+  assert.equal(t.app.deputy, null);
+  assert.equal(t.app.afkDeputy, null);
+  assert.ok(t.app.cells.includes(d));
+});
+
+test('a deputy the user picks instead is no longer the AFK\'s to end', () => {
+  const t = harness(), a = t.make({ hqId: 'swrkx' }), mine = t.make({ hqId: 'smine' });
+  t.run('setAfk')(a, Infinity, true);
+  assert.equal(t.app.afkDeputy, 'snew1');
+  t.run('setDeputy')(mine);
+  assert.equal(t.app.afkDeputy, null);
+  t.run('setAfk')(a, 0);
+  assert.equal(t.app.deputy, 'smine');
+});
+
+test('closing the AFK deputy forgets it', () => {
+  const t = harness(), a = t.make({ hqId: 'swrkx' });
+  t.run('setAfk')(a, Infinity, true);
+  const made = t.app.cells.find(c => c.hqId === 'snew1');
+  t.app.cells.splice(t.app.cells.indexOf(made), 1);
+  t.run('deputyCellClosed')(made);
+  assert.equal(t.app.deputy, null);
+  assert.equal(t.app.afkDeputy, null);
+  t.run('setAfk')(a, 0); // nothing left to end
+});
+
+test('the box is saved as a literal true, and the old review fields are dropped', () => {
+  const t = harness(), sanitize = t.context.sanitizeAfk;
+  assert.equal(sanitize({ until: null, since: 1, deputy: true }).deputy, true);
+  assert.equal(sanitize({ until: null, since: 1, deputy: 'yes' }).deputy, undefined);
+  assert.equal(sanitize({ until: null, since: 1, review: true }).review, undefined);
+  assert.equal(sanitize({ until: null, since: 1, review: true }).deputy, undefined);
+});
+
+test('the approval reviewer is gone from the app', () => {
+  assert.doesNotMatch(appSource, /\breview(All|Off|State|Sync)\b|\bcell\.review\b|\bthis\.review\b|reviewBackend|setCellReview|review_approval/);
+  assert.doesNotMatch(afkSource, /\breview(All|Off|State|Sync|Run|Due|Watch|On)\b|review_approval/);
+  assert.equal(fs.existsSync(path.join(__dirname, '../src/review.rs')), false);
+});
+
+test('a command line marks its cell and its prompt is not taken for the user', () => {
+  const launch = appSource.slice(appSource.indexOf('async function openLaunch'), appSource.indexOf("window.__TAURI__.event.listen('launch'"));
+  assert.match(launch, /launched: true/);
+  assert.match(launch, /cell\.launchPrompt = r\.prompt\.trim\(\)/);
+  assert.match(appSource, /text !== this\.launchPrompt\) this\.lastUserText = text/);
 });

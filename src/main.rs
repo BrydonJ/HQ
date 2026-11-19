@@ -15,7 +15,6 @@ mod icon;
 #[cfg(target_os = "macos")]
 mod macos;
 mod mcp;
-mod review;
 mod secret;
 mod session;
 mod setup;
@@ -400,15 +399,6 @@ async fn usage_report(app: AppHandle, since_ms: Option<i64>) -> Result<Vec<usage
 #[tauri::command]
 async fn probe_usage() -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(session::probe_usage).await.map_err(|e| e.to_string())?
-}
-
-/// Asks the approval reviewer (review.rs) about a waiting permission card. Never fails: anything
-/// that goes wrong comes back as an escalation, which leaves the card for the user.
-#[tauri::command]
-async fn review_approval(req: review::ReviewRequest) -> review::Verdict {
-    tauri::async_runtime::spawn_blocking(move || review::review(&req))
-        .await
-        .unwrap_or_else(|e| review::Verdict::escalate(format!("the review stopped ({e})")))
 }
 
 #[tauri::command]
@@ -1011,7 +1001,6 @@ fn main() {
             search_sessions,
             usage_report,
             probe_usage,
-            review_approval,
             update_claude,
             claude_status,
             install_claude,

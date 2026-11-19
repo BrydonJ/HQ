@@ -1818,7 +1818,7 @@ fn terminal_command(call: &Value) -> Option<String> {
     text.strip_prefix("$ ").filter(|c| !c.is_empty()).map(str::to_owned)
 }
 
-/// Whether the reviewer (review.rs) may judge this command. Every Hermes request that is not an
+/// Whether the deputy (ui/deputy.js) may answer this command. Every Hermes request that is not an
 /// edit arrives as `kind: execute` with a `command`, whether it is a real command or a sentence
 /// dressed as one (consent for an MCP tool, a standing event trigger or a saved payment card, a
 /// Python script, a computer-use summary). A real one is what the terminal call now open is running,
@@ -1830,7 +1830,7 @@ fn real_command(call: &Value, options: &[(String, String)], open: &HashMap<Strin
         && call["rawInput"]["command"].as_str().is_some_and(|command| !command.starts_with("execute_code ") && open.values().any(|c| c == command))
 }
 
-/// Whether the reviewer may judge this edit. The path must be one the agent gave in full: Hermes
+/// Whether the deputy may answer this edit. The path must be one the agent gave in full: Hermes
 /// resolves the path it shows from its own folder, and the path it writes from the terminal's, so
 /// after a `cd` a relative path shows one file and writes another. See also `is_patch`. Not covered:
 /// on a Mac with Hermes' ssh or docker terminal backend, an absolute path is written remotely or in
@@ -2081,7 +2081,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_plain_edit_is_fit_for_the_reviewer() {
+    fn only_a_plain_edit_is_fit_for_the_deputy() {
         let path = full_path("a.rs");
         assert!(plain_edit(&edit_call("write_file", &path, &path, "b")));
         assert!(plain_edit(&edit_call("patch", &path, &path, "b")));
@@ -2188,7 +2188,7 @@ mod tests {
         let _ = child.wait();
     }
 
-    /// What Hermes sends for a patch of several files; review.rs must see the list as a list.
+    /// What Hermes sends for a patch of several files; the deputy must see the list as a list.
     #[test]
     fn a_multi_file_patch_keeps_hermes_comma_joined_path() {
         let (_, input) = tool_use(&json!({ "title": "patch", "content": [{ "type": "diff", "path": "a.rs, b.rs", "newText": "x" }] }));
