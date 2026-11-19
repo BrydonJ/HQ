@@ -214,7 +214,7 @@ function nextLoader(avoid) {
 
 setInterval(() => {
   for (const cell of app.cells) if (cell.status === 'running' && !cell.compacting && !cell.wrapUp && !cell.collapsed) cell.nextBusyWord();
-    else if (cell.wmView && cell.bgTasks.length && cell.status !== 'running') { cell.busyWord = nextBusyVerb(cell.busyWord); cell.syncWaitingBusy(); }
+    else if (cell.wmView && (cell.bgTasks.length || cell.hasOpenTasks()) && !cell.wmDone && cell.status !== 'running') { cell.busyWord = nextBusyVerb(cell.busyWord); cell.syncWaitingBusy(); }
 }, BUSY_ROTATE_MS);
 
 // Prompt cache lifetimes: Claude Code asks for an hour on a plan, and the API's default is five minutes.
@@ -970,7 +970,7 @@ class Cell {
     const el = this.el.querySelector('.wv-busy');
     if (!el) return;
     if (this.wmDone) { el.textContent = 'Done'; return; }
-    if (!this.busyWord && this.bgTasks.length) this.busyWord = nextBusyVerb('');
+    if (!this.busyWord && (this.bgTasks.length || this.hasOpenTasks())) this.busyWord = nextBusyVerb('');
     el.textContent = this.busyWord.replace(/(…|\.\.\.)$/, '');
   }
 
@@ -1021,6 +1021,10 @@ class Cell {
   sealTasks() {
     const list = this.taskItems();
     if (list.length && list.every(t => t.status === 'completed')) this.tasksStale = true;
+  }
+
+  hasOpenTasks() {
+    return this.taskItems().some(t => t.status !== 'completed' && t.status !== 'deleted');
   }
 
   taskItems() {
@@ -1345,11 +1349,12 @@ class Cell {
     clearTimeout(this.wmTimer);
     this.wmTimer = 0;
     if (settling) {
+    // Idle with tasks still open: the work is probably not finished, so stay busy much longer before Done. Bounded, because a task Claude forgot to close would otherwise keep the cell busy forever.
       this.wmTimer = setTimeout(() => {
         this.wmTimer = 0;
         if (mcp.schedule.some(s => s.to === this.hqId)) this.syncWaiting(); // a message is due to wake it: start the timeout again and look later
         else this.setWmDone(true);
-      }, WAIT_SETTLE_MS);
+      }, this.hasOpenTasks() ? WAIT_OPEN_TASKS_MS : WAIT_SETTLE_MS);
     }
     this.setWmView(view);
   }
@@ -4033,6 +4038,7 @@ function parseAnswers(text) {
 const BG_LABELS = { local_agent: 'Agent', local_bash: 'Shell', local_monitor: 'Monitor', monitor: 'Monitor' };
 /** Waiting mode ends once a cell has stayed idle this long (a background task's notification can start a new turn). */
 const WAIT_SETTLE_MS = 4000;
+const WAIT_OPEN_TASKS_MS = 5 * 60 * 1000; // how long an idle cell with open tasks stays busy before it says Done
 /** Trails a prompt asked to keep a task list; the chat hides it, live and on resume. */
 // The composer's task-list toggle is gone; these wordings stay so older transcripts' hints are still told apart.
 const TASK_HINT = '(HQ: track this work with TaskCreate/TaskUpdate so the user can follow progress.)';
