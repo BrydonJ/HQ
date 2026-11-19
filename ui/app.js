@@ -216,7 +216,11 @@ function nextLoader(avoid) {
 // Waiting mode is offered once a turn has run this long with no click or key in its cell, once per turn.
 const WAIT_NUDGE_MS = 45 * 1000;
 const WAIT_NUDGE_NOS = 3; // "No" this many times in a row turns the offer off (Settings brings it back)
-setInterval(() => { for (const cell of app.cells) cell.checkWaitNudge(); }, 5000);
+setInterval(() => {
+  for (const cell of app.cells) {
+    try { cell.checkWaitNudge(); } catch (err) { console.warn('wait nudge', err); } // one cell's failure must not stop the rest
+  }
+}, 5000);
 
 setInterval(() => {
   for (const cell of app.cells) if (cell.status === 'running' && !cell.compacting && !cell.wrapUp && !cell.collapsed) cell.nextBusyWord();

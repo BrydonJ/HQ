@@ -1176,7 +1176,6 @@ body:not(.fade-buttons):not(.hover-buttons) .cell.wm-on .cell-head:hover > .icon
 .resume-moved { color: var(--fg-faint); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 
 /* ---------- Remote Control ---------- */
-.act-mode.danger { color: var(--error); }
 .act-busysend.steer { color: var(--link); }
 /* A message HQ holds until the turn ends (the Steer/Queue toggle). */
 .item.user.held { opacity: 0.7; }

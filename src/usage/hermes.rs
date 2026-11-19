@@ -44,7 +44,10 @@ fn sessions_since(cache: &Cache, db: &Path, since: i64) -> Vec<SessionUsage> {
                 all
             }
             // A locked or half-written file is tried again at the next look, not remembered as empty.
-            Err(_) => Vec::new(),
+            Err(e) => {
+                eprintln!("HQ: Hermes usage unreadable ({}): {e}", db.display());
+                Vec::new()
+            }
         }
     });
     all.into_iter()

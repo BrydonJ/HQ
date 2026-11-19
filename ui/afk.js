@@ -112,7 +112,7 @@ function setAfk(cell, until, deputy = false) {
   if (value && deputy) value.deputy = true;
   if (cell) cell.afk = value;
   else app.afk = value;
-  if (value && deputy) afkMakeDeputy(cell);
+  if (value && deputy) afkMakeDeputy(cell).catch(err => console.warn('AFK deputy', err));
   syncAfk();
   saveState();
 }
@@ -436,7 +436,7 @@ function buildAfkMenu(menuEl, cell) {
     box.addEventListener('change', () => {
       deputy = box.checked;
       if (!own) return;
-      if (deputy) { own.deputy = true; afkMakeDeputy(cell); }
+      if (deputy) { own.deputy = true; afkMakeDeputy(cell).catch(err => console.warn('AFK deputy', err)); }
       else delete own.deputy;
       syncAfk();
       saveState();
