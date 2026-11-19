@@ -12,7 +12,7 @@
 // the user is away and nudges them on, and a prompt the deputy leaves (or that no deputy covers)
 // falls to AFK's deferral as before.
 //
-// Order on a card: the approval reviewer first (cheap, tool-less), then the deputy, then AFK.
+// Order on a card: the deputy first, then AFK.
 // Not covered: the deputy's own prompts; any session tied to it through HQ, that is, any session
 // whose starters or senders (lineage, drivenBy, kept for good) meet the deputy's own, or the deputy
 // itself (else it could approve its own instructions in another session's name, or be lobbied by
@@ -21,9 +21,12 @@
 // A prompt the deputy left, or that timed out, stays with the user, across restarts too (deputyLeftIds).
 
 const DEPUTY_PREFIX = '(HQ: deputy';
-const DEPUTY_INPUT_MAX = 4000;
-const DEPUTY_PLAN_MAX = 8000;
-const DEPUTY_LAST_MAX = 1500;
+// What the deputy is shown of a prompt. Past these it may only deny or leave it, so they are set well above
+// any real command, edit or plan (a deputy that only saw the start of one could not judge it): a cut here
+// used to stop it from reviewing ordinary long edits and scripts.
+const DEPUTY_INPUT_MAX = 60000;
+const DEPUTY_PLAN_MAX = 100000;
+const DEPUTY_LAST_MAX = 4000;
 // What a session is told when the deputy refuses: fixed, so a refusal carries no instructions.
 const DEPUTY_DENY_TEXT = 'The user\'s deputy declined this while the user is away. Don\'t look for another way to do the same thing: note it as pending for the user and carry on with work that doesn\'t depend on it.';
 const DEPUTY_ANYONE = '*';           // in lineage or drivenBy: too many sessions to list, so every one
@@ -63,7 +66,7 @@ function deputyCovers(cell, requestId, card) {
   const d = deputyCell();
   return !!d && d !== cell && !deputyTied(d, cell) && cell.afk !== false && !cell.launched && !cell.missing && !cell.closing && cell.backend !== 'cloud'
     && !String(requestId).startsWith('mcp-') && !card.deputyLeft && !(cell.deputyLeftIds || []).includes(deputyLeftKey(requestId, card))
-    // Hermes marks only a call whose shown input is what runs (hermes.rs); the reviewer skips the rest too.
+    // Hermes marks only a call whose shown input is what runs (hermes.rs).
     && !(cell.backend === 'hermes' && card.dataset.kind === 'permission' && !(card.afkReq && card.afkReq.hermes_reviewable === true))
     // Codex's Permissions request widens its sandbox for the rest of the turn (codex.rs), not once.
     && !(cell.backend === 'codex' && card.afkReq && card.afkReq.tool_name === 'Permissions')
@@ -80,7 +83,7 @@ function deputyIds(v) {
   return ids.length > 64 ? [DEPUTY_ANYONE] : ids;
 }
 
-/** The user is typing an answer into the card: the deputy leaves it to them, as the reviewer does. */
+/** The user is typing an answer into the card: the deputy leaves it to them. */
 function deputyTyping(card) {
   const fields = typeof card.querySelectorAll === 'function' ? [...card.querySelectorAll('input[type=text], textarea')] : [];
   if (card.feedback && !fields.includes(card.feedback)) fields.push(card.feedback);
@@ -136,9 +139,6 @@ function deputyLeftKey(requestId, card) {
 
 /**
  * Gives a prompt back from the deputy, for good: to AFK's deferral if AFK covers it, else to the user.
- * Latent, left as is: if the user turns the approval reviewer on while the card is with the deputy,
- * afkWatch below hands it to the reviewer, which may still approve it once. Only a user's own switch
- * mid-flight reaches this, and the reviewer is a separate tool-less check, so no fix is scheduled.
  */
 function deputyGiveBack(cell, requestId, card, why) {
   const forwarded = !!(card.deputy && card.deputy.id); // else the deputy never saw it: nothing to log
@@ -193,7 +193,7 @@ function deputyPromptText(id, cell, card) {
     lines.push('Plan (as a JSON string):', deputyFence(JSON.stringify(String(input.plan || '')), DEPUTY_PLAN_MAX));
     if (deputyCut(cell, card)) lines.push('This plan is too long to show in full, so you cannot allow it: deny or leave it.');
   } else {
-    // The agent's own description of a command is left out, as review.rs does: judge the command itself.
+    // The agent's own description of a command is left out: judge the command itself.
     const shown = ['Bash', 'PowerShell'].includes(req.tool_name) && input && typeof input === 'object' ? { ...input, description: undefined } : input;
     lines.push('Tool and input:', deputyFence(JSON.stringify({ tool: req.tool_name || 'unknown', input: shown }, null, 2), DEPUTY_INPUT_MAX));
     if (req.description && cell.backend === 'codex') lines.push('Codex\'s note on it:', deputyFence(JSON.stringify(String(req.description)), 1000));
@@ -268,12 +268,12 @@ function deputyIntroText() {
 function setDeputy(cell) {
   const old = deputyCell();
   app.deputy = cell ? cell.hqId : null;
+  if (app.afkDeputy && app.afkDeputy !== app.deputy) app.afkDeputy = null; // no longer the one AFK made
   // Cards already with a deputy go back through the usual order: to the new deputy, or AFK, or the user.
   for (const c of app.cells) {
     for (const [requestId, card] of [...c.pending]) {
       if (card.deputy) { deputyUnwatch(card); afkWatch(c, requestId, card); }
-      // Not while the reviewer has it: it hands the card on itself if it escalates.
-      else if (cell && card.reviewState !== 'waiting' && card.reviewState !== 'running' && deputyCovers(c, requestId, card)) afkWatch(c, requestId, card);
+      else if (cell && deputyCovers(c, requestId, card)) afkWatch(c, requestId, card);
     }
   }
   if (old && old !== cell) old.notice('This session is no longer your deputy.');

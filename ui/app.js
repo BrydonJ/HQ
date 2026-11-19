@@ -29,7 +29,8 @@ const app = {
   settings: null,      // the Settings screen; see sanitizeSettings for the keys
   apiKeyHint: null,    // "sk-ant-…abcd" while an API key is saved (the key itself stays in the backend)
   planLimitedUntil: 0, // when the plan's usage comes back (ms), from a plan session's refused request
-  afk: null,           // AFK for every session (afk.js): { until (ms, or null for no set time), since }
+  afk: null,           // AFK for every session (afk.js): { until (ms, or null for no set time), since, deputy }
+  afkDeputy: null,     // the deputy session an AFK's "Make a deputy" started (afk.js), else null: the user's own deputy is never ended by AFK
   sidebarOpen: false,
   query: '',
 };
@@ -212,9 +213,18 @@ function nextLoader(avoid) {
   return loaderDeck.pop();
 }
 
+// Waiting mode is offered once a turn has run this long with no click or key in its cell, once per turn.
+const WAIT_NUDGE_MS = 45 * 1000;
+const WAIT_NUDGE_NOS = 3; // "No" this many times in a row turns the offer off (Settings brings it back)
+setInterval(() => {
+  for (const cell of app.cells) {
+    try { cell.checkWaitNudge(); } catch (err) { console.warn('wait nudge', err); } // one cell's failure must not stop the rest
+  }
+}, 5000);
+
 setInterval(() => {
   for (const cell of app.cells) if (cell.status === 'running' && !cell.compacting && !cell.wrapUp && !cell.collapsed) cell.nextBusyWord();
-    else if (cell.wmView && cell.bgTasks.length && cell.status !== 'running') { cell.busyWord = nextBusyVerb(cell.busyWord); cell.syncWaitingBusy(); }
+    else if (cell.wmView && (cell.bgTasks.length || cell.hasOpenTasks()) && !cell.wmDone && cell.status !== 'running') { cell.busyWord = nextBusyVerb(cell.busyWord); cell.syncWaitingBusy(); }
 }, BUSY_ROTATE_MS);
 
 // Prompt cache lifetimes: Claude Code asks for an hour on a plan, and the API's default is five minutes.
@@ -292,8 +302,8 @@ function logActivity(cell, state) {
 class Cell {
   constructor({ cwd, sessionId = null, permissionMode = 'default', model = null, effort = null, title = '', aiTitle = false,
     customTitle = null, renamePending = false, detail, clean, progress = false, fork = false, collapsed = false,
-    missing = false, remote = null, bridgeSessionId = null, draft = '', backend = 'claude', resumeAfterUpdate = false, resumeQueued = null, api = false, apiKey = false, afk = null, afkLog = null, review = false, reviewOff = false, launched = false, modeOwn = false, remoteOwn = false, busySend = null,
-    hqId = null, spawnedBy = null, lineage = null, drivenBy = null, deputyLeftIds = null, colorCwd = null, depth = 0, hosted = null, spot = false, group = null, flexW = 1, flexH = 1 }) {
+    missing = false, remote = null, bridgeSessionId = null, draft = '', backend = 'claude', resumeAfterUpdate = false, resumeQueued = null, api = false, apiKey = false, afk = null, afkLog = null, launched = false, modeOwn = false, remoteOwn = false, busySend = null, oneSentence = false,
+    hqId = null, spawnedBy = null, lineage = null, drivenBy = null, deputyLeftIds = null, colorCwd = null, depth = 0, hosted = null, spot = false, orch = false, group = null, flexW = 1, flexH = 1 }) {
     this.cwd = cwd;
     // A session a session host kept running while HQ restarted: { id, startedMs }. reattach() connects to it.
     this.hosted = hosted;
@@ -324,6 +334,7 @@ class Cell {
     this.permissionMode = permissionMode || 'default';
     // Picked in this session (its right-click menu), so Settings > Permissions no longer moves it.
     this.modeOwn = modeOwn === true;
+    this.oneSentence = oneSentence === true; // a Hermes cell in /1s mode (hermes.js hermesOneSentence)
     this.modelChoice = model && model !== 'default' ? model : null; // null = Claude's default
     this.effort = effort || null;  // null = Claude's default
     this.resolvedModel = null;     // what Claude reports it is running
@@ -354,6 +365,7 @@ class Cell {
     this.sideTaskLine = '';        // the same without the live tool name, for the sidebar (which a change rebuilds)
     this.collapsed = !!collapsed;  // only the header shows, in the dock under the grid
     this.spot = !!spot;            // in the spotlight: the main pane, with the other sessions in a strip beside it (layout.js)
+    this.orch = !!orch;            // pinned as an orchestrator: a full-height column of its own (layout.js)
     this.group = typeof group === 'string' && /^g[0-9a-z]{1,8}$/.test(group) ? group : null; // cells in a group sit together
     this.flexW = sanitizeWeight(flexW); // its share of a row's width, dragged with a splitter
     this.flexH = sanitizeWeight(flexH); // its share of the spotlight strip's height
@@ -410,10 +422,8 @@ class Cell {
     this.limitAutoContinue = true; // only this open chat; uncheck on its usage error to keep it stopped
     this.afk = sanitizeCellAfk(afk); // AFK for this session (afk.js): null follows HQ, false never, else { until, since }
     this.afkLog = sanitizeAfkLog(afkLog); // what HQ did while the user was away, listed once they are back
-    this.review = review === true; // the approval reviewer (afk.js); set from the UI only
-    this.reviewOff = reviewOff === true && !this.review; // left out of Settings > Review approvals in every session
     this.launched = launched === true; // opened by a command line, which may be an agent's
-    this.lastUserText = '';        // what the user last typed here: tells the reviewer what the work is for
+    this.lastUserText = '';        // what the user last typed here: tells the deputy what the work is for
     this.afkOn = false;        // AFK is in force here now (syncAfk)
     this.cost = { usd: 0, tokens: 0, procUsd: 0, procTokens: 0, apiUsd: 0 }; // this HQ run's spend; proc* = last total of the current process; apiUsd = on HQ's API key
     this.apiMode = !!api && this.backend === 'claude'; // the user switched this session to HQ's API key until the plan's usage is back
@@ -466,16 +476,28 @@ class Cell {
     this.waitEl = el.querySelector('.waiting-view');
     this.waitBody = el.querySelector('.wv-body');
     this.loader = null;            // the waiting view's current loader, a fresh one each time the view opens
+    this.composerEl = el.querySelector('.composer');
+    // The tray: the docked sessions this one started, listed above the composer (in the waiting view
+    // while that shows) instead of the dock. Each is its bare header, and a question or permission it
+    // asks opens under it, to answer without opening the session (layout.js fills it).
+    this.trayText = h('span', { class: 'tray-text' });
+    this.trayWaiting = h('span', { class: 'tray-waiting' });
+    this.trayToggle = h('button', { class: 'link-btn tray-toggle', type: 'button' });
+    this.trayList = h('div', { class: 'tray-list' });
+    this.trayEl = h('div', { class: 'kids-tray hidden', role: 'region', 'aria-label': 'Sessions it started' },
+      h('div', { class: 'tray-head' }, icon('type-hierarchy-sub'), this.trayText, this.trayWaiting, h('span', { class: 'spacer' }), this.trayToggle),
+      this.trayList);
+    this.composerEl.before(this.trayEl);
     this.stateEl = el.querySelector('.cell-state');
     this.codeBtn = el.querySelector('.act-code');
     this.collapseBtn = el.querySelector('.act-collapse');
     this.ctxBtn = el.querySelector('.act-context');
     this.cacheEl = el.querySelector('.cache-age');
-    this.modeChip = el.querySelector('.act-mode');
     this.busyChip = el.querySelector('.act-busysend');
     this.missingBar = el.querySelector('.missing-bar');
     this.afkBtn = el.querySelector('.act-afk');
     this.spotBtn = el.querySelector('.act-spot');
+    this.orchBtn = el.querySelector('.act-orch');
     this.groupBtn = el.querySelector('.act-group');
 
     el.style.setProperty('--proj', this.color);
@@ -493,6 +515,7 @@ class Cell {
     this.applyWaitingMode();
     this.applyCollapsed();
     this.applySpot();
+    this.applyOrch();
     this.applyGroup();
     this.applyMissing();
     this.stateEl.textContent = stateOf(this)[1];
@@ -520,7 +543,15 @@ class Cell {
       autoGrow(this.input);
     }
 
-    el.addEventListener('mousedown', () => focusCell(this, false));
+    // A press in the tray belongs to the session its row stands for (trayRow), which takes the focus:
+    // keys then never reach the starter, and none act on a docked session.
+    el.addEventListener('mousedown', e => { if (!e.target.closest('.kids-tray')) focusCell(this, false); });
+    this.trayToggle.addEventListener('click', e => {
+      e.stopPropagation();
+      const kids = this.childCells();
+      const dock = kids.some(c => !c.collapsed); // some are open: dock them all; else open them all
+      for (const c of kids) if (c.collapsed !== dock) collapseCell(c, dock);
+    });
     const head = el.querySelector('.cell-head');
     // A collapsed cell opens on a click anywhere in its header except its buttons.
     head.addEventListener('click', e => {
@@ -541,6 +572,8 @@ class Cell {
     this.detailBtn.addEventListener('click', () => this.setDetail(this.detail % 3 + 1));
     this.progressBtn.addEventListener('click', () => this.setProgressView(!this.progressView));
     this.waitBtn.addEventListener('click', () => this.setWaitingMode(!this.wmArmed));
+    // Any click or key in the cell counts as the user being here: no waiting-mode offer then (checkWaitNudge).
+    for (const type of ['pointerdown', 'keydown']) el.addEventListener(type, () => { this.touchedAt = Date.now(); }, true);
     // Done: the big check turns into a chat bubble on hover, and a click shows the chat (as Show chat does).
     el.querySelector('.wv-check').addEventListener('click', () => { if (this.wmDone) this.setWaitingMode(false); });
     wireButtonDrag(el.querySelector('.cell-head'));
@@ -548,6 +581,7 @@ class Cell {
     moreBtn.addEventListener('click', e => { e.stopPropagation(); openMenu(moreBtn, this, menuEl => buildMoreMenu(menuEl, this)); });
     el.querySelector('.act-max').addEventListener('click', () => toggleMaximize(this));
     this.spotBtn.addEventListener('click', () => toggleSpot(this));
+    this.orchBtn.addEventListener('click', () => toggleOrch(this));
     this.groupBtn.addEventListener('click', e => { e.stopPropagation(); openMenu(this.groupBtn, this, menuEl => buildGroupMenu(menuEl, this)); });
     wireCellDrag(this);
     el.querySelector('.act-close').addEventListener('click', e => this.requestClose(e.currentTarget));
@@ -561,9 +595,8 @@ class Cell {
     this.ctxBtn.addEventListener('mouseleave', hideContextPop);
     this.ctxBtn.addEventListener('focus', () => showContextPop(this));
     this.ctxBtn.addEventListener('blur', hideContextPop);
-    this.modeChip.addEventListener('click', () => openMenu(this.modeChip, this, menuEl => buildSessionMenu(menuEl, this)));
     this.busyChip.addEventListener('click', () => this.setBusySend(this.busySendMode() === 'steer' ? 'queue' : 'steer'));
-    // Right-click the header: this session's own permissions, Remote Control and approval reviews.
+    // Right-click the header: this session's own permissions and Remote Control.
     head.addEventListener('contextmenu', e => {
       if (e.defaultPrevented || e.target.closest('.cell-rename')) return; // the VS Code button has its own menu
       e.preventDefault();
@@ -727,6 +760,58 @@ class Cell {
     this.kidsEl.querySelector('.n').textContent = kids.length ? String(kids.length) : '';
     this.kidsEl.classList.toggle('attention', kids.some(c => c.pending.size > 0));
     this.kidsEl.title = `Started ${kids.length} session${kids.length === 1 ? '' : 's'}. Click to list them.`;
+    // A steady amber edge while one of them waits on the user: they sit in the tray, out of sight of the grid.
+    const waiting = kids.filter(c => c.pending.size > 0).length;
+    this.el.classList.toggle('kid-waiting', waiting > 0);
+    this.trayText.textContent = `Started ${kids.length} session${kids.length === 1 ? '' : 's'}`;
+    this.trayWaiting.textContent = waiting ? `· ${waiting} waiting on you` : '';
+    this.trayToggle.textContent = kids.some(c => !c.collapsed) ? 'Dock all' : 'Open all';
+    this.trayToggle.title = kids.some(c => !c.collapsed) ? 'Dock every session it started into this tray' : 'Open every session it started in the grid';
+    this.trayEl.classList.toggle('attention', waiting > 0);
+    this.trayEl.classList.toggle('hidden', !this.trayList.children.length);
+    for (const c of kids) c.renderTrayRow();
+    renderOrchHead(this, kids, waiting);
+  }
+
+  /** The row standing for this session in its starter's tray: its state, and its prompts while it is there. */
+  trayRow() {
+    if (!this.trayRowEl) {
+      this.trayDot = h('span', { class: 'tray-dot' });
+      this.trayName = h('span', { class: 'tray-name' });
+      this.trayState = h('span', { class: 'tray-state' });
+      this.trayRowEl = h('div', { class: 'tray-row' },
+        h('button', { class: 'tray-row-head', type: 'button', onclick: () => revealCell(this) }, this.trayDot, this.trayName, this.trayState));
+      this.trayRowEl.addEventListener('mousedown', () => focusCell(this, false));
+    }
+    this.renderTrayRow();
+    return this.trayRowEl;
+  }
+
+  renderTrayRow() {
+    if (!this.trayRowEl) return;
+    const [cls, label] = stateOf(this);
+    this.trayRowEl.className = `tray-row${cls ? ` ${cls}` : ''}`;
+    this.trayName.textContent = this.displayTitle() || 'New session';
+    this.trayState.textContent = label;
+    this.trayRowEl.firstChild.title = `Open "${this.trayName.textContent}" (${this.agent})`;
+  }
+
+  /** A session in its starter's tray asks its questions there; back in the grid or the dock, in its own cell. */
+  placePrompts(inTray) {
+    if (inTray) {
+      if (this.prompts.parentElement !== this.trayRowEl) this.trayRow().append(this.prompts);
+    } else if (this.prompts.parentElement !== this.el) {
+      this.promptsBar.after(this.prompts);
+    }
+  }
+
+  /** The tray sits above the composer, or at the foot of the waiting view while that shows. */
+  placeTray() {
+    if (this.wmView) {
+      if (this.trayEl.parentElement !== this.waitEl) this.waitEl.append(this.trayEl);
+    } else if (this.trayEl.nextElementSibling !== this.composerEl) {
+      this.composerEl.before(this.trayEl);
+    }
   }
 
   startRename() {
@@ -884,6 +969,14 @@ class Cell {
     this.spotBtn.title = this.spot ? 'Leave the spotlight' : 'Spotlight: give this session the main pane';
   }
 
+  /** The pin button: lit while the session has an orchestrator column of its own. */
+  applyOrch() {
+    this.el.classList.toggle('orch', this.orch);
+    this.orchBtn.classList.toggle('on', this.orch);
+    this.orchBtn.querySelector('.codicon').className = `codicon codicon-${this.orch ? 'pinned' : 'pin'}`;
+    this.orchBtn.title = this.orch ? 'Unpin: back among the other sessions' : 'Pin as an orchestrator: a full-height column of its own, with the sessions it starts in its tray';
+  }
+
   /** A group's cells are ringed in the group's colour (style.css, .cell.grouped). */
   applyGroup() {
     this.el.classList.toggle('grouped', !!this.group);
@@ -970,7 +1063,7 @@ class Cell {
     const el = this.el.querySelector('.wv-busy');
     if (!el) return;
     if (this.wmDone) { el.textContent = 'Done'; return; }
-    if (!this.busyWord && this.bgTasks.length) this.busyWord = nextBusyVerb('');
+    if (!this.busyWord && (this.bgTasks.length || this.hasOpenTasks())) this.busyWord = nextBusyVerb('');
     el.textContent = this.busyWord.replace(/(…|\.\.\.)$/, '');
   }
 
@@ -1021,6 +1114,10 @@ class Cell {
   sealTasks() {
     const list = this.taskItems();
     if (list.length && list.every(t => t.status === 'completed')) this.tasksStale = true;
+  }
+
+  hasOpenTasks() {
+    return this.taskItems().some(t => t.status !== 'completed' && t.status !== 'deleted');
   }
 
   taskItems() {
@@ -1304,10 +1401,54 @@ class Cell {
 
   // ---------- waiting mode ----------
 
+  /**
+   * The waiting-mode offer: a slim bar above the composer once a turn has run WAIT_NUDGE_MS with no
+   * click or key in this cell. Once per turn; it goes by itself when the turn ends or waiting mode
+   * is turned on another way. Runs on a timer.
+   */
+  checkWaitNudge() {
+    const now = Date.now();
+    const due = app.settings.waitNudge && this.status === 'running' && !this.wmArmed && !this.collapsed && !this.closing
+      && this.pending.size === 0 && this.turnStart && this.nudgedTurn !== this.turnStart
+      && now - this.turnStart >= WAIT_NUDGE_MS && now - (this.touchedAt || 0) >= WAIT_NUDGE_MS;
+    if (this.nudgeEl && (this.status !== 'running' || this.wmArmed || this.collapsed || this.pending.size)) this.dropWaitNudge();
+    if (!due) return;
+    this.nudgedTurn = this.turnStart;
+    const answer = yes => {
+      this.dropWaitNudge();
+      if (yes) {
+        changeSetting('waitNudgeNo', 0);
+        this.setWaitingMode(true);
+        return;
+      }
+      const nos = (app.settings.waitNudgeNo || 0) + 1;
+      changeSetting('waitNudgeNo', nos);
+      if (nos >= WAIT_NUDGE_NOS) {
+        changeSetting('waitNudge', false);
+        changeSetting('waitNudgeNo', 0);
+        this.notice(`HQ won't offer waiting mode any more. Turn it back on in Settings > General ("Offer waiting mode").`);
+      }
+    };
+    this.nudgeEl = h('div', { class: 'wait-nudge', role: 'status' },
+      this.waitBtn.querySelector('svg').cloneNode(true),
+      h('span', { class: 'wn-text', text: `Still working${this.turnStart ? ` (${formatDuration(now - this.turnStart)})` : ''}. Switch to waiting mode?` }),
+      h('button', { class: 'btn primary wn-yes', text: 'Yes', onclick: () => answer(true) }),
+      h('button', { class: 'btn wn-no', text: 'No', onclick: () => answer(false) }));
+    this.el.querySelector('.composer').before(this.nudgeEl);
+  }
+
+  dropWaitNudge() {
+    if (this.nudgeEl) this.nudgeEl.remove();
+    this.nudgeEl = null;
+  }
+
   setWaitingMode(on) {
     if (this.wmArmed === on) return;
     this.wmArmed = on;
-    this.wmWorked = on && (this.status === 'running' || this.bgTasks.length > 0);
+    // Idle with open tasks counts as working too: the view shows at once instead of with the next turn.
+    this.wmWorked = on && (this.status === 'running' || this.bgTasks.length > 0 || this.hasOpenTasks());
+    // Armed by the user while idle with tasks open (after a restart, say, when no turn has ended yet): show the view now.
+    if (on && this.status === 'idle' && this.hasOpenTasks()) this.lastTurnOk = true;
     this.applyWaitingMode();
     this.syncWaiting();
   }
@@ -1335,7 +1476,7 @@ class Cell {
       if (this.status === 'running' || this.bgTasks.length > 0) {
         this.wmWorked = true;
         view = true;
-      } else if (this.wmWorked && this.lastTurnOk && this.status !== 'exited' && !this.limitHit && !this.limitResume) {
+      } else if ((this.wmWorked || this.hasOpenTasks()) && this.lastTurnOk && this.status !== 'exited' && !this.limitHit && !this.limitResume) {
         view = true;
         settling = true;
       }
@@ -1345,11 +1486,12 @@ class Cell {
     clearTimeout(this.wmTimer);
     this.wmTimer = 0;
     if (settling) {
+    // Idle with tasks still open: the work is probably not finished, so stay busy much longer before Done. Bounded, because a task Claude forgot to close would otherwise keep the cell busy forever.
       this.wmTimer = setTimeout(() => {
         this.wmTimer = 0;
         if (mcp.schedule.some(s => s.to === this.hqId)) this.syncWaiting(); // a message is due to wake it: start the timeout again and look later
         else this.setWmDone(true);
-      }, WAIT_SETTLE_MS);
+      }, this.hasOpenTasks() ? WAIT_OPEN_TASKS_MS : WAIT_SETTLE_MS);
     }
     this.setWmView(view);
   }
@@ -1381,6 +1523,7 @@ class Cell {
       this.el.classList.toggle('unread', this.unread && this.pending.size === 0);
     }
     this.el.classList.toggle('wm-on', view);
+    this.placeTray();
     if (!view && !this.collapsed) {
       if (this.live) this.scheduleLiveRender(); // text that streamed in while hidden was not drawn
       this.stickToBottom = this.wmStick;
@@ -1859,6 +2002,8 @@ class Cell {
     this.stateEl.textContent = stateOf(this)[1]; // shown while collapsed, where the chat cannot say it
     const parent = this.parentCell();
     if (parent) parent.renderLineage(); // its count lights up while this one waits on the user
+    // Answered from its starter's tray: the focus goes back to the starter, whose chat is on screen.
+    if (parent && app.focused === this && this.collapsed && !waiting && this.trayRowEl && this.trayRowEl.isConnected) focusCell(parent, false);
     this.syncWaiting();
     this.syncWaitingBusy();
     this.renderProgress();
@@ -2251,8 +2396,10 @@ class Cell {
     const slash = /^\/[\w:-]+(\s|$)/.test(text.trimStart());
     // Blocks even for plain text: Claude then records no prompt text in the transcript's first enqueue,
     // which is how the resume list tells HQ's sessions from an agent's `claude -p` (store.rs is_agent).
+    const hint = this.backend === 'hermes' ? hermesOneSentence(this, text, slash) : null;
     const content = images.length || (text && !slash)
-      ? [...images.map(i => ({ type: 'image', source: { type: 'base64', media_type: i.mediaType, data: i.data } })), ...(text ? [{ type: 'text', text }] : [])]
+      ? [...images.map(i => ({ type: 'image', source: { type: 'base64', media_type: i.mediaType, data: i.data } })), ...(text ? [{ type: 'text', text }] : []),
+        ...(hint ? [{ type: 'text', text: hint }] : [])]
       : text;
     if (text) this.sentPrompts.push(text);
     if (!this.promptWritten) {
@@ -2372,6 +2519,7 @@ class Cell {
 
   /** Ends the process and starts the cell over as a new session in the same folder. `name` titles it. */
   async clearConversation(name) {
+    this.oneSentence = false; // a new conversation starts at normal length
     this.clearing = true;
     try {
       await this.resetSession(name);
@@ -2440,16 +2588,11 @@ class Cell {
   }
 
   /**
-   * The permission mode lives in Settings and the header's right-click menu; the composer shows it
-   * only when it is not the agent's usual one (plan, bypass…), so a session that skips prompts says so.
+   * The permission mode is changed from the header's "…" menu (or its right-click menu); the
+   * composer no longer shows it, since nearly every session runs in the same mode (NEW_SESSION_MODE).
    */
   renderMode() {
-    const opt = [...this.modeSel.options].find(o => o.value === this.permissionMode);
-    const usual = this.backend === 'cloud' || this.permissionMode === (this.backend === 'codex' ? CODEX_DEFAULT_MODE : 'default');
-    this.modeChip.classList.toggle('hidden', usual || !opt);
-    this.modeChip.classList.toggle('danger', this.permissionMode === 'bypassPermissions');
-    this.modeChip.querySelector('.label').textContent = opt ? opt.textContent : '';
-    this.modeChip.title = `Permissions: ${opt ? opt.textContent : this.permissionMode}. Click, or right-click the header, to change them for this session.`;
+    this.el.dataset.mode = this.permissionMode;
   }
 
   requestClose(btn) {
@@ -2922,7 +3065,7 @@ class Cell {
       } else if (block.type === 'text' && block.text) {
         const text = block.text;
         if (text.startsWith('[Request interrupted')) this.notice('Interrupted');
-        else if (/^\s*<(command-|local-command-|system-reminder|task-notification|ide_)/.test(text) || text.startsWith(TASK_HINT_PREFIX)) continue;
+        else if (/^\s*<(command-|local-command-|system-reminder|task-notification|ide_)/.test(text) || text.startsWith(TASK_HINT_PREFIX) || text.startsWith(ONE_SENTENCE_PREFIX)) continue;
         else if (text.startsWith(RESUME_PROMPT)) { if (this.replaying) this.notice(RESUME_NOTICE); } // live, resumeAfterRestart said so
         else if (text.startsWith(AFK_PREFIX)) { if (this.replaying) this.notice('AFK: HQ messaged the session while you were away.'); }
         else texts.push(text);
@@ -3118,7 +3261,6 @@ class Cell {
     const card = this.pending.get(requestId);
     if (card) {
       afkUnwatch(card);
-      reviewUnwatch(card);
       deputyUnwatch(card);
       card.remove();
     }
@@ -3141,8 +3283,16 @@ class Cell {
   permissionCard(requestId, req) {
     const input = req.input || {};
     const name = req.display_name || req.tool_name;
-    const title = h('div', { class: 'prompt-title' }, `Allow ${name}?`,
-      req.description ? h('span', { class: 'targ', text: '  ' + req.description }) : null);
+    // Expand gives the card the whole cell (the chat hides), for a long command in a small cell.
+    const grow = h('button', { class: 'icon-btn prompt-grow', title: 'Show it all: give this card the whole cell', 'aria-label': 'Expand' }, icon('screen-full'));
+    grow.addEventListener('click', () => {
+      const on = this.el.classList.toggle('prompts-max');
+      grow.replaceChildren(icon(on ? 'screen-normal' : 'screen-full'));
+      grow.title = on ? 'Show the chat again' : 'Show it all: give this card the whole cell';
+    });
+    this.el.classList.remove('prompts-max');
+    const title = h('div', { class: 'prompt-title' }, h('span', { class: 'pt-main' }, `Allow ${name}?`,
+      req.description ? h('span', { class: 'targ', text: '  ' + req.description }) : null), grow);
     let preview;
     if (req.tool_name === 'Edit' || req.tool_name === 'MultiEdit') {
       preview = h('div', { class: 'preview' }, h('div', { text: relPath(input.file_path, this.cwd) }), toolInputView(req.tool_name, input));
@@ -3165,7 +3315,10 @@ class Cell {
 
     const choices = [choice('1', 'Yes', null, allow)];
     const suggestions = Array.isArray(req.permission_suggestions) ? req.permission_suggestions : [];
-    if (suggestions.length) choices.push(choice('2', suggestionLabel(suggestions), null, allowAlways));
+    if (suggestions.length) {
+      choices.push(choice('2', suggestionLabel(suggestions), null, allowAlways));
+      choices[1].title = suggestionLabel(suggestions); // shortened when the choices sit in one row
+    }
     choices.push(choice(String(choices.length + 1), 'No', null, deny));
 
     const card = h('div', { class: 'prompt' }, title, reason, preview, h('div', { class: 'choices' }, choices), feedback);
@@ -4033,6 +4186,7 @@ function parseAnswers(text) {
 const BG_LABELS = { local_agent: 'Agent', local_bash: 'Shell', local_monitor: 'Monitor', monitor: 'Monitor' };
 /** Waiting mode ends once a cell has stayed idle this long (a background task's notification can start a new turn). */
 const WAIT_SETTLE_MS = 4000;
+const WAIT_OPEN_TASKS_MS = 5 * 60 * 1000; // how long an idle cell with open tasks stays busy before it says Done
 /** Trails a prompt asked to keep a task list; the chat hides it, live and on resume. */
 // The composer's task-list toggle is gone; these wordings stay so older transcripts' hints are still told apart.
 const TASK_HINT = '(HQ: track this work with TaskCreate/TaskUpdate so the user can follow progress.)';
@@ -4529,7 +4683,7 @@ function addCell(opts, { restore = false, batch = false, background = false } = 
   // A session another session started wears its starter's project colour (see Cell.colorCwd).
   const parent = !restore && opts.spawnedBy ? app.cells.find(c => c.hqId === opts.spawnedBy) : null;
   if (parent) opts = { ...opts, colorCwd: parent.colorCwd || parent.cwd };
-  // Settings > Started sessions: smaller than their starter, or tucked in the dock, as they rarely need the user.
+  // Settings > Started sessions: smaller than their starter, or tucked in its tray, as they rarely need the user.
   if (!restore && opts.spawnedBy && app.settings.childCells === 'dock') opts = { ...opts, collapsed: true };
   if (!restore && opts.spawnedBy && app.settings.childCells === 'small') opts = { ...opts, flexW: 0.5, flexH: 0.5 };
   const cell = new Cell(opts);
@@ -4577,10 +4731,18 @@ function placeCell(cell) {
   keepGroupsTogether();
 }
 
-/** Opens a new session with the permission mode, model and effort the user picked last. */
+/**
+ * The mode every new session starts in, whoever starts it: Claude's auto mode. Hermes has no auto
+ * mode (its modes only govern file edits), so it gets its nearest: edits in the folder go ahead and
+ * commands follow Hermes' own approval settings. A session's own mode is set from its "…" menu.
+ */
+const NEW_SESSION_MODE = { claude: 'auto', hermes: 'acceptEdits' };
+
+/** Opens a new session in NEW_SESSION_MODE, with the model and effort the user picked last. */
 function addNewCell(opts, flags) {
-  const { permissionMode = 'default', model = null, effort = null } = opts.backend === 'hermes' ? hermes.defaults : opts.backend === 'codex' ? codexDefaults() : opts.backend === 'cloud' ? {} : app.defaults;
-  return addCell({ permissionMode, model, effort, ...opts }, flags);
+  const backend = opts.backend || 'claude';
+  const { permissionMode = 'default', model = null, effort = null } = backend === 'hermes' ? hermes.defaults : backend === 'codex' ? codexDefaults() : backend === 'cloud' ? {} : app.defaults;
+  return addCell({ permissionMode: NEW_SESSION_MODE[backend] || permissionMode, model, effort, ...opts }, flags);
 }
 
 /** Remembers a permission mode, model or effort picked in a cell, as the default for new sessions. */
@@ -4664,6 +4826,8 @@ function closeCell(cell) {
   cell.dispose();
   mcpCellClosed(cell);
   deputyCellClosed(cell);
+  if (cell.backend === 'hermes') forgetCachedSessions('Hermes'); // so the resume list shows it
+  else if (cell.backend === 'codex') forgetCachedSessions('Codex');
   if (peeked === cell) peeked = null;
   const i = app.cells.indexOf(cell);
   if (i >= 0) app.cells.splice(i, 1);
@@ -5111,9 +5275,34 @@ async function loadResumeSessions() {
  * resolves to all of them, `names` says whose are coming. Null when neither is asked for.
  */
 function otherSessions(cwd) {
-  const sources = [['Codex', codexSessions(cwd)], ['Hermes', hermesSessions(cwd)]].filter(([, p]) => p);
+  const sources = [['Codex', () => codexSessions(cwd)], ['Hermes', () => hermesSessions(cwd)]]
+    .map(([name, read]) => [name, cachedSessions(name, cwd, read)]).filter(([, p]) => p);
   if (!sources.length) return null;
   return { names: sources.map(([n]) => n).join(' and '), list: Promise.all(sources.map(([, p]) => p)).then(lists => lists.flat()) };
+}
+
+// Listing Codex's or Hermes' sessions starts a helper that takes seconds, so a resume dialog reopened
+// soon after reuses the last list for that folder. Closing one of that agent's cells drops it, so the
+// session just closed shows; an empty list (also what a failed read gives) is not kept.
+const OTHER_SESSIONS_TTL_MS = 5 * 60 * 1000;
+const otherSessionsCache = new Map(); // "<agent>\n<folder>" -> { at, list: Promise }
+
+/** The agent's session list for the folder: the one read in the last few minutes, else `read()`'s. */
+function cachedSessions(agent, cwd, read) {
+  const key = `${agent}\n${cwd || ''}`;
+  const hit = otherSessionsCache.get(key);
+  if (hit && Date.now() - hit.at < OTHER_SESSIONS_TTL_MS) return hit.list;
+  const list = read();
+  if (!list) return null;
+  const entry = { at: Date.now(), list };
+  otherSessionsCache.set(key, entry);
+  list.then(l => { if (!l.length && otherSessionsCache.get(key) === entry) otherSessionsCache.delete(key); });
+  return list;
+}
+
+/** Forgets the cached session lists of an agent ('Codex', 'Hermes'), or of all with none given. */
+function forgetCachedSessions(agent) {
+  for (const key of otherSessionsCache.keys()) if (!agent || key.startsWith(`${agent}\n`)) otherSessionsCache.delete(key);
 }
 
 /** Every folder with a recent session, an open cell or a place in the recent list, by name. */
@@ -5393,6 +5582,8 @@ const usage = { data: null, fetchedAt: 0, loading: null, error: null, timer: nul
 const USAGE_EVERY_MS = 5 * 60 * 1000;       // while a session is running, asking it is free
 const USAGE_PROBE_EVERY_MS = 15 * 60 * 1000; // otherwise a short-lived claude is started to ask
 const USAGE_STALE_MS = 2 * 60 * 1000;
+// The API key balance (usage popup + Settings) is hidden: the Console has no balance API, so it can't be kept right. Flip to show it again.
+const SHOW_API_BALANCE = false;
 
 /** Green at 0%, yellow at 60%, red at 100%. */
 const HEAT_STOPS = [[0, [76, 255, 46]], [60, [245, 239, 71]], [100, [240, 14, 14]]];
@@ -5678,7 +5869,7 @@ function renderUsagePop() {
       usedPct != null ? h('div', { class: 'usage-bar' }, h('span', { style: `width:${Math.max(0, Math.min(100, usedPct))}%;background:${heatCss(usedPct)}` })) : null,
       c.resetsAt ? h('div', { class: 'usage-reset', text: c.resetsAt < Date.now() ? 'Reset' : resetText(c.resetsAt) }) : null));
   }
-  if (app.apiKeyHint || apiSpent > 0 || app.settings.apiCreditLeft != null || app.settings.apiCreditExpires) {
+  if (SHOW_API_BALANCE && (app.apiKeyHint || apiSpent > 0 || app.settings.apiCreditLeft != null || app.settings.apiCreditExpires)) {
     const left = app.settings.apiCreditLeft;
     const expires = app.settings.apiCreditExpires ? new Date(`${app.settings.apiCreditExpires}T23:59:59Z`).getTime() : null;
     const days = expires ? Math.ceil((expires - Date.now()) / 86400000) : null;
@@ -5729,8 +5920,8 @@ setInterval(() => {
 // Token usage: where the tokens went, by session, folder and model
 // ======================================================================================
 
-// Read from the usage Claude Code writes into its transcripts (usage.rs), so looking costs no
-// tokens. The backend keeps what it read, and only reads a file again once it has changed.
+// Read from the usage Claude Code writes into its transcripts and from Hermes' own history
+// (usage.rs), so looking costs no tokens. The backend keeps what it read, and only reads a file again once it has changed.
 const tokensPanel = $('#tokens');
 const tokensBody = $('#tokens-body');
 const TOKEN_VIEWS = [['sessions', 'Sessions'], ['folders', 'Folders'], ['models', 'Models']];
@@ -5821,8 +6012,9 @@ function tokenGroups(sessions) {
     const folder = tokens.view === 'folders';
     const g = group(folder ? projectKey(s.cwd || '') : s.sessionId, () => folder
       ? { name: baseName(s.cwd || '') || s.cwd || '(unknown folder)', title: s.cwd || '', cwd: s.cwd, open: s.cwd ? () => setTokensFolder(s.cwd) : null }
-      : { name: s.title || '(no title)', title: `${s.cwd || ''}\n${s.sessionId}`, cwd: s.cwd, modifiedMs: s.modifiedMs,
-          open: s.cwd ? () => { closeTokens(); resumeSession({ sessionId: s.sessionId, cwd: s.cwd, title: s.title, modifiedMs: s.modifiedMs }); } : null });
+      : { name: s.title || '(no title)', title: `${s.cwd || ''}\n${s.sessionId}`, cwd: s.cwd, modifiedMs: s.modifiedMs, agent: s.agent,
+          // Resuming is Claude's; a Hermes session's id is Hermes' own.
+          open: s.cwd && s.agent !== 'hermes' ? () => { closeTokens(); resumeSession({ sessionId: s.sessionId, cwd: s.cwd, title: s.title, modifiedMs: s.modifiedMs }); } : null });
     for (const row of s.rows) g.rows.push(row);
     g.sessions.add(s.sessionId);
   }
@@ -5940,7 +6132,8 @@ function renderTokens() {
     const breakdown = `Input ${formatTokens(t.input)} · Output ${formatTokens(t.output)} · Cache write ${formatTokens(t.cacheWrite)} · Cache read ${formatTokens(t.cacheRead)}`
       + (t.subCost ? `\nSubagents ${formatCost(t.subCost)}` : '');
     const row = h(g.open ? 'button' : 'div', { class: `tk-row${g.open ? '' : ' static'}`, title: `${g.title ? `${g.title}\n` : ''}${breakdown}`, onclick: g.open },
-      h('span', { class: 'tk-name' }, h('span', { class: 'name', text: g.name }), h('span', { class: 'path', text: path })),
+      h('span', { class: 'tk-name' }, h('span', { class: 'name', text: g.name }),
+        h('span', { class: 'path' }, g.agent === 'hermes' ? h('span', { class: 'agent-tag', text: 'Hermes', title: 'Hermes Agent session', style: 'margin-right:6px' }) : null, path)),
       h('span', { class: 'tk-num', text: formatTokens(t.tokens) }),
       h('span', { class: 'tk-num cost', text: t.unpriced && !t.cost ? '—' : formatCost(t.cost) }),
       h('span', { class: 'tk-share' }, h('span', { class: 'bar' }, h('span', { style: `width:${Math.min(100, share)}%` })),
@@ -5950,8 +6143,9 @@ function renderTokens() {
   }
   if (!groups.length) rows.push(h('div', { class: 'session-empty', text: tokens.loading ? 'Reading transcripts…' : 'No usage in this period.' }));
   parts.push(h('div', { class: 'tk-list' }, rows));
-  parts.push(h('div', { class: 'usage-foot', text: 'Estimated at API list prices from the Claude Code transcripts on this computer; '
-    + 'a Pro or Max plan is not billed these amounts. Requests Claude Code keeps out of its transcripts, and Codex and Hermes cells, '
+  parts.push(h('div', { class: 'usage-foot', text: 'Estimated at API list prices from the Claude Code transcripts and the Hermes Agent history on this computer; '
+    + 'a Pro or Max plan is not billed these amounts. Hermes counts a session by the day it was last used, and models without '
+    + 'a known price use the cost Hermes recorded. Requests Claude Code keeps out of its transcripts, and Codex cells, '
     + 'are not counted. Reading them costs no tokens.' }));
   tokensBody.replaceChildren(...parts);
 }
@@ -5987,10 +6181,12 @@ const CUSTOM_COLORS = [['--accent', 'Accent'], ['--link', 'Links'], ['--claude',
   ['--hl-keyword', 'Code: keywords'], ['--hl-string', 'Code: strings'], ['--hl-function', 'Code: functions'], ['--hl-comment', 'Code: comments']];
 // The cell header's buttons that can be hidden: [class, label].
 const HEAD_BUTTONS = [['act-afk', 'AFK'], ['act-handoff', 'Handoff'], ['act-detail', 'Detail level'], ['act-progress', 'Progress'], ['act-waiting', 'Waiting mode'], ['act-code', 'VS Code'],
-  ['act-terminal', 'Terminal'], ['act-reveal', FILE_MANAGER], ['act-group', 'Group'], ['act-spot', 'Spotlight'], ['act-collapse', 'Collapse'], ['act-max', 'Maximize'], ['act-close', 'Close']];
-const DEFAULT_PINNED = ['act-waiting', 'act-progress', 'act-spot', 'act-collapse', 'act-close'];
+  ['act-terminal', 'Terminal'], ['act-reveal', FILE_MANAGER], ['act-group', 'Group'], ['act-spot', 'Spotlight'], ['act-orch', 'Orchestrator column'], ['act-collapse', 'Collapse'], ['act-max', 'Maximize'], ['act-close', 'Close']];
+const DEFAULT_PINNED = ['act-detail', 'act-waiting', 'act-progress', 'act-spot', 'act-orch', 'act-collapse', 'act-close'];
+// Pinned once on boards saved before they were pinned by default; unpinning one afterwards sticks.
+const ALWAYS_PINNED_ONCE = ['act-detail', 'act-waiting'];
 /** Buttons a collapsed cell hides (style.css, .cell.collapsed); its "…" menu leaves them out too. */
-const COLLAPSED_HIDES = ['act-detail', 'act-handoff', 'act-progress', 'act-waiting', 'act-code', 'act-reveal', 'act-spot', 'act-max'];
+const COLLAPSED_HIDES = ['act-detail', 'act-handoff', 'act-progress', 'act-waiting', 'act-code', 'act-reveal', 'act-spot', 'act-orch', 'act-max'];
 /** The header's window buttons: "…" sits just before the first of them. */
 const WINDOW_BUTTONS = ['act-collapse', 'act-max', 'act-close'];
 const HEX = /^#[0-9a-f]{6}$/i;
@@ -6027,18 +6223,23 @@ function sanitizeSettings(x) {
     // How the header buttons show: always, fading in as the pointer nears, or only while the header is hovered.
     buttonReveal: ['always', 'near', 'hover'].includes(v.buttonReveal) ? v.buttonReveal : v.fadeButtons === true ? 'near' : 'always',
     // The buttons shown in the header; the rest live in its "…" menu.
-    pinnedButtons: HEAD_BUTTONS.map(([b]) => b).filter(b => (Array.isArray(v.pinnedButtons) ? v.pinnedButtons : DEFAULT_PINNED).includes(b)),
+    pinnedButtons: HEAD_BUTTONS.map(([b]) => b).filter(b => (Array.isArray(v.pinnedButtons) ? v.pinnedButtons : DEFAULT_PINNED).includes(b)
+      || (v.pinsMigrated !== true && ALWAYS_PINNED_ONCE.includes(b))),
+    pinsMigrated: true,
     // The header buttons' order, dragged into place in any cell and shared by all; unknown names dropped, new buttons appended.
     buttonOrder: [...new Set([...(Array.isArray(v.buttonOrder) ? v.buttonOrder : []), ...HEAD_BUTTONS.map(([b]) => b)])]
       .filter(b => HEAD_BUTTONS.some(([k]) => k === b)),
     colors,
+    waitNudge: v.waitNudge !== false, // offer waiting mode on a long turn (Cell.checkWaitNudge)
+    waitNudgeNo: Number.isInteger(v.waitNudgeNo) && v.waitNudgeNo >= 0 ? v.waitNudgeNo : 0, // "No"s in a row
+    autoModes: v.autoModes === true, // open sessions were moved to NEW_SESSION_MODE once (restore)
     mcp: v.mcp !== false, // HQ's MCP server for new sessions (mcp.js)
     mcpSpawn: v.mcpSpawn !== false, // agents may start sessions
     mcpExternal: v.mcpExternal === true, // installed machine-wide: agents outside HQ may call the tools too
     // The most sessions started by agents that are open at once.
-    // How sessions an agent starts open: 'full' like any other, 'small' (half the width, smaller text) or 'dock' (collapsed).
-    reviewAll: v.reviewAll === true, // the approval reviewer in every session, at once (afk.js reviewOn); set from the UI only
-    childCells: ['full', 'small', 'dock'].includes(v.childCells) ? v.childCells : 'small',
+    // How sessions an agent starts open: 'full' like any other, 'small' (half the width, smaller text) or 'dock' (collapsed,
+    // into the starter's tray while the starter is open, else the dock).
+    childCells: ['full', 'small', 'dock'].includes(v.childCells) ? v.childCells : 'dock',
     mcpMaxSpawned: Number.isInteger(v.mcpMaxSpawned) && v.mcpMaxSpawned >= 0 && v.mcpMaxSpawned <= MCP_MAX_SPAWNED_CAP ? v.mcpMaxSpawned : MCP_DEFAULT_MAX_SPAWNED,
   };
 }
@@ -6175,36 +6376,22 @@ function buildMoreMenu(menuEl, cell) {
   });
   menuEl.append(h('div', { class: 'menu-title', text: 'More' }),
     ...(items.length ? items : [h('div', { class: 'menu-empty', text: 'Every button is pinned to the header.' })]));
+  // Nearly every session runs in NEW_SESSION_MODE; this is where one is set apart.
+  if (cell.backend !== 'cloud') menuEl.append(h('div', { class: 'menu-title', text: 'Permissions' }), ...permissionItems(cell, menuCheck));
   menuEl.append(h('div', { class: 'menu-title', text: 'This session' }),
     h('button', { class: 'menu-item', onclick: () => openMenu(cell.titleEl, cell, m => buildSessionMenu(m, cell)) },
       icon('settings-gear'), h('span', { class: 'menu-main' }, h('span', { class: 'name', text: 'Session settings…' }),
-        h('span', { class: 'desc', text: 'Permissions, Remote Control, approval reviews (or right-click the header)' }))));
-}
-
-/** The permission modes Settings offers: Claude's (the composer template's list). */
-function claudeModes() {
-  return [...$('#cell-template').content.querySelectorAll('select.mode option')].map(o => [o.value, o.textContent]);
-}
-
-/** Whether Settings' global choices reach this session: one an agent or a command line started keeps what it was started with. */
-function followsGlobal(cell) {
-  return cell.backend === 'claude' && !cell.spawnedBy && !cell.launched;
-}
-
-/** Whether a session is in Settings' permission mode and not set on its own (the session menu's Follow Settings). */
-function followsGlobalMode(cell) {
-  return followsGlobal(cell) && !cell.modeOwn && cell.permissionMode === (app.defaults.permissionMode || 'default');
+        h('span', { class: 'desc', text: 'Remote Control and more (or right-click the header)' }))));
 }
 
 /**
- * Settings > Permissions: the default for new Claude sessions, and the mode of every open one
- * that follows it. One in another mode (set before this setting, or switched by Claude, as plan
- * mode is) keeps its mode.
+ * The session's permission modes as menu items, the current one checked; the new-session mode says so.
+ * In the header's "…" menu and its right-click menu. `check` builds one item (buildSessionMenu's).
  */
-function setGlobalMode(mode) {
-  const following = app.cells.filter(followsGlobalMode);
-  rememberChoice({ permissionMode: mode });
-  for (const c of following) if (c.permissionMode !== mode) c.setMode(mode);
+function permissionItems(cell, check) {
+  const usual = NEW_SESSION_MODE[cell.backend];
+  return [...cell.modeSel.options].map(o => check(cell.permissionMode === o.value, o.textContent, o.value === usual ? 'Every new session' : '',
+    () => { cell.modeOwn = o.value !== usual; cell.setMode(o.value); }));
 }
 
 /** Settings > Remote Control: new Claude sessions, and every open one not set on its own. */
@@ -6221,35 +6408,23 @@ function setGlobalRemote(on) {
 
 /**
  * The header's right-click menu: what this one session does differently from Settings. Its
- * permission mode, Remote Control, and whether approvals go to the reviewer.
+ * permission mode, Remote Control.
  */
-function buildSessionMenu(menuEl, cell) {
-  const check = (on, name, desc, run, title) => h('button', { class: `menu-item${on ? ' checked' : ''}`, title: title || '', onclick: () => { closeMenu(); run(); } },
+/** A menu item with a tick when `on`; picking it closes the menu and runs `run`. */
+function menuCheck(on, name, desc, run, title) {
+  return h('button', { class: `menu-item${on ? ' checked' : ''}`, title: title || '', onclick: () => { closeMenu(); run(); } },
     icon(on ? 'check' : 'blank'), h('span', { class: 'menu-main' }, h('span', { class: 'name', text: name }), desc ? h('span', { class: 'desc', text: desc }) : null));
+}
+
+function buildSessionMenu(menuEl, cell) {
+  const check = menuCheck;
   menuEl.append(h('div', { class: 'menu-title', text: cell.displayTitle() || 'This session' }));
   if (cell.backend !== 'cloud') {
-    menuEl.append(h('div', { class: 'menu-title', text: 'Permissions' }));
-    const global = app.defaults.permissionMode || 'default';
-    const follows = followsGlobalMode(cell);
-    if (followsGlobal(cell)) {
-      const label = (claudeModes().find(([v]) => v === global) || [global, global])[1];
-      menuEl.append(check(follows, 'Follow Settings', label, () => { cell.modeOwn = false; cell.setMode(global); }));
-    }
-    for (const o of cell.modeSel.options) {
-      menuEl.append(check(!follows && cell.permissionMode === o.value, o.textContent, '', () => { cell.modeOwn = true; cell.setMode(o.value); }));
-    }
+    menuEl.append(h('div', { class: 'menu-title', text: 'Permissions' }), ...permissionItems(cell, check));
   }
   if (cell.remoteOffered()) {
     menuEl.append(h('div', { class: 'menu-title', text: 'Remote Control' }));
     cell.buildRemoteMenu(menuEl);
-  }
-  if (reviewBackend(cell)) {
-    const on = cell.review || reviewAllCovers(cell);
-    menuEl.append(h('div', { class: 'menu-title', text: 'Approvals' }),
-      check(on, 'Review approvals', cell.review ? 'Set here' : reviewAllCovers(cell) ? 'From Settings, at once' : 'Harmless ones go ahead after a minute', () => {
-        cell.reviewOff = on && app.settings.reviewAll; // off here even while Settings reviews every session
-        setCellReview(cell, !on);
-      }, 'A permission prompt goes to a separate Claude call. It can approve it once or leave it for you; it never refuses.'));
   }
   if (cell.backend === 'claude' || cell.backend === 'codex') {
     const on = !!app.deputy && app.deputy === cell.hqId;
@@ -6392,24 +6567,22 @@ function renderSettings() {
     row('Notifications', `A notification when a turn finishes, or Claude needs you, while HQ is in the background.${IS_MAC ? ' Approval requests get Approve and Deny buttons.' : ''}`, toggle(app.settings.notify, v => changeSetting('notify', v))),
     IS_MAC && app.settings.notify ? row('Keep buttons on screen', 'Set HQ\'s notification style to Alerts: a banner hides Approve and Deny until you hover over it, then slides away.',
       h('button', { class: 'btn', text: 'Open Settings…', onclick: () => invoke('open_notification_settings').catch(err => console.warn('notification settings', err)) })) : null,
+    row('Offer waiting mode', `When a turn has run ${WAIT_NUDGE_MS / 1000} seconds without you touching its session, a bar offers waiting mode. Turns itself off after ${WAIT_NUDGE_NOS} "No"s in a row.`,
+      toggle(app.settings.waitNudge, v => { changeSetting('waitNudge', v); changeSetting('waitNudgeNo', 0); })),
     row('Sound for questions and approvals', 'A chime when a session asks you something or wants approval.', toggle(app.settings.sound, v => changeSetting('sound', v))),
-    row('Permissions', 'For Claude sessions: new ones, and every open one not set on its own. Right-click a session\'s header to give it its own. Sessions an agent or a command line started keep the mode they were started with.',
-      select(app.defaults.permissionMode || 'default', claudeModes(), v => setGlobalMode(v))),
     app.remoteAvailable !== false ? row('Remote Control', 'Continue Claude sessions from claude.ai/code or the Claude app. Applies to every session not set on its own; right-click a session\'s header to turn it off there.', toggle(!!app.remoteDefault, v => setGlobalRemote(v))) : null,
-    row('Review approvals in every session', 'Each permission prompt in a Claude or Hermes session goes straight to a separate Claude call, with no minute\'s wait. It approves harmless ones once or leaves them for you; it never refuses. Right-click a session\'s header to leave it out. Sessions an agent or a command line started are left out unless turned on there.',
-      toggle(app.settings.reviewAll, v => { changeSetting('reviewAll', v); syncAfk(); })),
     row('Default model for new sessions', 'The same as picking a model in a session. HQ_MODEL still applies when none is picked.',
       select(app.defaults.model || 'default', models, v => rememberChoice({ model: v }))),
     row('Automatic task lists', 'Ask Claude and Hermes to keep a task list on multi-step work. Off saves a few tokens per long job.', toggle(app.settings.autoTasks, v => changeSetting('autoTasks', v))),
     row('Agents per session', 'The most subagents one Claude session runs at once, workflows included; more are refused until one finishes. For sessions started from now on. 0 is no limit.', maxAgents),
     row('HQ tools for sessions', 'Gives every session HQ\'s own MCP server (mcp__hq__*): it can list, start, message and wait for other sessions, share notes, claim files and schedule messages. Starting, messaging and stopping sessions still asks for permission like any other tool. For sessions started from now on.', toggle(app.settings.mcp, v => changeSetting('mcp', v))),
     app.settings.mcp ? row('Let agents start sessions', `A session can open new sessions (Claude, Codex or Hermes) as cells, up to ${MCP_MAX_DEPTH} levels deep. They never bypass permissions.`, toggle(app.settings.mcpSpawn, v => changeSetting('mcpSpawn', v))) : null,
-    app.settings.mcp && app.settings.mcpSpawn ? row('Sessions agents start', 'They join their starter\'s group and wear its project colour. Small and Docked keep them out of the way, as they rarely need you; a docked one still lights up when it asks you something.',
+    app.settings.mcp && app.settings.mcpSpawn ? row('Sessions agents start', 'They join their starter\'s group and wear its project colour. Small and Docked keep them out of the way, as they rarely need you. Docked ones sit in a tray in their starter, where a question or permission one asks opens for you to answer without opening it.',
       select(app.settings.childCells, [['full', 'Full size'], ['small', 'Small'], ['dock', 'Docked']], v => changeSetting('childCells', v))) : null,
     app.settings.mcp && app.settings.mcpSpawn ? row('Sessions agents can open', 'The most sessions started by agents that can be open at once. Closing one makes room.', mcpMax) : null,
     app.settings.mcp ? row('HQ tools everywhere', 'Adds HQ\'s tools to every Claude Code, Codex and Hermes on this computer, so agents started in a terminal or an editor can see and start HQ sessions too while HQ is open. Agents pick it up the next time they start.', mcpInstallControl()) : null,
     row('API key for API credits', "A session that hits your plan's usage limit can carry on with this Claude Console key, from its limit card, until the plan's usage is back. A new Claude session can also run on it from its first message: click the key button next to its MCP button before sending. Max and Team plans' monthly API credits pay only for a key from the Console organization linked in claude.ai's billing settings; any other key is billed as usual. Kept in the system keychain (Credential Manager on Windows, Keychain on macOS), never in the board.", apiKeyControl()),
-    explorerMenu.on != null ? row('Open in HQ in Explorer', 'Adds "Open in HQ" to Explorer\'s right-click menu on folders: it opens a new session there. Like any session a command line opens, AFK and the approval reviewer leave it alone until you turn them on in it.',
+    explorerMenu.on != null ? row('Open in HQ in Explorer', 'Adds "Open in HQ" to Explorer\'s right-click menu on folders: it opens a new session there. Like any session a command line opens, AFK leaves it alone until you turn it on in it, and the deputy never answers for it.',
       toggle(explorerMenu.on, v => setExplorerMenu(v))) : null,
     row('Check for HQ updates automatically', 'The Check for updates button in the sessions list always works.', toggle(app.settings.autoUpdate, v => changeSetting('autoUpdate', v))),
     row('Claude command', 'Path to the claude program, for sessions started from now on. Empty uses HQ_CLAUDE, else claude on PATH.', path),
@@ -6476,7 +6649,7 @@ function renderAppearanceSettings(row, toggle, select) {
     build.appIcon == null ? null : row('App icon', "A PNG or ICO shown on the window and taskbar instead of HQ's own.", appIconControl()),
     h('div', { class: 'settings-section', text: 'Top bar' }),
     row('Weekly usage bar', 'A thin bar along the bottom of the usage button showing the weekly limit.', toggle(app.settings.weeklyBar, v => changeSetting('weeklyBar', v))),
-    row('API key balance', 'Credits left on the key, from the Console (Billing > Promotional credits), shown in the usage popup. Update it when it changes.',
+    !SHOW_API_BALANCE ? null : row('API key balance', 'Credits left on the key, from the Console (Billing > Promotional credits), shown in the usage popup. Update it when it changes.',
       h('div', { class: 'api-key' },
         (() => { const i = h('input', { type: 'number', min: '0', step: '0.01', placeholder: 'USD left', value: app.settings.apiCreditLeft ?? '' });
           i.addEventListener('change', () => { const n = parseFloat(i.value); changeSetting('apiCreditLeft', Number.isFinite(n) && n >= 0 ? n : null); }); return i; })(),
@@ -6859,6 +7032,7 @@ function flushState() {
       fork: c.fork || undefined,
       collapsed: c.collapsed || undefined,
       spot: c.spot || undefined,
+      orch: c.orch || undefined,
       group: c.group || undefined,
       flexW: c.flexW !== 1 ? c.flexW : undefined,
       flexH: c.flexH !== 1 ? c.flexH : undefined,
@@ -6870,9 +7044,8 @@ function flushState() {
       apiKey: c.apiKeyed || undefined,
       afk: c.afk ?? undefined,
       afkLog: c.afkLog.length ? c.afkLog : undefined,
-      review: c.review || undefined,
-      reviewOff: c.reviewOff || undefined,
       modeOwn: c.modeOwn || undefined,
+      oneSentence: c.oneSentence || undefined,
       remoteOwn: c.remoteOwn || undefined,
       busySend: c.busySend || undefined,
       launched: c.launched || undefined,
@@ -6902,6 +7075,7 @@ function flushState() {
     planLimitedUntil: app.planLimitedUntil > Date.now() ? app.planLimitedUntil : undefined,
     afk: app.afk || undefined,
     deputy: app.deputy || undefined,
+    afkDeputy: app.afkDeputy || undefined,
     deputyRules: app.deputyRules && (app.deputyRules.all || app.deputyRules.projects.length) ? app.deputyRules : undefined,
     deputyLog: app.deputyLog && app.deputyLog.length ? app.deputyLog : undefined,
     mcp: mcpSaved(),
@@ -7069,6 +7243,7 @@ async function restore() {
   app.planLimitedUntil = state && Number.isFinite(state.planLimitedUntil) ? state.planLimitedUntil : 0;
   app.afk = sanitizeAfk(state && state.afk);
   app.deputy = state && typeof state.deputy === 'string' ? state.deputy : null;
+  app.afkDeputy = state && typeof state.afkDeputy === 'string' && state.afkDeputy === app.deputy ? state.afkDeputy : null;
   app.deputyRules = sanitizeDeputyRules(state && state.deputyRules);
   app.deputyLog = sanitizeDeputyLog(state && state.deputyLog);
   app.apiKeyHint = await invoke('api_key_hint').catch(() => null);
@@ -7094,14 +7269,20 @@ async function restore() {
   // Sessions a session host kept running while HQ was closed (an update), or while this page reloaded.
   const hosted = await invoke('host_sessions').catch(err => { console.warn('host sessions', err); return []; });
   const claimed = new Set();
+  const modesBefore = !app.settings.autoModes; // a board saved before every session started in NEW_SESSION_MODE
   saved.forEach((c, i) => {
     // Version 1 saved the model Claude reported, not one the user picked; drop it so the cell follows the default.
     if ((state.version || 1) < 2) c.model = null;
     const backend = c.backend || 'claude';
     const h = hosted.find(x => x.cellKey && x.cellKey === c.hqId && x.backend === backend && !claimed.has(x.id));
     if (h) claimed.add(h.id);
+    // Once: an open session in the old default modes moves to NEW_SESSION_MODE. Not one set on its own, one an
+    // agent or a command line started (it keeps what it was started with), nor one a session host kept running.
+    if (modesBefore && NEW_SESSION_MODE[backend] && !c.modeOwn && !c.spawnedBy && !c.launched && !h
+      && ['default', 'acceptEdits'].includes(c.permissionMode || 'default')) c.permissionMode = NEW_SESSION_MODE[backend];
     addCell({ ...c, missing: c.backend === 'cloud' ? false : !exists[i], remote: c.remote === true, hosted: h ? { id: h.id, fromMs: h.replayFromMs || h.startedMs } : null }, { restore: true, batch: true });
   });
+  app.settings.autoModes = true;
   // No cell claims these (closed just before HQ went, say): nothing could reach them.
   for (const h of hosted) if (!claimed.has(h.id)) invoke('kill_session', { id: h.id }).catch(() => {});
   // Each restored cell took focus in turn; a collapsed one must not keep it.
@@ -7146,9 +7327,8 @@ async function openLaunch(r) {
   if (r.model) opts.model = r.model;
   if (r.effort) opts.effort = r.effort;
   // Never bypassPermissions from a command line: whoever runs hq.exe must not skip the prompts.
-  // Nor through Settings > Permissions: a plain launch (Explorer's Open in HQ) takes the global mode only when it is not bypass.
-  const global = app.defaults.permissionMode || 'default';
-  opts.permissionMode = LAUNCH_MODES.includes(r.permissionMode) ? r.permissionMode : LAUNCH_MODES.includes(global) ? global : 'default';
+  // A plain launch (Explorer's Open in HQ) starts in NEW_SESSION_MODE, as any new session does.
+  opts.permissionMode = LAUNCH_MODES.includes(r.permissionMode) ? r.permissionMode : NEW_SESSION_MODE.claude;
   const cell = addNewCell(opts);
   if (r.prompt) {
     cell.launchPrompt = r.prompt.trim(); // as submit() reads the composer
@@ -7161,3 +7341,43 @@ async function openLaunch(r) {
 window.__TAURI__.event.listen('launch', openLaunches).catch(err => console.error('launch listener failed', err));
 
 restore();
+
+// ======================================================================================
+// Closing HQ: the window's close button asks first while sessions are working (main.rs, CloseGuard)
+// ======================================================================================
+
+let quitDialog = null;
+
+function closeHq() {
+  flushState().catch(() => {}).finally(() => invoke('close_window').catch(err => console.error('close failed', err)));
+}
+
+/** Names what closing would stop, and closes only on a yes. Esc or a click outside keeps HQ open. */
+function confirmClose(working) {
+  if (quitDialog) { quitDialog.querySelector('.quit-stay').focus(); return; }
+  const names = working.slice(0, 4).map(c => `${baseName(c.colorCwd || c.cwd) || c.cwd} · ${c.displayTitle() || 'New session'} (${stateOf(c)[1].toLowerCase()})`);
+  const more = working.length - names.length;
+  const close = () => { if (!quitDialog) return; quitDialog.remove(); quitDialog = null; };
+  const stay = h('button', { class: 'btn primary quit-stay', type: 'button', onclick: close }, 'Keep HQ open');
+  const quit = h('button', { class: 'btn danger', type: 'button', onclick: () => { close(); closeHq(); } }, 'Close HQ anyway');
+  quitDialog = h('div', { class: 'setup', role: 'alertdialog', 'aria-modal': 'true', 'aria-labelledby': 'quit-title' },
+    h('div', { class: 'setup-card' },
+      h('div', { class: 'setup-title', id: 'quit-title', text: `${working.length} session${working.length === 1 ? ' is' : 's are'} still working` }),
+      h('div', { class: 'setup-text', text: 'Closing HQ stops them, with any turn, question or background task in flight.' }),
+      h('ul', { class: 'quit-list' }, names.map(n => h('li', { text: n })), more > 0 ? h('li', { text: `and ${more} more` }) : null),
+      h('div', { class: 'setup-actions' }, stay, quit)));
+  quitDialog.addEventListener('mousedown', e => { if (e.target === quitDialog) close(); });
+  quitDialog.addEventListener('keydown', e => {
+    e.stopPropagation(); // Esc must not also stop a session
+    if (e.key === 'Escape') { e.preventDefault(); close(); }
+  });
+  document.body.append(quitDialog);
+  stay.focus();
+}
+
+window.__TAURI__.event.listen('close-requested', () => {
+  invoke('close_ack').catch(() => {});
+  const working = app.cells.filter(c => c.busy() || c.spawning);
+  if (working.length) confirmClose(working);
+  else closeHq();
+}).catch(err => console.error('close listener failed', err));

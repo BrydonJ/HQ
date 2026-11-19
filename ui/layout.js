@@ -5,8 +5,10 @@
 // ======================================================================================
 //
 // The open cells fill rows that keep them near square (chooseRows). Cells in the spotlight take a
-// main pane and the rest stack in a strip beside it. Splitters in the gaps resize cells, rows and
-// the strip; the sizes are flex-grow weights kept on each cell (width in a row, height in the
+// main pane and the rest stack in a strip beside it. Sessions pinned as orchestrators take precedence
+// over the spotlight: each gets a full-height column, side by side, with the rest in the strip.
+// Docked sessions sit in the dock under the grid, or in their starter's tray while it is open.
+// Splitters in the gaps resize cells, rows, columns and the strip; the sizes are flex-grow weights kept on each cell (width in a row, height in the
 // strip), per row count, and for the strip. A header can be dragged to move its cell. Cells in a
 // group always sit together, so dragging one past another cell moves the whole group.
 //
@@ -81,11 +83,18 @@ function layout(animate = true) {
   if (!motion) stopFlips();
   const active = document.activeElement;
 
-  // Collapsed cells sit in the dock as bare headers; the grid lays out the rest.
+  // Collapsed cells sit in the dock as bare headers, or in the tray of the open session that
+  // started them; the grid lays out the rest.
   const shown = app.cells.filter(c => !c.collapsed);
   const docked = app.cells.filter(c => c.collapsed);
+  const trayOf = c => { const p = c.parentCell(); return p && !p.collapsed ? p : null; };
   for (const c of docked) c.el.style.flexGrow = ''; // the dock sizes its headers itself
-  setKids(dock, docked.map(c => c.el));
+  setKids(dock, docked.filter(c => !trayOf(c)).map(c => c.el));
+  // A tray lists its sessions as rows of its own, not their cells: the starter's state classes
+  // would restyle a cell nested in it. Their prompts move into the rows, to be answered there.
+  for (const c of docked) if (trayOf(c) && c.el.isConnected) c.el.remove();
+  for (const c of app.cells) c.placePrompts(c.collapsed && !!trayOf(c));
+  for (const p of app.cells) setKids(p.trayList, docked.filter(c => trayOf(c) === p).map(c => c.trayRow()));
   grid.classList.toggle('all-collapsed', !shown.length && app.cells.length > 0);
   grid.classList.toggle('maximized', !!app.maximized);
 
@@ -93,11 +102,27 @@ function layout(animate = true) {
   const scrolls = shown.map(c => [c, c.msgs.scrollTop, c.stickToBottom]);
   const used = new Set();
   const rect = grid.getBoundingClientRect(); // after the dock is filled, which takes its height
-  const spot = shown.filter(c => c.spot);
-  const rest = shown.filter(c => !c.spot);
-  const spotlight = spot.length > 0 && rest.length > 0;
+  const orchs = shown.filter(c => c.orch);
+  const columns = orchs.length > 0;
+  const spot = columns ? [] : shown.filter(c => c.spot);
+  const rest = shown.filter(c => !c.orch && !(c.spot && !columns));
+  const spotlight = !columns && spot.length > 0 && rest.length > 0;
   grid.classList.toggle('spotlight', spotlight);
-  if (spotlight) {
+  grid.classList.toggle('columns', columns);
+  if (columns) {
+    // Each orchestrator a full-height column with its progress on top; the rest down the strip.
+    setKids(spotMain, orchColumns(orchs, used));
+    if (rest.length) {
+      const share = boardSizes.strip;
+      setKids(spotStrip, chain(rest, 'y', used));
+      spotMain.style.flexGrow = 2 * (1 - share);
+      spotStrip.style.flexGrow = 2 * share;
+      setKids(grid, [spotMain, splitter('strip', 'x', used), spotStrip]);
+    } else {
+      spotMain.style.flexGrow = 1;
+      setKids(grid, [spotMain]);
+    }
+  } else if (spotlight) {
     const share = boardSizes.strip;
     setKids(spotMain, rowsOf(spot, rect.width * (1 - share), rect.height, 's', used));
     setKids(spotStrip, chain(rest, 'y', used));
@@ -111,7 +136,7 @@ function layout(animate = true) {
 
   // Maximized: only the maximized cell and the boxes around it stay on screen (style.css).
   const max = app.maximized && app.maximized.el;
-  for (const box of [spotMain, spotStrip, ...rowPool.g, ...rowPool.s]) box.classList.toggle('has-max', !!max && box.contains(max));
+  for (const box of [spotMain, spotStrip, ...rowPool.g, ...rowPool.s, ...app.cells.map(c => c.colEl).filter(Boolean)]) box.classList.toggle('has-max', !!max && box.contains(max));
   for (const c of shown) c.el.classList.toggle('max', c.el === max);
   // A move or a closed cell can change which session leads a group, and so its colour.
   for (const c of app.cells) if (c.group) c.applyGroup();
@@ -202,6 +227,25 @@ function chain(cells, axis, used) {
     c.el.style.flexGrow = grow[i];
     if (i) out.push(splitter(`${axis}-${c.hqId}`, axis, used));
     out.push(c.el);
+  });
+  return out;
+}
+
+/** The orchestrators' columns, side by side: each its progress head over its cell, sized by the cell's width weight. */
+function orchColumns(cells, used) {
+  const out = [];
+  const grow = asGrows(cells.map(c => c.flexW));
+  cells.forEach((c, i) => {
+    if (!c.colEl) {
+      c.colHead = h('div', { class: 'orch-head' });
+      c.colEl = h('div', { class: 'orch-col' });
+    }
+    c.el.style.flexGrow = '';
+    setKids(c.colEl, [c.colHead, c.el]);
+    c.colEl.style.setProperty('--proj', c.color);
+    c.colEl.style.flexGrow = grow[i];
+    if (i) out.push(splitter(`o-${c.hqId}`, 'x', used));
+    out.push(c.colEl);
   });
   return out;
 }
@@ -333,7 +377,7 @@ function liftCell(cell, start) {
   cellDrag = {
     cell, x: start.x, y: start.y, skip: null, slot: r,
     fx: (start.x - r.left) / r.width, fy: (start.y - r.top) / r.height, // where the header was grabbed, as a share of the cell
-    order: app.cells.slice(), spots: new Map(app.cells.map(c => [c, c.spot])),
+    order: app.cells.slice(), spots: new Map(app.cells.map(c => [c, c.spot])), orchs: new Map(app.cells.map(c => [c, c.orch])),
   };
   if (menuState.anchor) closeMenu();
   focusCell(cell, false);
@@ -376,7 +420,14 @@ const inside = (r, x, y) => x >= r.left && x < r.right && y >= r.top && y < r.bo
 function moveCell(cell, target) {
   const cells = app.cells;
   const from = cells.indexOf(cell), to = cells.indexOf(target);
-  if (cell.spot !== target.spot) {
+  if (cell.orch !== target.orch) {
+    // Into or out of the orchestrator columns: the two trade places, as across the spotlight's edge.
+    [cell.orch, target.orch] = [target.orch, cell.orch];
+    cells[from] = target;
+    cells[to] = cell;
+    cell.applyOrch();
+    target.applyOrch();
+  } else if (cell.spot !== target.spot && !grid.classList.contains('columns')) {
     [cell.spot, target.spot] = [target.spot, cell.spot];
     cells[from] = target;
     cells[to] = cell;
@@ -421,6 +472,7 @@ function dropCell(cancel) {
     const kept = d.order.filter(c => app.cells.includes(c));
     app.cells.splice(0, app.cells.length, ...kept, ...app.cells.filter(c => !d.order.includes(c)));
     for (const c of kept) if (c.spot !== d.spots.get(c)) { c.spot = d.spots.get(c); c.applySpot(); }
+    for (const c of kept) if (c.orch !== d.orchs.get(c)) { c.orch = d.orchs.get(c); c.applyOrch(); }
   }
   cellDrag = null;
   el.style.transform = '';
@@ -514,7 +566,7 @@ function resizeFrom(e, el, axis) {
  * and saved values would change the others' sizes.
  */
 function keepWeights(box, axis) {
-  if (box === grid && grid.classList.contains('spotlight')) {
+  if (box === grid && (grid.classList.contains('spotlight') || grid.classList.contains('columns'))) {
     const strip = Number(spotStrip.style.flexGrow) || DEFAULT_STRIP, main = Number(spotMain.style.flexGrow) || 1 - DEFAULT_STRIP;
     boardSizes.strip = strip / (strip + main);
     return;
@@ -522,7 +574,7 @@ function keepWeights(box, axis) {
   const rows = [];
   for (const kid of box.children) {
     const g = Number(kid.style.flexGrow) || 1;
-    const cell = app.cells.find(c => c.el === kid);
+    const cell = app.cells.find(c => c.el === kid || c.colEl === kid);
     if (cell) {
       if (axis === 'x') cell.flexW = g;
       else cell.flexH = g;
@@ -537,11 +589,11 @@ function keepWeights(box, axis) {
 function evenOut(el) {
   const box = el.parentElement;
   if (!box) return;
-  if (box === grid && grid.classList.contains('spotlight')) {
+  if (box === grid && (grid.classList.contains('spotlight') || grid.classList.contains('columns'))) {
     boardSizes.strip = DEFAULT_STRIP;
   } else {
     for (const kid of box.children) {
-      const cell = app.cells.find(c => c.el === kid);
+      const cell = app.cells.find(c => c.el === kid || c.colEl === kid);
       if (cell) {
         if (el.classList.contains('split-x')) cell.flexW = 1;
         else cell.flexH = 1;
@@ -577,6 +629,36 @@ function toggleSpot(cell) {
   layout();
   focusCell(cell, true);
   saveState();
+}
+
+// ---------- orchestrator columns ----------
+
+/** Pins a session as an orchestrator (a column of its own), or puts it back among the rest. */
+function toggleOrch(cell) {
+  if (cell.collapsed) cell.setCollapsed(false);
+  cell.orch = !cell.orch;
+  cell.applyOrch();
+  if (app.maximized && app.maximized !== cell) app.maximized = null;
+  layout();
+  focusCell(cell, true);
+  saveState();
+}
+
+/**
+ * An orchestrator column's head: how many of the sessions it started are done, as a count and a
+ * bar, amber while one waits on the user. Called from renderLineage, so it follows their states.
+ */
+function renderOrchHead(cell, kids, waiting) {
+  if (!cell.colHead) return;
+  const done = kids.filter(c => !c.busy() && c.status !== 'running').length;
+  const fill = h('span');
+  fill.style.width = kids.length ? `${Math.round(100 * done / kids.length)}%` : '0%';
+  cell.colHead.classList.toggle('attention', waiting > 0);
+  cell.colHead.replaceChildren(
+    h('span', { class: 'orch-tag', text: 'Orchestrator' }),
+    h('span', { class: 'orch-count', text: !kids.length ? 'No sessions started yet' : waiting ? `${waiting} waiting on you · ${done} of ${kids.length} done` : `${done} of ${kids.length} done` }),
+    h('span', { class: 'orch-bar' }, fill),
+    h('button', { class: 'icon-btn orch-unpin', type: 'button', title: 'Unpin', 'aria-label': 'Unpin this orchestrator', onclick: () => toggleOrch(cell) }, icon('close')));
 }
 
 // ---------- groups ----------

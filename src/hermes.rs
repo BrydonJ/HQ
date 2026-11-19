@@ -37,6 +37,15 @@ const COMPOSER_TASK_HINT: &str = "(HQ: track this work with your todo tool so th
 /// first prompt a process sends instead; Hermes keeps it in the session's history from there.
 const TASK_PROMPT: &str = "(HQ: track this work with your todo tool when it has three or more steps or will take more than a few minutes: the user watches several sessions at once in HQ and judges progress from your todo list. Write the list before starting and keep it current, marking each item in_progress as you start it and completed as soon as it is done. Skip the list for questions and quick single-step jobs. This applies to the rest of the session.)";
 
+/// HQ's one-sentence skill (skills.rs installs it for Claude). Hermes has no such command, so `/1s`
+/// and `/one-sentence` are sent as the skill's own text; the cell then trails each prompt with
+/// `ONE_SENTENCE_HINT` (ui/hermes.js) so a long session does not drift back to long replies.
+const ONE_SENTENCE_SKILL: &str = include_str!("../skills/one-sentence/SKILL.md");
+const ONE_SENTENCE_ON: &str = "(HQ: one-sentence mode on. The user typed /1s: follow these rules for this reply and every reply after it, until they type /1s off.";
+const ONE_SENTENCE_OFF: &str = "(HQ: one-sentence mode off. The user typed /1s off: answer at your normal length from now on.)";
+/// The trailing reminder; `ONE_SENTENCE_HINT` in ui/hermes.js is the same text.
+const ONE_SENTENCE_HINT: &str = "(HQ: one-sentence mode is on: reply in one sentence, two only if the question has two parts, under 40 words of prose, with no preamble, recap or offer. Code, command output and lists the user asked for don't count.)";
+
 /// The `hermes` executable: `HQ_HERMES` when set, otherwise whatever is on PATH. Windows installs
 /// of Hermes 0.22 ship only `hermes.cmd`, which `Command` never finds by bare name (it only
 /// tries `.exe`), so PATH is searched here.
@@ -382,8 +391,11 @@ impl Replay {
 
     fn flush_user(&mut self) {
         let mut text = std::mem::take(&mut self.user);
+        if let Some(typed) = unrewrite(&text) {
+            text = typed;
+        }
         // HQ's notes come last, after what the user wrote.
-        for note in [TASK_PROMPT, COMPOSER_TASK_HINT] {
+        for note in [TASK_PROMPT, COMPOSER_TASK_HINT, ONE_SENTENCE_HINT] {
             if let Some(at) = text.find(note) {
                 text.replace_range(text[..at].trim_end().len()..at + note.len(), "");
             }
@@ -1755,12 +1767,54 @@ fn claude_mode(mode: &str) -> &'static str {
     }
 }
 
-/// HQ's compact button sends Claude's `/compact`; Hermes calls it `/compress`.
+/// HQ's compact button sends Claude's `/compact`; Hermes calls it `/compress`. `/1s` and
+/// `/one-sentence` become the one-sentence skill's text (see `ONE_SENTENCE_SKILL`).
 fn slash_command(text: &str) -> String {
-    match text.strip_prefix("/compact") {
-        Some(rest) if rest.is_empty() || rest.starts_with(char::is_whitespace) => format!("/compress{rest}"),
-        _ => text.to_owned(),
+    let command = |name: &str| {
+        text.strip_prefix(name).filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace)).map(str::trim)
+    };
+    if let Some(rest) = command("/compact") {
+        return if rest.is_empty() { "/compress".into() } else { format!("/compress {rest}") };
     }
+    if let Some(rest) = command("/1s").or_else(|| command("/one-sentence")) {
+        if ["off", "stop", "end"].contains(&rest.to_ascii_lowercase().as_str()) {
+            return ONE_SENTENCE_OFF.into();
+        }
+        let rules = skill_body(ONE_SENTENCE_SKILL);
+        let ask = if rest.is_empty() {
+            "The user gave no question: compress your previous reply to one sentence under these rules and send only that.".to_owned()
+        } else {
+            format!("Answer this under these rules:
+
+{rest}")
+        };
+        return format!("{ONE_SENTENCE_ON}
+
+{rules})
+
+{ask}");
+    }
+    text.to_owned()
+}
+
+/// A skill file without its front matter.
+fn skill_body(skill: &str) -> &str {
+    skill.strip_prefix("---").and_then(|rest| rest.split_once("
+---").map(|(_, body)| body)).unwrap_or(skill).trim()
+}
+
+/// What the user typed for a prompt `slash_command` rewrote, for a copy rebuilt from Hermes' history.
+fn unrewrite(text: &str) -> Option<String> {
+    if text.starts_with(ONE_SENTENCE_OFF) {
+        return Some("/1s off".into());
+    }
+    if !text.starts_with(ONE_SENTENCE_ON) {
+        return None;
+    }
+    let rest = text.split_once("Answer this under these rules:
+
+").map_or("", |(_, q)| q.trim());
+    Some(if rest.is_empty() { "/1s".into() } else { format!("/1s {rest}") })
 }
 
 /// Adds `TASK_PROMPT` to a prompt's blocks, and returns whether it did: not to a slash command,
@@ -1818,7 +1872,7 @@ fn terminal_command(call: &Value) -> Option<String> {
     text.strip_prefix("$ ").filter(|c| !c.is_empty()).map(str::to_owned)
 }
 
-/// Whether the reviewer (review.rs) may judge this command. Every Hermes request that is not an
+/// Whether the deputy (ui/deputy.js) may answer this command. Every Hermes request that is not an
 /// edit arrives as `kind: execute` with a `command`, whether it is a real command or a sentence
 /// dressed as one (consent for an MCP tool, a standing event trigger or a saved payment card, a
 /// Python script, a computer-use summary). A real one is what the terminal call now open is running,
@@ -1830,7 +1884,7 @@ fn real_command(call: &Value, options: &[(String, String)], open: &HashMap<Strin
         && call["rawInput"]["command"].as_str().is_some_and(|command| !command.starts_with("execute_code ") && open.values().any(|c| c == command))
 }
 
-/// Whether the reviewer may judge this edit. The path must be one the agent gave in full: Hermes
+/// Whether the deputy may answer this edit. The path must be one the agent gave in full: Hermes
 /// resolves the path it shows from its own folder, and the path it writes from the terminal's, so
 /// after a `cd` a relative path shows one file and writes another. See also `is_patch`. Not covered:
 /// on a Mac with Hermes' ssh or docker terminal backend, an absolute path is written remotely or in
@@ -2081,7 +2135,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_plain_edit_is_fit_for_the_reviewer() {
+    fn only_a_plain_edit_is_fit_for_the_deputy() {
         let path = full_path("a.rs");
         assert!(plain_edit(&edit_call("write_file", &path, &path, "b")));
         assert!(plain_edit(&edit_call("patch", &path, &path, "b")));
@@ -2188,7 +2242,7 @@ mod tests {
         let _ = child.wait();
     }
 
-    /// What Hermes sends for a patch of several files; review.rs must see the list as a list.
+    /// What Hermes sends for a patch of several files; the deputy must see the list as a list.
     #[test]
     fn a_multi_file_patch_keeps_hermes_comma_joined_path() {
         let (_, input) = tool_use(&json!({ "title": "patch", "content": [{ "type": "diff", "path": "a.rs, b.rs", "newText": "x" }] }));
@@ -2622,6 +2676,15 @@ mod tests {
         assert_eq!(slash_command("/compact keep the plan"), "/compress keep the plan");
         assert_eq!(slash_command("/compaction"), "/compaction");
         assert_eq!(slash_command("hello"), "hello");
+        let on = slash_command("/1s why is it slow?");
+        assert!(on.starts_with(ONE_SENTENCE_ON) && on.contains("# One-Sentence Style") && !on.contains("name: 'one-sentence'"), "{on}");
+        assert!(on.ends_with("why is it slow?"));
+        assert_eq!(unrewrite(&on).as_deref(), Some("/1s why is it slow?"));
+        assert_eq!(unrewrite(&slash_command("/one-sentence")).as_deref(), Some("/1s"));
+        assert_eq!(slash_command("/1s off"), ONE_SENTENCE_OFF);
+        assert_eq!(unrewrite(ONE_SENTENCE_OFF).as_deref(), Some("/1s off"));
+        assert_eq!(slash_command("/1shot"), "/1shot");
+        assert_eq!(unrewrite("hello"), None);
     }
 
     #[test]

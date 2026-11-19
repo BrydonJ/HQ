@@ -3,7 +3,7 @@
 //! reads files that are already on disk, and only when the usage dashboard asks for them.
 //!
 //! The transcript format is internal to Claude Code, so every field is optional and a line that
-//! cannot be read is skipped.
+//! cannot be read is skipped. Hermes Agent sessions come from Hermes' own SQLite file (`hermes.rs`).
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -17,11 +17,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::store;
 
+#[cfg(feature = "hermes")]
+mod hermes;
+
 /// What the usage dashboard has read, kept in managed state. An entry holds only while the
 /// file's length and modified time are unchanged, so a second look costs one stat per file.
 #[derive(Default)]
 pub struct UsageIndex {
     files: Mutex<HashMap<PathBuf, Cached>>,
+    #[cfg(feature = "hermes")]
+    hermes: hermes::Cache,
 }
 
 struct Cached {
@@ -57,9 +62,11 @@ pub struct Bucket {
 }
 
 /// A session's usage for the dashboard, with the name the resume list gives it.
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionUsage {
+    /// Which agent the session ran under: `claude` or `hermes`.
+    agent: &'static str,
     session_id: String,
     cwd: Option<String>,
     title: Option<String>,
@@ -68,7 +75,24 @@ pub struct SessionUsage {
 }
 
 /// Every session's usage since `since_ms` (all of it when `None`), most recently changed first.
+/// Hermes sessions are listed with Claude's; Hermes being absent or unreadable only leaves them out.
 pub fn report(sessions: &store::Index, index: &UsageIndex, since_ms: Option<i64>) -> Result<Vec<SessionUsage>, String> {
+    #[cfg(feature = "hermes")]
+    let others = hermes::report(&index.hermes, since_ms.unwrap_or(i64::MIN));
+    #[cfg(not(feature = "hermes"))]
+    let others: Vec<SessionUsage> = Vec::new();
+    let mut out = match claude_report(sessions, index, since_ms) {
+        Ok(out) => out,
+        // Without Claude Code's folder there is still the other agent's usage to show.
+        Err(_) if !others.is_empty() => Vec::new(),
+        Err(e) => return Err(e),
+    };
+    out.extend(others);
+    out.sort_by_key(|s| std::cmp::Reverse(s.modified_ms));
+    Ok(out)
+}
+
+fn claude_report(sessions: &store::Index, index: &UsageIndex, since_ms: Option<i64>) -> Result<Vec<SessionUsage>, String> {
     let projects = store::claude_config_dir().ok_or("cannot locate Claude config folder")?.join("projects");
     let files = usage_files(&projects)?;
     let live: HashSet<&Path> = files.iter().map(|f| f.path.as_path()).collect();
@@ -85,6 +109,7 @@ pub fn report(sessions: &store::Index, index: &UsageIndex, since_ms: Option<i64>
         let usage = index.usage(file);
         let rows = usage.rows_since(since);
         let entry = by_session.entry(file.session_id.clone()).or_insert_with(|| SessionUsage {
+            agent: "claude",
             session_id: file.session_id.clone(),
             cwd: None,
             title: None,
@@ -103,9 +128,7 @@ pub fn report(sessions: &store::Index, index: &UsageIndex, since_ms: Option<i64>
         entry.modified_ms = entry.modified_ms.max(modified_ms);
         entry.rows.extend(rows);
     }
-    let mut out: Vec<SessionUsage> = by_session.into_values().filter(|s| !s.rows.is_empty()).collect();
-    out.sort_by_key(|s| std::cmp::Reverse(s.modified_ms));
-    Ok(out)
+    Ok(by_session.into_values().filter(|s| !s.rows.is_empty()).collect())
 }
 
 struct UsageFile {
@@ -344,8 +367,15 @@ fn rates(family: &str, version: &str, prompt: u64) -> Option<Rates> {
 
 /// What one request would cost at API list prices, or `None` for a model without a known price.
 fn cost(model: &str, r: &Request) -> Option<f64> {
+    cost_over(model, r, 1)
+}
+
+/// What `calls` requests that add up to `r` would cost. The price table picks a tier by the size of
+/// one request's prompt, so that is the average prompt, not the sum; every other rate is linear.
+fn cost_over(model: &str, r: &Request, calls: u64) -> Option<f64> {
     let (family, version) = model_key(model)?;
-    let [input, write_5m, write_1h, read, output] = rates(family, &version, r.input + r.write_5m + r.write_1h + r.read)?;
+    let prompt = (r.input + r.write_5m + r.write_1h + r.read) / calls.max(1);
+    let [input, write_5m, write_1h, read, output] = rates(family, &version, prompt)?;
     let tokens = r.input as f64 * input
         + r.write_5m as f64 * write_5m
         + r.write_1h as f64 * write_1h

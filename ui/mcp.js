@@ -88,8 +88,9 @@ function mcpLaunchModes(agent) {
 }
 
 /**
- * The mode for a session `caller` starts: what it asked for, or else 'default' (or stricter), and
- * never freer than the caller's own mode. An outside agent's mode is unknown, so it counts as 'default'.
+ * The mode for a session `caller` starts: what it asked for, or else NEW_SESSION_MODE (or the freest
+ * mode no freer than the caller's), and never freer than the caller's own mode. An outside agent's
+ * mode is unknown, so it counts as 'default'.
  */
 function mcpSpawnMode(caller, agent, asked) {
   const own = caller.external ? 'default' : caller.permissionMode;
@@ -101,7 +102,7 @@ function mcpSpawnMode(caller, agent, asked) {
     if (mcpModeRank(mode) > cap) fail(`A session you start cannot run in a freer mode than yours (${own}).`);
     return mode;
   }
-  const limit = Math.min(cap, mcpModeRank('default'));
+  const limit = Math.min(cap, mcpModeRank(modes.includes(NEW_SESSION_MODE[agent]) ? NEW_SESSION_MODE[agent] : 'default'));
   const mode = modes.filter(m => mcpModeRank(m) <= limit).sort((x, y) => mcpModeRank(x) - mcpModeRank(y)).pop();
   if (!mode) fail(`${AGENT_NAMES[agent] || agent} has no mode as strict as yours (${own}), so you cannot start it.`);
   return mode;

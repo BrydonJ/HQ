@@ -15,7 +15,6 @@ mod icon;
 #[cfg(target_os = "macos")]
 mod macos;
 mod mcp;
-mod review;
 mod secret;
 mod session;
 mod setup;
@@ -279,6 +278,16 @@ fn folder_exists(path: String) -> bool {
     Path::new(&path).is_dir()
 }
 
+/// An empty folder of HQ's own for a deputy AFK starts: a deputy answers other sessions' prompts,
+/// so it must not pick up a project's CLAUDE.md, settings or hooks, which that project's files decide.
+#[tauri::command]
+fn deputy_folder(app: AppHandle) -> Result<String, String> {
+    let board = store::state_path(&app)?;
+    let dir = board.parent().ok_or("no state folder")?.join("deputy");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 fn load_state(app: AppHandle) -> Result<Option<String>, String> {
     store::load_state(&app)
@@ -400,15 +409,6 @@ async fn usage_report(app: AppHandle, since_ms: Option<i64>) -> Result<Vec<usage
 #[tauri::command]
 async fn probe_usage() -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(session::probe_usage).await.map_err(|e| e.to_string())?
-}
-
-/// Asks the approval reviewer (review.rs) about a waiting permission card. Never fails: anything
-/// that goes wrong comes back as an escalation, which leaves the card for the user.
-#[tauri::command]
-async fn review_approval(req: review::ReviewRequest) -> review::Verdict {
-    tauri::async_runtime::spawn_blocking(move || review::review(&req))
-        .await
-        .unwrap_or_else(|e| review::Verdict::escalate(format!("the review stopped ({e})")))
 }
 
 #[tauri::command]
@@ -641,6 +641,59 @@ async fn check_update(app: AppHandle) -> Result<Option<update::UpdateInfo>, Stri
 #[tauri::command]
 fn install_update(app: AppHandle) -> Result<(), String> {
     update::install(&app, true)
+}
+
+/// Closing the main window while sessions are working asks first: the close is held and the page
+/// gets `close-requested` (app.js decides, and calls `close_window` to go ahead). A page that does
+/// not answer cannot keep HQ open: once it has let `CLOSE_ANSWER_WAIT` pass without acknowledging,
+/// the next close goes through. Quitting from the macOS menu and update restarts are not held.
+#[derive(Default)]
+struct CloseGuard {
+    allowed: std::sync::atomic::AtomicBool,
+    /// When the page was last asked, and whether it has acknowledged.
+    asked: std::sync::Mutex<Option<(std::time::Instant, bool)>>,
+}
+
+const CLOSE_ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+impl CloseGuard {
+    /// Whether a close request goes ahead now; false means it is held and the page is to be asked.
+    fn let_through(&self, wait: std::time::Duration) -> bool {
+        if self.allowed.load(std::sync::atomic::Ordering::SeqCst) {
+            return true;
+        }
+        let mut asked = self.asked.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, false)) = *asked {
+            if at.elapsed() >= wait {
+                return true;
+            }
+        }
+        *asked = Some((std::time::Instant::now(), false));
+        false
+    }
+
+    fn acknowledge(&self) {
+        if let Some(asked) = self.asked.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+            asked.1 = true;
+        }
+    }
+
+    fn allow(&self) {
+        self.allowed.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// The page got `close-requested` and is deciding.
+#[tauri::command]
+fn close_ack(guard: State<CloseGuard>) {
+    guard.acknowledge();
+}
+
+/// The page decided to close: nothing is working, or the user confirmed.
+#[tauri::command]
+fn close_window(window: WebviewWindow, guard: State<CloseGuard>) {
+    guard.allow();
+    let _ = window.close();
 }
 
 #[tauri::command]
@@ -914,6 +967,7 @@ fn main() {
         .manage(usage::UsageIndex::default())
         .manage(update::PendingUpdate::default())
         .manage(Profile(profile))
+        .manage(CloseGuard::default())
         // A first start can ask for a session too; the UI takes it once the board is back.
         .manage(Launches(std::sync::Mutex::new(parse_launch(&std::env::args().collect::<Vec<_>>()).into_iter().collect())))
         .invoke_handler(tauri::generate_handler![
@@ -935,6 +989,7 @@ fn main() {
             pick_workspace,
             find_workspaces,
             folder_exists,
+            deputy_folder,
             load_state,
             save_state,
             log_activity,
@@ -957,7 +1012,6 @@ fn main() {
             search_sessions,
             usage_report,
             probe_usage,
-            review_approval,
             update_claude,
             claude_status,
             install_claude,
@@ -969,6 +1023,8 @@ fn main() {
             open_terminal,
             run_in_terminal,
             request_attention,
+            close_ack,
+            close_window,
             play_cue,
             notify_actions,
             open_notification_settings,
@@ -984,6 +1040,14 @@ fn main() {
             #[cfg(not(target_os = "macos"))]
             icon::reset_app_icon,
         ])
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" && !window.state::<CloseGuard>().let_through(CLOSE_ANSWER_WAIT) {
+                    api.prevent_close();
+                    let _ = window.emit("close-requested", ());
+                }
+            }
+        })
         .setup(|app| {
             #[cfg(not(target_os = "macos"))]
             icon::apply(app.handle());
@@ -1035,6 +1099,22 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn closing_asks_the_page_until_it_allows_or_stops_answering() {
+        let guard = super::CloseGuard::default();
+        let wait = std::time::Duration::from_secs(60);
+        assert!(!guard.let_through(wait), "the first close is held");
+        guard.acknowledge();
+        assert!(!guard.let_through(wait), "an answering page is asked again");
+        assert!(!guard.let_through(wait), "within the wait, still held");
+        guard.allow();
+        assert!(guard.let_through(wait), "allowed by the page");
+
+        let silent = super::CloseGuard::default();
+        assert!(!silent.let_through(std::time::Duration::ZERO));
+        assert!(silent.let_through(std::time::Duration::ZERO), "a page that never answered does not keep HQ open");
+    }
+
     #[test]
     fn launch_on_a_drive_root() {
         assert_eq!(super::drive_root_fix(r#"D:""#), r"D:\");
