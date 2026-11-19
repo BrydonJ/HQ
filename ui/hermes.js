@@ -23,6 +23,34 @@ const HERMES_MODES = [
   ['bypassPermissions', "Don't ask (except sensitive paths)"],
 ];
 
+// HQ's one-sentence mode, which Hermes lacks: hermes.rs sends /1s as the skill's own text, and while it is
+// on every prompt trails this reminder (hermes.rs ONE_SENTENCE_HINT, which also cuts it out of history).
+const ONE_SENTENCE_HINT = '(HQ: one-sentence mode is on: reply in one sentence, two only if the question has two parts, under 40 words of prose, with no preamble, recap or offer. Code, command output and lists the user asked for don\'t count.)';
+const ONE_SENTENCE_PREFIX = '(HQ: one-sentence mode';
+const HERMES_OWN_COMMANDS = [
+  { name: '1s', argumentHint: "[question, or 'off' to stop]", description: 'One-sentence replies from now on (HQ)' },
+  { name: 'one-sentence', argumentHint: "[question, or 'off' to stop]", description: 'One-sentence replies from now on (HQ)' },
+];
+
+/** Hermes' commands with HQ's own added, which hermes.rs answers for it. */
+function hermesCommands(list) {
+  return sanitizeCommands([...(Array.isArray(list) ? list : []), ...HERMES_OWN_COMMANDS]);
+}
+
+/**
+ * Notes a /1s (or /one-sentence) sent to a Hermes cell, and gives the text to trail a plain prompt
+ * with while the mode is on, else null. A slash command goes alone, as Hermes only runs one whole.
+ */
+function hermesOneSentence(cell, text, slash) {
+  const m = /^\/(?:1s|one-sentence)(?:\s+([\s\S]*))?$/i.exec(text.trim());
+  if (m) {
+    cell.oneSentence = !['off', 'stop', 'end'].includes((m[1] || '').trim().toLowerCase());
+    saveState();
+    return null;
+  }
+  return cell.oneSentence && text && !slash ? ONE_SENTENCE_HINT : null;
+}
+
 function hermesAvailable() {
   return Array.isArray(build.backends) && build.backends.includes('hermes');
 }
@@ -54,7 +82,7 @@ function hermesInitialized(r) {
     hermes.models = sanitizeModels(r.models);
     saveState();
   }
-  if (Array.isArray(r.commands)) hermes.commands = sanitizeCommands(r.commands);
+  if (Array.isArray(r.commands)) hermes.commands = hermesCommands(r.commands);
 }
 
 function hermesRemember(choice) {
@@ -70,7 +98,7 @@ function hermesState() {
 function hermesRestore(saved) {
   const s = saved && typeof saved === 'object' ? saved : {};
   hermes.models = sanitizeModels(s.models);
-  hermes.commands = sanitizeCommands(s.commands);
+  hermes.commands = hermesCommands(s.commands);
   hermes.defaults = sanitizeDefaults(s.defaults);
 }
 

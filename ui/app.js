@@ -213,6 +213,11 @@ function nextLoader(avoid) {
   return loaderDeck.pop();
 }
 
+// Waiting mode is offered once a turn has run this long with no click or key in its cell, once per turn.
+const WAIT_NUDGE_MS = 45 * 1000;
+const WAIT_NUDGE_NOS = 3; // "No" this many times in a row turns the offer off (Settings brings it back)
+setInterval(() => { for (const cell of app.cells) cell.checkWaitNudge(); }, 5000);
+
 setInterval(() => {
   for (const cell of app.cells) if (cell.status === 'running' && !cell.compacting && !cell.wrapUp && !cell.collapsed) cell.nextBusyWord();
     else if (cell.wmView && (cell.bgTasks.length || cell.hasOpenTasks()) && !cell.wmDone && cell.status !== 'running') { cell.busyWord = nextBusyVerb(cell.busyWord); cell.syncWaitingBusy(); }
@@ -293,7 +298,7 @@ function logActivity(cell, state) {
 class Cell {
   constructor({ cwd, sessionId = null, permissionMode = 'default', model = null, effort = null, title = '', aiTitle = false,
     customTitle = null, renamePending = false, detail, clean, progress = false, fork = false, collapsed = false,
-    missing = false, remote = null, bridgeSessionId = null, draft = '', backend = 'claude', resumeAfterUpdate = false, resumeQueued = null, api = false, apiKey = false, afk = null, afkLog = null, launched = false, modeOwn = false, remoteOwn = false, busySend = null,
+    missing = false, remote = null, bridgeSessionId = null, draft = '', backend = 'claude', resumeAfterUpdate = false, resumeQueued = null, api = false, apiKey = false, afk = null, afkLog = null, launched = false, modeOwn = false, remoteOwn = false, busySend = null, oneSentence = false,
     hqId = null, spawnedBy = null, lineage = null, drivenBy = null, deputyLeftIds = null, colorCwd = null, depth = 0, hosted = null, spot = false, orch = false, group = null, flexW = 1, flexH = 1 }) {
     this.cwd = cwd;
     // A session a session host kept running while HQ restarted: { id, startedMs }. reattach() connects to it.
@@ -325,6 +330,7 @@ class Cell {
     this.permissionMode = permissionMode || 'default';
     // Picked in this session (its right-click menu), so Settings > Permissions no longer moves it.
     this.modeOwn = modeOwn === true;
+    this.oneSentence = oneSentence === true; // a Hermes cell in /1s mode (hermes.js hermesOneSentence)
     this.modelChoice = model && model !== 'default' ? model : null; // null = Claude's default
     this.effort = effort || null;  // null = Claude's default
     this.resolvedModel = null;     // what Claude reports it is running
@@ -562,6 +568,8 @@ class Cell {
     this.detailBtn.addEventListener('click', () => this.setDetail(this.detail % 3 + 1));
     this.progressBtn.addEventListener('click', () => this.setProgressView(!this.progressView));
     this.waitBtn.addEventListener('click', () => this.setWaitingMode(!this.wmArmed));
+    // Any click or key in the cell counts as the user being here: no waiting-mode offer then (checkWaitNudge).
+    for (const type of ['pointerdown', 'keydown']) el.addEventListener(type, () => { this.touchedAt = Date.now(); }, true);
     // Done: the big check turns into a chat bubble on hover, and a click shows the chat (as Show chat does).
     el.querySelector('.wv-check').addEventListener('click', () => { if (this.wmDone) this.setWaitingMode(false); });
     wireButtonDrag(el.querySelector('.cell-head'));
@@ -1388,6 +1396,47 @@ class Cell {
   }
 
   // ---------- waiting mode ----------
+
+  /**
+   * The waiting-mode offer: a slim bar above the composer once a turn has run WAIT_NUDGE_MS with no
+   * click or key in this cell. Once per turn; it goes by itself when the turn ends or waiting mode
+   * is turned on another way. Runs on a timer.
+   */
+  checkWaitNudge() {
+    const now = Date.now();
+    const due = app.settings.waitNudge && this.status === 'running' && !this.wmArmed && !this.collapsed && !this.closing
+      && this.pending.size === 0 && this.turnStart && this.nudgedTurn !== this.turnStart
+      && now - this.turnStart >= WAIT_NUDGE_MS && now - (this.touchedAt || 0) >= WAIT_NUDGE_MS;
+    if (this.nudgeEl && (this.status !== 'running' || this.wmArmed || this.collapsed || this.pending.size)) this.dropWaitNudge();
+    if (!due) return;
+    this.nudgedTurn = this.turnStart;
+    const answer = yes => {
+      this.dropWaitNudge();
+      if (yes) {
+        changeSetting('waitNudgeNo', 0);
+        this.setWaitingMode(true);
+        return;
+      }
+      const nos = (app.settings.waitNudgeNo || 0) + 1;
+      changeSetting('waitNudgeNo', nos);
+      if (nos >= WAIT_NUDGE_NOS) {
+        changeSetting('waitNudge', false);
+        changeSetting('waitNudgeNo', 0);
+        this.notice(`HQ won't offer waiting mode any more. Turn it back on in Settings > General ("Offer waiting mode").`);
+      }
+    };
+    this.nudgeEl = h('div', { class: 'wait-nudge', role: 'status' },
+      this.waitBtn.querySelector('svg').cloneNode(true),
+      h('span', { class: 'wn-text', text: `Still working${this.turnStart ? ` (${formatDuration(now - this.turnStart)})` : ''}. Switch to waiting mode?` }),
+      h('button', { class: 'btn primary wn-yes', text: 'Yes', onclick: () => answer(true) }),
+      h('button', { class: 'btn wn-no', text: 'No', onclick: () => answer(false) }));
+    this.el.querySelector('.composer').before(this.nudgeEl);
+  }
+
+  dropWaitNudge() {
+    if (this.nudgeEl) this.nudgeEl.remove();
+    this.nudgeEl = null;
+  }
 
   setWaitingMode(on) {
     if (this.wmArmed === on) return;
@@ -2343,8 +2392,10 @@ class Cell {
     const slash = /^\/[\w:-]+(\s|$)/.test(text.trimStart());
     // Blocks even for plain text: Claude then records no prompt text in the transcript's first enqueue,
     // which is how the resume list tells HQ's sessions from an agent's `claude -p` (store.rs is_agent).
+    const hint = this.backend === 'hermes' ? hermesOneSentence(this, text, slash) : null;
     const content = images.length || (text && !slash)
-      ? [...images.map(i => ({ type: 'image', source: { type: 'base64', media_type: i.mediaType, data: i.data } })), ...(text ? [{ type: 'text', text }] : [])]
+      ? [...images.map(i => ({ type: 'image', source: { type: 'base64', media_type: i.mediaType, data: i.data } })), ...(text ? [{ type: 'text', text }] : []),
+        ...(hint ? [{ type: 'text', text: hint }] : [])]
       : text;
     if (text) this.sentPrompts.push(text);
     if (!this.promptWritten) {
@@ -2464,6 +2515,7 @@ class Cell {
 
   /** Ends the process and starts the cell over as a new session in the same folder. `name` titles it. */
   async clearConversation(name) {
+    this.oneSentence = false; // a new conversation starts at normal length
     this.clearing = true;
     try {
       await this.resetSession(name);
@@ -3009,7 +3061,7 @@ class Cell {
       } else if (block.type === 'text' && block.text) {
         const text = block.text;
         if (text.startsWith('[Request interrupted')) this.notice('Interrupted');
-        else if (/^\s*<(command-|local-command-|system-reminder|task-notification|ide_)/.test(text) || text.startsWith(TASK_HINT_PREFIX)) continue;
+        else if (/^\s*<(command-|local-command-|system-reminder|task-notification|ide_)/.test(text) || text.startsWith(TASK_HINT_PREFIX) || text.startsWith(ONE_SENTENCE_PREFIX)) continue;
         else if (text.startsWith(RESUME_PROMPT)) { if (this.replaying) this.notice(RESUME_NOTICE); } // live, resumeAfterRestart said so
         else if (text.startsWith(AFK_PREFIX)) { if (this.replaying) this.notice('AFK: HQ messaged the session while you were away.'); }
         else texts.push(text);
@@ -6133,6 +6185,8 @@ function sanitizeSettings(x) {
     buttonOrder: [...new Set([...(Array.isArray(v.buttonOrder) ? v.buttonOrder : []), ...HEAD_BUTTONS.map(([b]) => b)])]
       .filter(b => HEAD_BUTTONS.some(([k]) => k === b)),
     colors,
+    waitNudge: v.waitNudge !== false, // offer waiting mode on a long turn (Cell.checkWaitNudge)
+    waitNudgeNo: Number.isInteger(v.waitNudgeNo) && v.waitNudgeNo >= 0 ? v.waitNudgeNo : 0, // "No"s in a row
     autoModes: v.autoModes === true, // open sessions were moved to NEW_SESSION_MODE once (restore)
     mcp: v.mcp !== false, // HQ's MCP server for new sessions (mcp.js)
     mcpSpawn: v.mcpSpawn !== false, // agents may start sessions
@@ -6468,6 +6522,8 @@ function renderSettings() {
     row('Notifications', `A notification when a turn finishes, or Claude needs you, while HQ is in the background.${IS_MAC ? ' Approval requests get Approve and Deny buttons.' : ''}`, toggle(app.settings.notify, v => changeSetting('notify', v))),
     IS_MAC && app.settings.notify ? row('Keep buttons on screen', 'Set HQ\'s notification style to Alerts: a banner hides Approve and Deny until you hover over it, then slides away.',
       h('button', { class: 'btn', text: 'Open Settings…', onclick: () => invoke('open_notification_settings').catch(err => console.warn('notification settings', err)) })) : null,
+    row('Offer waiting mode', `When a turn has run ${WAIT_NUDGE_MS / 1000} seconds without you touching its session, a bar offers waiting mode. Turns itself off after ${WAIT_NUDGE_NOS} "No"s in a row.`,
+      toggle(app.settings.waitNudge, v => { changeSetting('waitNudge', v); changeSetting('waitNudgeNo', 0); })),
     row('Sound for questions and approvals', 'A chime when a session asks you something or wants approval.', toggle(app.settings.sound, v => changeSetting('sound', v))),
     app.remoteAvailable !== false ? row('Remote Control', 'Continue Claude sessions from claude.ai/code or the Claude app. Applies to every session not set on its own; right-click a session\'s header to turn it off there.', toggle(!!app.remoteDefault, v => setGlobalRemote(v))) : null,
     row('Default model for new sessions', 'The same as picking a model in a session. HQ_MODEL still applies when none is picked.',
@@ -6944,6 +7000,7 @@ function flushState() {
       afk: c.afk ?? undefined,
       afkLog: c.afkLog.length ? c.afkLog : undefined,
       modeOwn: c.modeOwn || undefined,
+      oneSentence: c.oneSentence || undefined,
       remoteOwn: c.remoteOwn || undefined,
       busySend: c.busySend || undefined,
       launched: c.launched || undefined,
