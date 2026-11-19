@@ -7,7 +7,8 @@ edition = "2021"
 [features]
 default = ["hermes"]
 # Hermes Agent cells (src/hermes.rs). Costs nothing at runtime until a Hermes cell starts.
-hermes = []
+# Also the Hermes rows of the token usage dashboard, read from Hermes' own SQLite file (src/usage/hermes.rs).
+hermes = ["dep:rusqlite"]
 # Codex cells (src/codex.rs). Off by default since 2026-11-05: Codex support is ending. Without it
 # HQ refuses to start a Codex session and the UI offers none (`build_info` leaves it out).
 codex = []
@@ -34,6 +35,11 @@ tauri-plugin-single-instance = "2"
 # The session host's handshake (host.rs). Already in the tree through tauri's build.
 sha2 = "0.10"
 
+# Hermes' state.db, opened read-only. No `bundled`: Windows links the OS's winsqlite3 (below) and
+# macOS the system libsqlite3, so no C compiler runs and nothing is added to the binary. Stays on
+# 0.30 because later releases dropped the `winsqlite3` feature.
+rusqlite = { version = "0.30", default-features = false, optional = true }
+
 # Process-group kills: the Unix counterpart of the Windows job object (src/session.rs).
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -46,6 +52,8 @@ security-framework-sys = "2"
 mac-notification-sys = "0.6"
 
 [target.'cfg(windows)'.dependencies]
+# Points rusqlite at winsqlite3.dll, which ships with Windows 10 and later.
+rusqlite = { version = "0.30", default-features = false, features = ["winsqlite3"], optional = true }
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
   "Win32_Security",
