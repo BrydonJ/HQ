@@ -5486,6 +5486,8 @@ const usage = { data: null, fetchedAt: 0, loading: null, error: null, timer: nul
 const USAGE_EVERY_MS = 5 * 60 * 1000;       // while a session is running, asking it is free
 const USAGE_PROBE_EVERY_MS = 15 * 60 * 1000; // otherwise a short-lived claude is started to ask
 const USAGE_STALE_MS = 2 * 60 * 1000;
+// The API key balance (usage popup + Settings) is hidden: the Console has no balance API, so it can't be kept right. Flip to show it again.
+const SHOW_API_BALANCE = false;
 
 /** Green at 0%, yellow at 60%, red at 100%. */
 const HEAT_STOPS = [[0, [76, 255, 46]], [60, [245, 239, 71]], [100, [240, 14, 14]]];
@@ -5771,7 +5773,7 @@ function renderUsagePop() {
       usedPct != null ? h('div', { class: 'usage-bar' }, h('span', { style: `width:${Math.max(0, Math.min(100, usedPct))}%;background:${heatCss(usedPct)}` })) : null,
       c.resetsAt ? h('div', { class: 'usage-reset', text: c.resetsAt < Date.now() ? 'Reset' : resetText(c.resetsAt) }) : null));
   }
-  if (app.apiKeyHint || apiSpent > 0 || app.settings.apiCreditLeft != null || app.settings.apiCreditExpires) {
+  if (SHOW_API_BALANCE && (app.apiKeyHint || apiSpent > 0 || app.settings.apiCreditLeft != null || app.settings.apiCreditExpires)) {
     const left = app.settings.apiCreditLeft;
     const expires = app.settings.apiCreditExpires ? new Date(`${app.settings.apiCreditExpires}T23:59:59Z`).getTime() : null;
     const days = expires ? Math.ceil((expires - Date.now()) / 86400000) : null;
@@ -6570,7 +6572,7 @@ function renderAppearanceSettings(row, toggle, select) {
     build.appIcon == null ? null : row('App icon', "A PNG or ICO shown on the window and taskbar instead of HQ's own.", appIconControl()),
     h('div', { class: 'settings-section', text: 'Top bar' }),
     row('Weekly usage bar', 'A thin bar along the bottom of the usage button showing the weekly limit.', toggle(app.settings.weeklyBar, v => changeSetting('weeklyBar', v))),
-    row('API key balance', 'Credits left on the key, from the Console (Billing > Promotional credits), shown in the usage popup. Update it when it changes.',
+    !SHOW_API_BALANCE ? null : row('API key balance', 'Credits left on the key, from the Console (Billing > Promotional credits), shown in the usage popup. Update it when it changes.',
       h('div', { class: 'api-key' },
         (() => { const i = h('input', { type: 'number', min: '0', step: '0.01', placeholder: 'USD left', value: app.settings.apiCreditLeft ?? '' });
           i.addEventListener('change', () => { const n = parseFloat(i.value); changeSetting('apiCreditLeft', Number.isFinite(n) && n >= 0 ? n : null); }); return i; })(),
