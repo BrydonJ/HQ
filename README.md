@@ -205,7 +205,7 @@ whatever they can do without you, instead of stopping at the first question:
 - Plans are held for you.
 - Other permission requests are put off until later, and the session works on the rest.
 - Every card waits a minute first, in case you are still there.
-- Tick **Make a deputy to answer approvals and questions while I'm away** to have a session
+- Tick **Make a deputy while I'm away** to have a session
   answer for you instead. If no deputy exists, HQ starts a new Claude session named Deputy in
   an empty folder of its own (never a project folder), set to Never AFK. It stops being the
   deputy when no AFK that asked for it is left, and the session stays open. A deputy you

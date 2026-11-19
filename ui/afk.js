@@ -442,8 +442,8 @@ function buildAfkMenu(menuEl, cell) {
       saveState();
     });
     menuEl.append(h('label', { class: 'menu-item', title: 'Uses the deputy you already have, or starts a Claude session as one. It answers the approvals and questions that wait in your other sessions, once each, or leaves them for you. When this AFK ends it stops being the deputy, and stays open.' }, box,
-      h('span', { class: 'menu-main' }, h('span', { class: 'name', text: "Make a deputy to answer approvals and questions while I'm away" }),
-        h('span', { class: 'desc', text: app.settings.mcp === false ? 'Needs "HQ tools for sessions" in Settings' : 'An existing deputy is kept' }))));
+      h('span', { class: 'menu-main' }, h('span', { class: 'name', text: "Make a deputy while I'm away" }),
+        h('span', { class: 'desc', text: app.settings.mcp === false ? 'Needs "HQ tools for sessions" in Settings' : 'It answers approvals and questions. An existing deputy is kept.' }))));
   }
   menuEl.append(h('div', { class: 'menu-title', text: own ? 'Change to' : 'Away for' }));
   for (const [minutes, label] of AFK_DURATIONS) {

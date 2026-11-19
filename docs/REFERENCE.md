@@ -324,7 +324,7 @@ Everything HQ does, in detail. New to HQ? Start with the [README](../README.md).
     loses neither.
 - **Deputy:** a session that answers for you while you are away. Pick one with **Answer
   prompts for me** in a session's menu (right-click its header; Claude and Codex sessions), or
-  tick **Make a deputy to answer approvals and questions while I'm away** in the AFK menu.
+  tick **Make a deputy while I'm away** in the AFK menu.
   - A permission, question or plan that waits in another session goes to the deputy after a
     minute. It allows it once, denies it with a reason, or leaves it for you. It works beside
     AFK: what it leaves falls to AFK's deferral. It never answers for its own prompts, sessions
