@@ -6548,7 +6548,7 @@ function renderSettings() {
   if (settingsTab === 'developer') {
     body.replaceChildren(IS_MAC
       ? row('Keep busy', 'Windows only.', null)
-      : row('Keep busy', null, toggle(keepBusy, v => { keepBusy = v; keepBusyTick(); })));
+      : row('Keep busy', null, toggle(keepBusy, v => setKeepBusy(v))));
     return;
   }
   const path = h('input', { type: 'text', value: app.settings.claudePath, placeholder: 'claude', spellcheck: 'false' });
@@ -6767,7 +6767,7 @@ document.addEventListener('keydown', e => {
   devCodeAt = 0;
   const on = !app.settings.developer;
   changeSetting('developer', on);
-  if (!on) keepBusy = false; // nothing keeps running behind a hidden tab
+  if (!on) setKeepBusy(false); // nothing keeps running behind a hidden tab
   settingsTab = on ? 'developer' : 'general';
   const gear = $('#settings-btn');
   gear.classList.remove('dev-unlock', 'dev-lock');
@@ -6780,16 +6780,14 @@ document.addEventListener('keydown', e => {
 // A click on the top bar's empty space clears the session focus, as one on the board does.
 $('#topbar').addEventListener('mousedown', e => { if (!e.target.closest('button, input, select, a')) unfocusAll(); });
 
-// Keep busy: while on and a session works, the backend resets Windows' idle timer once a minute (presence.rs), so Teams
-// stays Available. Never saved: it is off each time HQ starts and has to be switched on again.
-const KEEP_BUSY_EVERY_MS = 60_000;
+// Keep busy: while on, the backend presses F15 every 30 seconds (presence.rs) so Teams stays Available, with or without
+// sessions and whether or not HQ is focused. Never saved: off whenever the UI loads, so it is switched on each time it is needed.
 let keepBusy = false;
-function keepBusyTick() {
-  if (IS_MAC || !keepBusy) return;
-  if (!app.cells.some(c => c.status === 'running' || c.bgTasks.length)) return;
-  invoke('nudge_idle').catch(err => console.warn('keep busy', err));
+function setKeepBusy(on) {
+  keepBusy = on;
+  invoke('set_keep_busy', { on }).catch(err => console.warn('keep busy', err));
 }
-setInterval(keepBusyTick, KEEP_BUSY_EVERY_MS);
+setKeepBusy(false); // a reload (Ctrl+R) must not leave the backend pressing keys
 
 $('#open-settings').addEventListener('click', () => (settingsPanel.classList.contains('hidden') ? openSettings() : closeSettings()));
 $('#terminal-btn').addEventListener('click', () => invoke('open_terminal', {}).catch(err => console.error('terminal failed', err)));
