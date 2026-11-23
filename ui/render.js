@@ -201,34 +201,25 @@ function nativeSep(p, like) {
 }
 
 const SHELL_RISKY = new Set(['rm', 'rmdir', 'del', 'curl', 'wget', 'sudo', 'dd', 'chmod', 'chown', 'mv', 'kill', 'taskkill', 'Remove-Item']);
-const SHELL_TOKEN = /"(?:[^"\\]|\\.)*"|'[^']*'|&&|\|\||[;|]|(?<!<)<<-?\s*['"]?\w+['"]?|\$\{?\w+\}?|--?[\w-]+|\s+|[^\s;|&]+|[\s\S]/g; // the last alternative keeps a lone `&` (2>&1, `cmd &`) so no character is ever dropped
+const SHELL_TOKEN = /"(?:[^"\\]|\\.)*"|'[^']*'|&&|\|\||[;|]|\$\{?\w+\}?|--?[\w-]+|\s+|[^\s;|&]+|[\s\S]/g; // the last alternative keeps a lone `&` (2>&1, `cmd &`) so no character is ever dropped
 
 /**
  * A shell command as coloured spans (display only; the text is unchanged). Command names, flags,
- * strings, variables and separators get their own colour, risky commands and git force/push are
- * flagged, and a heredoc body is dimmed. Built with textContent, so the command is never parsed as HTML.
+ * strings, variables and separators get their own colour, and risky commands and git force/push are
+ * flagged. Nothing is ever dimmed: a heredoc body can still run (`bash <<'EOF'`) and a `#` can sit inside a quoted
+ * string, so every line is coloured the same way. Built with textContent, so the
+ * command is never parsed as HTML.
  */
 function shellView(cmd) {
   const frag = document.createDocumentFragment();
   const span = (cls, text) => frag.append(cls ? h('span', { class: cls, text }) : document.createTextNode(text));
-  let heredoc = null;
   String(cmd || '').split('\n').forEach((line, li, all) => {
     const nl = li < all.length - 1 ? '\n' : '';
-    if (heredoc) {
-      if (line.trim() === heredoc) { heredoc = null; span('sh-kw', line); } else span('sh-doc', line);
-      if (nl) span('', nl);
-      return;
-    }
     let first = true;
     let prev = '';
     for (const t of line.match(SHELL_TOKEN) || []) {
       if (/^\s+$/.test(t)) { span('', t); continue; }
       if (t === '&&' || t === '||' || t === ';' || t === '|') { span('sh-sep', t); first = true; prev = ''; continue; }
-      if (t.startsWith('<<')) {
-        heredoc = t.replace(/^<<-?\s*['"]?|['"]?$/g, '');
-        span('sh-kw', t);
-        continue;
-      }
       if (t[0] === '"' || t[0] === "'") span('sh-str', t);
       else if (t[0] === '$' || /^\w+=/.test(t)) span('sh-var', t); // `A=1 cmd`: an assignment does not use up the command slot
       else if (t[0] === '-') span(/^--(force|hard)$/.test(t) || (t === '-f' && (prev === 'rm' || prev === 'git')) ? 'sh-risk' : 'sh-flag', t);

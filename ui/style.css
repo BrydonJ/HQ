@@ -789,7 +789,6 @@ body:not(.fade-buttons):not(.hover-buttons) .cell.wm-on .cell-head:hover > .icon
 .sh-str { color: #e8b86d; }
 .sh-var { color: #6fd3a0; }
 .sh-sep, .sh-kw { color: #ff7b72; font-weight: 700; }
-.sh-doc { color: var(--fg-muted); }
 .sh-risk { color: #fff; background: #b3261e; border-radius: 3px; padding: 0 3px; font-weight: 700; }
 .prompt .preview.md { font-family: var(--font); font-size: 13px; max-height: 320px; }
 /*
