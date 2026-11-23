@@ -3293,13 +3293,18 @@ class Cell {
       grow.title = on ? 'Show the chat again' : 'Show it all: give this card the whole cell';
     });
     this.el.classList.remove('prompts-max');
+    // Shell cards show the command in the preview below, so a description that repeats it is dropped.
+    const isShell = req.tool_name === 'Bash' || req.tool_name === 'PowerShell';
+    const cmdText = String(input.command || '').replace(/\s+/g, ' ').trim();
+    const descText = String(req.description || '').replace(/\s+/g, ' ').trim();
+    const descRepeatsCmd = isShell && descText && (cmdText.includes(descText.slice(0, 40)) || descText.length > 120);
     const title = h('div', { class: 'prompt-title' }, h('span', { class: 'pt-main' }, `Allow ${name}?`,
-      req.description ? h('span', { class: 'targ', text: '  ' + req.description }) : null), grow);
+      descText && !descRepeatsCmd ? h('span', { class: 'targ', text: '  ' + descText }) : null), grow);
     let preview;
     if (req.tool_name === 'Edit' || req.tool_name === 'MultiEdit') {
       preview = h('div', { class: 'preview' }, h('div', { text: relPath(input.file_path, this.cwd) }), toolInputView(req.tool_name, input));
     } else if (req.tool_name === 'Bash' || req.tool_name === 'PowerShell') {
-      preview = h('pre', { text: input.command || '' });
+      preview = h('pre', { class: 'sh' }, shellView(input.command || ''));
     } else if (req.tool_name === 'Write') {
       const lines = String(input.content || '').split('\n');
       const shown = lines.slice(0, 30).join('\n') + (lines.length > 30 ? `\n… ${lines.length - 30} more lines` : '');

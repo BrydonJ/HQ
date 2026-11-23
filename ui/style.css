@@ -775,7 +775,7 @@ body:not(.fade-buttons):not(.hover-buttons) .cell.wm-on .cell-head:hover > .icon
   margin: 6px 10px; padding: 8px 10px; border-radius: 6px;
   border: 1px solid var(--waiting); background: color-mix(in srgb, var(--waiting) 6%, transparent);
 }
-.prompt-title { font-weight: 600; color: var(--fg-strong); margin-bottom: 6px; }
+.prompt-title { font-weight: 600; color: var(--fg-strong); margin-bottom: 4px; }
 .prompt-title .targ { font-weight: 400; color: var(--fg-muted); }
 .prompt > .desc { color: var(--fg-muted); font-size: 12px; margin-bottom: 6px; }
 .prompt pre, .prompt .preview {
@@ -783,6 +783,14 @@ body:not(.fade-buttons):not(.hover-buttons) .cell.wm-on .cell-head:hover > .icon
   border-radius: 4px; font-family: var(--mono); font-size: 12px;
   white-space: pre-wrap; word-break: break-word; max-height: 200px; overflow: auto;
 }
+/* Shell highlighting in a permission card (shellView in render.js). */
+.sh-cmd { color: #7cc4ff; font-weight: 700; }
+.sh-flag { color: #c9a0ff; }
+.sh-str { color: #e8b86d; }
+.sh-var { color: #6fd3a0; }
+.sh-sep, .sh-kw { color: #ff7b72; font-weight: 700; }
+.sh-doc { color: var(--fg-muted); }
+.sh-risk { color: #fff; background: #b3261e; border-radius: 3px; padding: 0 3px; font-weight: 700; }
 .prompt .preview.md { font-family: var(--font); font-size: 13px; max-height: 320px; }
 /*
  * One scroll area per card, never three. A lone card is a column: its title, countdown and choices
@@ -793,7 +801,7 @@ body:not(.fade-buttons):not(.hover-buttons) .cell.wm-on .cell-head:hover > .icon
 .prompts:has(> .prompt:only-child) { display: flex; flex-direction: column; overflow: hidden; }
 .prompts > .prompt:only-child { display: flex; flex-direction: column; min-height: 0; }
 .prompts > .prompt:only-child > * { flex: none; }
-.prompts > .prompt:only-child > pre, .prompts > .prompt:only-child > .preview { flex: 0 1 auto; min-height: 3.5em; max-height: none; }
+.prompts > .prompt:only-child > pre, .prompts > .prompt:only-child > .preview { flex: 0 1 auto; min-height: 3.5em; max-height: 9em; }
 /* A lone permission card puts its choices side by side, so the command gets the height. */
 .prompts > .prompt[data-kind="permission"]:only-child .choices { flex-direction: row; }
 .prompts > .prompt[data-kind="permission"]:only-child .choices { flex-wrap: nowrap; }
@@ -810,7 +818,7 @@ body:not(.fade-buttons):not(.hover-buttons) .cell.wm-on .cell-head:hover > .icon
 .cell.prompts-max:has(.prompts > .prompt) > .stage, .cell.prompts-max:has(.prompts > .prompt) > .composer { display: none; }
 .cell.prompts-max:has(.prompts > .prompt) > .prompts { flex: 1 1 auto; max-height: none; }
 .cell.prompts-max .prompts > .prompt:only-child { flex: 1 1 auto; }
-.cell.prompts-max .prompts > .prompt:only-child > pre, .cell.prompts-max .prompts > .prompt:only-child > .preview { flex: 1 1 auto; }
+.cell.prompts-max .prompts > .prompt:only-child > pre, .cell.prompts-max .prompts > .prompt:only-child > .preview { flex: 1 1 auto; max-height: none; }
 .choices { display: flex; flex-direction: column; gap: 4px; }
 .choice {
   display: flex; align-items: baseline; gap: 8px; text-align: left;
