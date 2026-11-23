@@ -15,6 +15,7 @@ mod icon;
 #[cfg(target_os = "macos")]
 mod macos;
 mod mcp;
+mod presence;
 mod secret;
 mod session;
 mod setup;
@@ -1035,6 +1036,7 @@ fn main() {
             take_launches,
             shell::explorer_menu_status,
             shell::set_explorer_menu,
+            presence::nudge_idle,
             #[cfg(not(target_os = "macos"))]
             icon::pick_app_icon,
             #[cfg(not(target_os = "macos"))]
