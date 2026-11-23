@@ -6235,6 +6235,7 @@ function sanitizeSettings(x) {
     waitNudge: v.waitNudge !== false, // offer waiting mode on a long turn (Cell.checkWaitNudge)
     waitNudgeNo: Number.isInteger(v.waitNudgeNo) && v.waitNudgeNo >= 0 ? v.waitNudgeNo : 0, // "No"s in a row
     autoModes: v.autoModes === true, // open sessions were moved to NEW_SESSION_MODE once (restore)
+    developer: v.developer === true, // the Developer tab, shown only after the unlock code (DEV_CODE)
     mcp: v.mcp !== false, // HQ's MCP server for new sessions (mcp.js)
     mcpSpawn: v.mcpSpawn !== false, // agents may start sessions
     mcpExternal: v.mcpExternal === true, // installed machine-wide: agents outside HQ may call the tools too
@@ -6529,7 +6530,8 @@ function renderSettings() {
     el.addEventListener('change', () => onChange(el.value));
     return el;
   };
-  const tabs = [['general', 'General'], ['appearance', 'Appearance'], ['deputy', 'Deputy']];
+  if (settingsTab === 'developer' && !app.settings.developer) settingsTab = 'general';
+  const tabs = [['general', 'General'], ['appearance', 'Appearance'], ['deputy', 'Deputy'], ...(app.settings.developer ? [['developer', 'Developer']] : [])];
   settingsPanel.querySelector('#settings-tabs').replaceChildren(...tabs.map(([key, label]) => h('button', {
     class: `settings-tab${settingsTab === key ? ' on' : ''}`, role: 'tab', 'aria-selected': String(settingsTab === key), text: label,
     onclick: () => { settingsTab = key; renderSettings(); },
@@ -6541,6 +6543,12 @@ function renderSettings() {
   }
   if (settingsTab === 'deputy') {
     body.replaceChildren(...renderDeputySettings(row).filter(Boolean));
+    return;
+  }
+  if (settingsTab === 'developer') {
+    body.replaceChildren(IS_MAC
+      ? row('Keep busy', 'Windows only.', null)
+      : row('Keep busy', null, toggle(keepBusy, v => { keepBusy = v; keepBusyTick(); })));
     return;
   }
   const path = h('input', { type: 'text', value: app.settings.claudePath, placeholder: 'claude', spellcheck: 'false' });
@@ -6744,6 +6752,44 @@ function openSettings() {
 function closeSettings() {
   settingsPanel.classList.add('hidden');
 }
+
+// ---------- the Developer tab: hidden until this code is typed with no session focused ----------
+
+const DEV_CODE = ['ArrowUp', 'ArrowUp', 'ArrowDown', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'ArrowLeft', 'ArrowRight', 'b', 'a'];
+let devCodeAt = 0; // how much of DEV_CODE has been typed
+document.addEventListener('keydown', e => {
+  const t = e.target;
+  if (app.focused || e.ctrlKey || e.altKey || e.metaKey || (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)))) { devCodeAt = 0; return; }
+  const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  if (key === 'Shift') return;
+  devCodeAt = key === DEV_CODE[devCodeAt] ? devCodeAt + 1 : key === DEV_CODE[0] ? 1 : 0;
+  if (devCodeAt < DEV_CODE.length) return;
+  devCodeAt = 0;
+  const on = !app.settings.developer;
+  changeSetting('developer', on);
+  if (!on) keepBusy = false; // nothing keeps running behind a hidden tab
+  settingsTab = on ? 'developer' : 'general';
+  const gear = $('#settings-btn');
+  gear.classList.remove('dev-unlock', 'dev-lock');
+  void gear.offsetWidth; // restart the animation when the code is typed twice quickly
+  gear.classList.add(on ? 'dev-unlock' : 'dev-lock');
+  gear.addEventListener('animationend', () => gear.classList.remove('dev-unlock', 'dev-lock'), { once: true });
+  if (on) openSettings();
+  else if (!settingsPanel.classList.contains('hidden')) renderSettings();
+});
+// A click on the top bar's empty space clears the session focus, as one on the board does.
+$('#topbar').addEventListener('mousedown', e => { if (!e.target.closest('button, input, select, a')) unfocusAll(); });
+
+// Keep busy: while on and a session works, the backend resets Windows' idle timer once a minute (presence.rs), so Teams
+// stays Available. Never saved: it is off each time HQ starts and has to be switched on again.
+const KEEP_BUSY_EVERY_MS = 60_000;
+let keepBusy = false;
+function keepBusyTick() {
+  if (IS_MAC || !keepBusy) return;
+  if (!app.cells.some(c => c.status === 'running' || c.bgTasks.length)) return;
+  invoke('nudge_idle').catch(err => console.warn('keep busy', err));
+}
+setInterval(keepBusyTick, KEEP_BUSY_EVERY_MS);
 
 $('#open-settings').addEventListener('click', () => (settingsPanel.classList.contains('hidden') ? openSettings() : closeSettings()));
 $('#terminal-btn').addEventListener('click', () => invoke('open_terminal', {}).catch(err => console.error('terminal failed', err)));
