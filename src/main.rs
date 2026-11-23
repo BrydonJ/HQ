@@ -1036,7 +1036,7 @@ fn main() {
             take_launches,
             shell::explorer_menu_status,
             shell::set_explorer_menu,
-            presence::nudge_idle,
+            presence::set_keep_busy,
             #[cfg(not(target_os = "macos"))]
             icon::pick_app_icon,
             #[cfg(not(target_os = "macos"))]
