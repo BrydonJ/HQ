@@ -23,6 +23,20 @@ const HERMES_MODES = [
   ['bypassPermissions', "Don't ask (except sensitive paths)"],
 ];
 
+/**
+ * What a mode switch does while Hermes is working, else null. Hermes takes a mode only between turns
+ * (hermes.rs holds the switch until then); meanwhile HQ answers the edits a freer mode lets go ahead
+ * (hermes.rs `pending_mode_allows`), but cannot make Hermes ask about edits its current mode allows.
+ */
+function hermesBusyModeNote(cell, previous, mode) {
+  if (cell.backend !== 'hermes' || cell.status !== 'running' || previous === mode) return null;
+  const rank = m => HERMES_MODES.findIndex(([value]) => value === m);
+  const label = m => (HERMES_MODES.find(([value]) => value === m) || [m, m])[1];
+  return rank(mode) > rank(previous)
+    ? `${label(mode)}: Hermes takes it once this turn ends; until then HQ approves the edits it allows.`
+    : `${label(mode)}: Hermes takes it once this turn ends; until then it may still make edits without asking.`;
+}
+
 // HQ's one-sentence mode, which Hermes lacks: hermes.rs sends /1s as the skill's own text, and while it is
 // on every prompt trails this reminder (hermes.rs ONE_SENTENCE_HINT, which also cuts it out of history).
 const ONE_SENTENCE_HINT = '(HQ: one-sentence mode is on: reply in one sentence, two only if the question has two parts, under 40 words of prose, with no preamble, recap or offer. Code, command output and lists the user asked for don\'t count.)';

@@ -287,9 +287,11 @@ Everything HQ does, in detail. New to HQ? Start with the [README](../README.md).
     choices always in view, and long commands wrap. The expand button in the card's title gives
     the card the whole cell.
 - **Permissions:** every new session, whether you or an agent started it, starts in Claude's
-  **auto** mode. Hermes has no auto mode, so new Hermes sessions start in **Edit
-  automatically**: edits in the folder go ahead and commands follow Hermes' own approval
-  settings. Settings has no global permission choice, and there is no "Follow Settings".
+  **auto** mode. Hermes has no auto mode, so new Hermes sessions you start begin in **Don't
+  ask**: edits go ahead except in sensitive paths (a `.git` or `.ssh` folder, `.env` files, SSH
+  keys), which Hermes still asks about, and commands follow Hermes' own approval settings. A
+  Hermes session an agent starts begins in Edit automatically (see HQ tools). Settings has no
+  global permission choice, and there is no "Follow Settings".
   - A session's own mode is set from the Permissions section of the header's "…" menu (the
     right-click header menu has it too). The composer bar has no permission button.
   - Boards saved before this move their open sessions that were in the old default modes to
@@ -447,7 +449,14 @@ left it. A Hermes cell has a **Hermes** tag in its header.
   denies the request and the card goes away.
 - The model menu lists the models Hermes offers. Permission modes are Ask before edits, Edit
   automatically and Don't ask (still asks for sensitive paths); Hermes has no plan mode or auto
-  mode, so new Hermes sessions start in Edit automatically.
+  mode, so new Hermes sessions start in Don't ask.
+- Hermes takes a mode or model change only when it is idle, so one made while it works is
+  sent when the turn ends; the menu shows the new choice at once. Meanwhile, a switch to a
+  freer mode approves the edits that mode allows (the open edit cards included, sensitive paths
+  never), as Hermes would; a switch to a stricter mode cannot stop edits Hermes' current mode
+  lets through until the turn ends. If Hermes stays busy after the turn (a background process or
+  a delegated task still running), the change waits for the next idle moment without holding
+  your messages back.
 - The compact button sends `/compress`. Typing `/` lists Hermes' own commands, plus `/1s` and `/one-sentence`.
 - Handoff and the progress button ask in a throwaway fork of the session, which stays in
   Hermes' session list.
@@ -499,7 +508,7 @@ Guard rails:
   started by agents are open at once (Settings > **Sessions agents can open**).
 - A session started by an agent never bypasses permissions and is never freer than the
   starter's own mode. It defaults to auto for Claude and Edit automatically (acceptEdits) for
-  Hermes.
+  Hermes, whose Don't ask an agent cannot pick.
 - An agent may only interrupt, close or reconfigure sessions it started, directly or through
   sessions it started.
 - Settings > **HQ tools for sessions** turns the server off for sessions started from then on;

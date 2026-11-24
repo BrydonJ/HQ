@@ -2579,6 +2579,8 @@ class Cell {
     this.renderMode();
     saveState();
     if (this.proc == null) return; // applied with --permission-mode on the next spawn
+    const note = hermesBusyModeNote(this, previous, mode);
+    if (note) this.notice(note);
     const reply = await this.control({ subtype: 'set_permission_mode', mode });
     if (reply && reply.subtype === 'error') {
       this.notice(`Could not switch mode: ${reply.error || `rejected by ${this.agent}`}`, true);
@@ -4734,11 +4736,15 @@ function placeCell(cell) {
 }
 
 /**
- * The mode every new session starts in, whoever starts it: Claude's auto mode. Hermes has no auto
- * mode (its modes only govern file edits), so it gets its nearest: edits in the folder go ahead and
- * commands follow Hermes' own approval settings. A session's own mode is set from its "…" menu.
+ * The mode every new session starts in: Claude's auto mode. Hermes has no auto mode (its modes only
+ * govern file edits), so it gets Don't ask: edits go ahead anywhere but sensitive paths (.git, .ssh,
+ * .env and keys), which Hermes still asks about, and commands follow Hermes' own approval settings.
+ * A session an agent starts is never freer than acceptEdits (mcpSpawnMode). A session's own mode is
+ * set from its "…" menu.
  */
-const NEW_SESSION_MODE = { claude: 'auto', hermes: 'acceptEdits' };
+const NEW_SESSION_MODE = { claude: 'auto', hermes: 'bypassPermissions' };
+/** Where restore moved open sessions once, when every new session first started in auto (v0.37). */
+const AUTO_MODES_MOVE = { claude: 'auto', hermes: 'acceptEdits' };
 
 /** Opens a new session in NEW_SESSION_MODE, with the model and effort the user picked last. */
 function addNewCell(opts, flags) {
@@ -7322,10 +7328,11 @@ async function restore() {
     const backend = c.backend || 'claude';
     const h = hosted.find(x => x.cellKey && x.cellKey === c.hqId && x.backend === backend && !claimed.has(x.id));
     if (h) claimed.add(h.id);
-    // Once: an open session in the old default modes moves to NEW_SESSION_MODE. Not one set on its own, one an
-    // agent or a command line started (it keeps what it was started with), nor one a session host kept running.
-    if (modesBefore && NEW_SESSION_MODE[backend] && !c.modeOwn && !c.spawnedBy && !c.launched && !h
-      && ['default', 'acceptEdits'].includes(c.permissionMode || 'default')) c.permissionMode = NEW_SESSION_MODE[backend];
+    // Once: an open session in the old default modes moves to the new-session modes of that release (Hermes'
+    // has since become Don't ask, which open sessions are not moved to). Not one set on its own, one an agent
+    // or a command line started (it keeps what it was started with), nor one a session host kept running.
+    if (modesBefore && AUTO_MODES_MOVE[backend] && !c.modeOwn && !c.spawnedBy && !c.launched && !h
+      && ['default', 'acceptEdits'].includes(c.permissionMode || 'default')) c.permissionMode = AUTO_MODES_MOVE[backend];
     addCell({ ...c, missing: c.backend === 'cloud' ? false : !exists[i], remote: c.remote === true, hosted: h ? { id: h.id, fromMs: h.replayFromMs || h.startedMs } : null }, { restore: true, batch: true });
   });
   app.settings.autoModes = true;
