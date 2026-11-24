@@ -5,7 +5,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
-const read = file => fs.readFileSync(path.join(__dirname, '../ui', file), 'utf8');
+// Windows checkouts have CRLF line ends; the slices below match on \n.
+const read = file => fs.readFileSync(path.join(__dirname, '../ui', file), 'utf8').replace(/\r\n/g, '\n');
 const app = read('app.js');
 const mcp = read('mcp.js');
 const hermes = read('hermes.js');
