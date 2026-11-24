@@ -2569,10 +2569,11 @@ mod tests {
             mcp: false,
             cell_key: None,
         };
-        let mut sink = if cfg!(windows) { Command::new("findstr") } else { Command::new("cat") };
-        if cfg!(windows) {
-            sink.arg("^");
-        }
+        // This test binary, running `echo_for_scripted_seen`: Windows has no `cat`, and findstr
+        // holds its output back when it goes to a pipe.
+        let mut sink = Command::new(std::env::current_exe().unwrap());
+        sink.args(["--exact", "hermes::tests::echo_for_scripted_seen", "--ignored", "--nocapture", "--test-threads=1"]);
+        sink.env("HQ_TEST_ECHO", "1");
         sink.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
         hide_console(&mut sink);
         let mut child = sink.spawn().unwrap();
@@ -2600,6 +2601,23 @@ mod tests {
             }
         });
         (child, hermes_in, input, rx, seen)
+    }
+
+    /// `scripted_seen`'s stand-in for `cat`: copies stdin to stdout a line at a time. Does nothing
+    /// unless that test started it.
+    #[test]
+    #[ignore = "run by scripted_seen"]
+    fn echo_for_scripted_seen() {
+        if std::env::var_os("HQ_TEST_ECHO").is_none() {
+            return;
+        }
+        let mut out = std::io::stdout().lock();
+        for line in std::io::stdin().lock().lines() {
+            let Ok(line) = line else { break };
+            if writeln!(out, "{line}").and_then(|_| out.flush()).is_err() {
+                break;
+            }
+        }
     }
 
     /// The next call HQ sends Hermes with this method, skipping nudges and the rest.
