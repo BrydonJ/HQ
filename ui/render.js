@@ -200,6 +200,39 @@ function nativeSep(p, like) {
   return String(like || '').startsWith('/') ? p.replace(/\\/g, '/') : p;
 }
 
+const SHELL_RISKY = new Set(['rm', 'rmdir', 'del', 'curl', 'wget', 'sudo', 'dd', 'chmod', 'chown', 'mv', 'kill', 'taskkill', 'Remove-Item']);
+const SHELL_TOKEN = /"(?:[^"\\]|\\.)*"|'[^']*'|&&|\|\||[;|]|\$\{?\w+\}?|--?[\w-]+|\s+|[^\s;|&]+|[\s\S]/g; // the last alternative keeps a lone `&` (2>&1, `cmd &`) so no character is ever dropped
+
+/**
+ * A shell command as coloured spans (display only; the text is unchanged). Command names, flags,
+ * strings, variables and separators get their own colour, and risky commands and git force/push are
+ * flagged. Nothing is ever dimmed: a heredoc body can still run (`bash <<'EOF'`) and a `#` can sit inside a quoted
+ * string, so every line is coloured the same way. Built with textContent, so the
+ * command is never parsed as HTML.
+ */
+function shellView(cmd) {
+  const frag = document.createDocumentFragment();
+  const span = (cls, text) => frag.append(cls ? h('span', { class: cls, text }) : document.createTextNode(text));
+  String(cmd || '').split('\n').forEach((line, li, all) => {
+    const nl = li < all.length - 1 ? '\n' : '';
+    let first = true;
+    let prev = '';
+    for (const t of line.match(SHELL_TOKEN) || []) {
+      if (/^\s+$/.test(t)) { span('', t); continue; }
+      if (t === '&&' || t === '||' || t === ';' || t === '|') { span('sh-sep', t); first = true; prev = ''; continue; }
+      if (t[0] === '"' || t[0] === "'") span('sh-str', t);
+      else if (t[0] === '$' || /^\w+=/.test(t)) span('sh-var', t); // `A=1 cmd`: an assignment does not use up the command slot
+      else if (t[0] === '-') span(/^--(force|hard)$/.test(t) || (t === '-f' && (prev === 'rm' || prev === 'git')) ? 'sh-risk' : 'sh-flag', t);
+      else if (first) { span(SHELL_RISKY.has(t) ? 'sh-risk' : 'sh-cmd', t); prev = t; first = false; }
+      else if (/^(push|reset|clean)$/.test(t) && prev === 'git') span('sh-risk', t);
+      else span('', t);
+      if (t[0] === '$') first = false;
+    }
+    if (nl) span('', nl);
+  });
+  return frag;
+}
+
 function relPath(p, cwd) {
   if (!p) return '';
   const np = normPath(p);
