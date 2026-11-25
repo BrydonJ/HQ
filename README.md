@@ -151,9 +151,11 @@ first prompt and latest reply. Type to search, and click a session to jump to it
 - **Esc** stops the session. **Ctrl+M** (or double-clicking the header) maximizes it.
   **Ctrl+Shift+M** collapses it into a strip under the board.
 - **Permissions:** every new session starts in Claude's **auto** mode. Hermes has no auto
-  mode, so new Hermes sessions start in **Edit automatically** (edits in the folder go ahead;
-  commands follow Hermes' own approval settings). To change one session, open the **…** menu in
-  its header (or right-click the header) and use the Permissions section.
+  mode, so new Hermes sessions start in **Don't ask** (edits go ahead except in sensitive paths
+  such as `.git`, `.ssh` and `.env`, which Hermes still asks about; commands follow Hermes' own
+  approval settings). To change one session, open the **…** menu in its header (or right-click
+  the header) and use the Permissions section. Hermes takes a new mode when its turn ends; until
+  then HQ approves the edits a freer mode allows.
 - **Right-click a header** for that session's own settings: permission mode and Remote Control.
 - **Waiting mode:** the header button hides the chat behind a waiting view (the task list and a
   loader) while the session works, and **Show chat** brings it back. Turn it on while

@@ -102,7 +102,8 @@ function mcpSpawnMode(caller, agent, asked) {
     if (mcpModeRank(mode) > cap) fail(`A session you start cannot run in a freer mode than yours (${own}).`);
     return mode;
   }
-  const limit = Math.min(cap, mcpModeRank(modes.includes(NEW_SESSION_MODE[agent]) ? NEW_SESSION_MODE[agent] : 'default'));
+  // NEW_SESSION_MODE may be one an agent cannot start (Hermes' Don't ask): then the freest it can, no freer.
+  const limit = Math.min(cap, mcpModeRank(NEW_SESSION_MODE[agent] || 'default'));
   const mode = modes.filter(m => mcpModeRank(m) <= limit).sort((x, y) => mcpModeRank(x) - mcpModeRank(y)).pop();
   if (!mode) fail(`${AGENT_NAMES[agent] || agent} has no mode as strict as yours (${own}), so you cannot start it.`);
   return mode;

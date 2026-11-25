@@ -570,10 +570,12 @@ enum Call {
 /// A model or mode change waiting for Hermes to be idle: Hermes refuses either during a turn
 /// ("Mode changes apply when the session is idle"), and while busy may report it as a bare
 /// "Internal error" with `session_busy` details. `tries`: how often Hermes already said it was busy.
+/// `deferred`: Hermes stayed busy past `HELD_TRIES` (see `Bridge::deferred`).
 struct Held {
     request_id: String,
     then: After,
     tries: u32,
+    deferred: bool,
 }
 
 /// State to change once Hermes accepts a control request.
@@ -592,6 +594,8 @@ struct Permission {
     /// (its own tool timeout), leaving the request open with nobody waiting on the answer.
     during: Option<String>,
     options: Vec<(String, String)>, // (optionId, kind)
+    /// For an edit approval HQ can judge (`edit_approval_path`), the file it writes.
+    edit_path: Option<String>,
 }
 
 /// The reply being streamed: one Hermes message id, flushed as one Claude assistant message.
@@ -643,6 +647,12 @@ struct Bridge {
     applying_since: Option<Instant>,
     /// When to ask again for a held change Hermes said it was too busy for (see `HELD_RETRY`).
     held_retry: Option<Instant>,
+    /// Held changes Hermes kept refusing as busy after HQ's turn ended (a background process or a
+    /// delegated child still running). They no longer hold the queued prompts back, and are asked
+    /// again at `deferred_retry`, once Hermes is idle, until Hermes takes them or a newer choice
+    /// replaces them. Until then the cell shows them as chosen (`shown_mode`).
+    deferred: Vec<Held>,
+    deferred_retry: Option<Instant>,
     /// A turn Hermes started itself, such as on a background process's notice: when it began and
     /// when Hermes last reported on it. Its updates stream in like a turn's, but no reply ends it.
     own_turn: Option<(Instant, Instant)>,
@@ -713,6 +723,8 @@ impl Bridge {
             applying: 0,
             applying_since: None,
             held_retry: None,
+            deferred: Vec::new(),
+            deferred_retry: None,
             own_turn: None,
             heard: Instant::now(),
             models: Vec::new(),
@@ -763,7 +775,9 @@ impl Bridge {
             if let Some(nudge) = self.nudge_wait() {
                 wait = Some(wait.map_or(nudge, |w| w.min(nudge)));
             }
-            let held_clock = self.held_retry.into_iter().chain(self.applying_since.map(|at| at + HELD_ANSWER)).min();
+            // A deferred change counts only while release() could send it, or the loop would spin.
+            let deferred_clock = self.deferred_retry.filter(|_| self.can_release());
+            let held_clock = self.held_retry.into_iter().chain(self.applying_since.map(|at| at + HELD_ANSWER)).chain(deferred_clock).min();
             if let Some(at) = held_clock {
                 let retry = at.saturating_duration_since(Instant::now());
                 wait = Some(wait.map_or(retry, |w| w.min(retry)));
@@ -778,6 +792,8 @@ impl Bridge {
                         self.held_unanswered();
                         if self.held_retry.is_some_and(|at| at <= Instant::now()) {
                             self.held_retry = None;
+                            self.release();
+                        } else if self.deferred_retry.is_some_and(|at| at <= Instant::now()) {
                             self.release();
                         }
                         continue;
@@ -1002,18 +1018,26 @@ impl Bridge {
                 let params = json!({ "cwd": self.opts.cwd, "mcpServers": [] });
                 self.call("session/new", params, Call::SideFork { request_id, question });
             }
-            // Hermes started a turn HQ has not seen yet: asked again shortly, unless a newer change replaced it.
-            Call::Held(mut held) if is_busy(error, details) && held.tries + 1 < HELD_TRIES => {
+            // Hermes is still busy though HQ saw its turn end: a turn Hermes started itself and has not
+            // reported yet, or work that outlives the turn (a background process, a delegated child),
+            // which Hermes also counts as busy. Asked again shortly, unless a newer change replaced it.
+            // After `HELD_TRIES` it is deferred rather than failed: the cell keeps the mode it chose,
+            // the queued prompts go, and the change lands the next time Hermes is idle.
+            Call::Held(mut held) if is_busy(error, details) => {
                 self.applying -= 1;
                 held.tries += 1;
                 let same = |h: &Held| std::mem::discriminant(&h.then) == std::mem::discriminant(&held.then);
-                if self.held.iter().any(same) {
+                if self.held.iter().chain(&self.deferred).any(same) {
                     // The cell chose again meanwhile; the newer change goes instead.
                     self.reply_ok(&held.request_id, json!({}));
+                } else if held.deferred || held.tries >= HELD_TRIES {
+                    held.deferred = true;
+                    self.deferred.push(held);
+                    self.deferred_retry = Some(Instant::now() + HELD_RETRY);
                 } else {
                     self.held.push(held);
+                    self.held_retry.get_or_insert_with(|| Instant::now() + HELD_RETRY);
                 }
-                self.held_retry.get_or_insert_with(|| Instant::now() + HELD_RETRY);
                 self.release();
             }
             Call::Held(held) => {
@@ -1158,10 +1182,17 @@ impl Bridge {
             request["permission_suggestions"] = json!([{ "type": "addRules", "rules": [{ "toolName": name }], "destination": "session" }]);
         }
         let tool_call_id = tool["toolCallId"].as_str().unwrap_or_default().to_owned();
+        let edit_path = edit_approval_path(tool);
+        // The cell chose a freer mode mid-turn, which Hermes has yet to take: answered as that mode would.
+        if edit_path.as_deref().is_some_and(|path| self.pending_mode_allows(path)) {
+            if let Some(option) = pick_option(&options, true, false) {
+                return self.send_hermes(json!({ "jsonrpc": "2.0", "id": id, "result": { "outcome": { "outcome": "selected", "optionId": option } } }));
+            }
+        }
         // Only when one tool is open is it surely the one asking; with several, the card waits
         // for Hermes' approval timeout instead.
         let during = self.last_tool.clone().filter(|t| self.tools.len() == 1 && self.tools.contains(t));
-        self.permissions.insert(request_id.clone(), Permission { rpc_id: id, tool_call_id, during, options });
+        self.permissions.insert(request_id.clone(), Permission { rpc_id: id, tool_call_id, during, options, edit_path });
         self.emit(json!({ "type": "control_request", "request_id": request_id, "request": request }));
     }
 
@@ -1380,10 +1411,44 @@ impl Bridge {
     /// The mode the cell shows: a held change's, as the cell chose it, so a turn starting
     /// meanwhile does not set its picker back.
     fn shown_mode(&self) -> &str {
-        self.held.iter().rev().find_map(|h| match &h.then {
-            After::Mode(mode) => Some(mode.as_str()),
-            After::Model(_) => None,
-        }).unwrap_or(&self.mode)
+        fn mode(h: &Held) -> Option<&str> {
+            match &h.then {
+                After::Mode(mode) => Some(mode.as_str()),
+                After::Model(_) => None,
+            }
+        }
+        let sent = self.calls.values().filter_map(|c| match c {
+            Call::Held(h) => Some(h),
+            _ => None,
+        });
+        self.held.iter().rev().chain(self.deferred.iter().rev()).chain(sent).find_map(mode).unwrap_or(&self.mode)
+    }
+
+    /// Whether the cell chose a mode Hermes has yet to take that lets this edit go ahead where
+    /// Hermes' own mode asks. Hermes takes a mode only between turns, so until then HQ answers such
+    /// edits as Hermes would under the chosen mode (`edit_auto_allowed`); anything else still asks.
+    fn pending_mode_allows(&self, path: &str) -> bool {
+        let pending = self.shown_mode();
+        edit_rank(pending) > edit_rank(&self.mode) && edit_auto_allowed(path, pending, &self.opts.cwd)
+    }
+
+    /// Answers the open edit cards the newly chosen mode lets go ahead, and takes them down.
+    fn allow_pending_edits(&mut self) {
+        let ids: Vec<String> = self
+            .permissions
+            .iter()
+            .filter(|(_, p)| p.edit_path.as_deref().is_some_and(|path| self.pending_mode_allows(path)))
+            .map(|(r, _)| r.clone())
+            .collect();
+        for request_id in ids {
+            let Some(p) = self.permissions.remove(&request_id) else { continue };
+            let Some(option) = pick_option(&p.options, true, false) else {
+                self.permissions.insert(request_id, p);
+                continue;
+            };
+            self.send_hermes(json!({ "jsonrpc": "2.0", "id": p.rpc_id, "result": { "outcome": { "outcome": "selected", "optionId": option } } }));
+            self.emit(json!({ "type": "control_cancel_request", "request_id": request_id }));
+        }
     }
 
     /// Hermes reported on a turn it started itself; the first report shows the cell working.
@@ -1393,6 +1458,7 @@ impl Bridge {
             Some((_, last)) => *last = now,
             None => {
                 self.own_turn = Some((now, now));
+                self.deferred_due_after_turn();
                 self.emit(json!({
                     "type": "system", "subtype": "init", "session_id": self.session, "model": self.model,
                     "permissionMode": claude_mode(self.shown_mode()), "cwd": self.opts.cwd,
@@ -1493,7 +1559,17 @@ impl Bridge {
             let old = self.held.remove(i);
             self.reply_ok(&old.request_id, json!({}));
         }
+        if let Some(i) = self.deferred.iter().position(same) {
+            let old = self.deferred.remove(i);
+            self.reply_ok(&old.request_id, json!({}));
+        }
         self.held.push(held);
+    }
+
+    /// Whether `release` would go ahead now: Hermes is idle as far as HQ knows, and no busy-refused
+    /// change is waiting out `HELD_RETRY`.
+    fn can_release(&self) -> bool {
+        !(self.in_turn || self.own_turn.is_some() || self.applying > 0 || self.held_retry.is_some_and(|at| at > Instant::now()) || self.session.is_none())
     }
 
     /// Gives up on held changes Hermes has not answered within `HELD_ANSWER`, failing them in the
@@ -1516,13 +1592,16 @@ impl Bridge {
 
     /// Once Hermes is idle, sends the held changes, then (once they are answered) the next queued prompt.
     fn release(&mut self) {
-        let waiting = self.held_retry.is_some_and(|at| at > Instant::now());
-        if self.in_turn || self.own_turn.is_some() || self.applying > 0 || waiting {
+        if !self.can_release() {
             return;
         }
         self.held_retry = None;
         self.applying_since = None;
         let Some(session) = self.session.clone() else { return };
+        if self.deferred_retry.is_some_and(|at| at <= Instant::now()) {
+            self.deferred_retry = None;
+            self.held.append(&mut self.deferred);
+        }
         if !self.held.is_empty() {
             self.applying_since = Some(Instant::now());
             for held in std::mem::take(&mut self.held) {
@@ -1584,9 +1663,17 @@ impl Bridge {
     }
 
     /// Recorded only now, so HQ's copy keeps the order Hermes saw and leaves out prompts an interrupt dropped.
+    /// A turn is starting: deferred changes are asked again as soon as it ends.
+    fn deferred_due_after_turn(&mut self) {
+        if !self.deferred.is_empty() {
+            self.deferred_retry = Some(Instant::now());
+        }
+    }
+
     fn send_prompt(&mut self, mut prompt: Value, content: Value) {
         // Like Claude, each turn starts with system/init; the cell shows it is working from here.
         let Some(id) = self.session.clone() else { return };
+        self.deferred_due_after_turn();
         // Only to Hermes: HQ's copy keeps the prompt as the user wrote it. Added here rather than
         // when queued, so a queued prompt an interrupt drops does not take the note with it.
         if self.task_prompt_due {
@@ -1667,12 +1754,13 @@ impl Bridge {
                     return self.reply_err(request_id, "Hermes reported no default model");
                 }
                 // Answered once Hermes takes it, which it does only between turns (see `Held`).
-                self.hold(Held { request_id: request_id.into(), then: After::Model(model), tries: 0 });
+                self.hold(Held { request_id: request_id.into(), then: After::Model(model), tries: 0, deferred: false });
                 self.release();
             }
             "set_permission_mode" => match req["mode"].as_str().and_then(hermes_mode) {
                 Some(mode) => {
-                    self.hold(Held { request_id: request_id.into(), then: After::Mode(mode.into()), tries: 0 });
+                    self.hold(Held { request_id: request_id.into(), then: After::Mode(mode.into()), tries: 0, deferred: false });
+                    self.allow_pending_edits();
                     self.release();
                 }
                 None => self.reply_err(request_id, "Hermes has no such mode"),
@@ -1764,6 +1852,76 @@ fn claude_mode(mode: &str) -> &'static str {
         "accept_edits" => "acceptEdits",
         "dont_ask" => "bypassPermissions",
         _ => "default",
+    }
+}
+
+/// How freely a Hermes mode lets edits go ahead.
+fn edit_rank(mode: &str) -> u8 {
+    match mode {
+        "accept_edits" => 1,
+        "dont_ask" => 2,
+        _ => 0,
+    }
+}
+
+/// The file an edit approval request writes, when HQ can judge it as Hermes would: Hermes' own
+/// edit approval (`edit-approval-N`, kind `edit`) of one file the agent named in full (`plain_edit`).
+/// A V4A patch, a relative path or anything else gets none, and keeps its card.
+fn edit_approval_path(call: &Value) -> Option<String> {
+    let id = call["toolCallId"].as_str()?;
+    if !id.starts_with("edit-approval-") || call["kind"] != "edit" || !plain_edit(call) {
+        return None;
+    }
+    call["rawInput"]["arguments"]["path"].as_str().map(str::to_owned)
+}
+
+/// Whether Hermes would let this edit go ahead without asking under `mode`: its
+/// `should_auto_approve_edit` (acp_adapter/edit_approval.py). Sensitive paths (a `.git` or `.ssh`
+/// folder, `.env` files and SSH keys), as written or with links followed, always ask; Edit
+/// automatically allows the session's folder and the temp folder; Don't ask allows any other
+/// file. Fails closed: a path that cannot be resolved asks.
+fn edit_auto_allowed(path: &str, mode: &str, cwd: &str) -> bool {
+    let literal = Path::new(path);
+    if !is_absolute(path) || sensitive_path(literal) {
+        return false;
+    }
+    let Some(resolved) = resolve_lenient(literal) else { return false };
+    if sensitive_path(&resolved) {
+        return false;
+    }
+    match mode {
+        "dont_ask" => true,
+        "accept_edits" => [std::env::temp_dir(), PathBuf::from(cwd)]
+            .iter()
+            .filter_map(|dir| fs::canonicalize(dir).ok())
+            .any(|dir| resolved.starts_with(dir)),
+        _ => false,
+    }
+}
+
+/// Hermes' sensitive paths: `_path_is_sensitive` in acp_adapter/edit_approval.py.
+fn sensitive_path(path: &Path) -> bool {
+    const NAMES: [&str; 5] = [".env", ".env.local", ".env.production", "id_rsa", "id_ed25519"];
+    let lower = |s: &std::ffi::OsStr| s.to_string_lossy().to_lowercase();
+    path.components().any(|c| matches!(lower(c.as_os_str()).as_str(), ".git" | ".ssh"))
+        || path.file_name().is_some_and(|name| NAMES.contains(&lower(name).as_str()))
+}
+
+/// `path` with every link followed, for a file that may not exist yet: its nearest existing folder
+/// resolved, and the rest added as written. None when that takes a `..`, which only the real folder
+/// could settle.
+fn resolve_lenient(path: &Path) -> Option<PathBuf> {
+    let mut rest = Vec::new();
+    let mut at = path;
+    loop {
+        if let Ok(real) = fs::canonicalize(at) {
+            return Some(rest.iter().rev().fold(real, |mut p, name| {
+                p.push(name);
+                p
+            }));
+        }
+        rest.push(at.file_name()?.to_owned());
+        at = at.parent()?;
     }
 }
 
@@ -2392,6 +2550,236 @@ mod tests {
         drop(input);
         drop(hermes);
         let _ = child.kill();
+    }
+
+    /// `scripted`, also returning what the translator sends Hermes.
+    fn scripted_seen() -> (Child, PipeWriter, mpsc::Sender<String>, mpsc::Receiver<Value>, mpsc::Receiver<Value>) {
+        let dir = std::env::temp_dir().join(format!("hq-hermes-seen-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let opts = SpawnOptions {
+            cwd: dir.to_string_lossy().into_owned(),
+            resume: None,
+            permission_mode: None,
+            model: None,
+            effort: None,
+            fork: false,
+            auto_tasks: false,
+            max_agents: None,
+            api_key: false,
+            mcp: false,
+            cell_key: None,
+        };
+        // This test binary, running `echo_for_scripted_seen`: Windows has no `cat`, and findstr
+        // holds its output back when it goes to a pipe.
+        let mut sink = Command::new(std::env::current_exe().unwrap());
+        sink.args(["--exact", "hermes::tests::echo_for_scripted_seen", "--ignored", "--nocapture", "--test-threads=1"]);
+        sink.env("HQ_TEST_ECHO", "1");
+        sink.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        hide_console(&mut sink);
+        let mut child = sink.spawn().unwrap();
+        let (seen_tx, seen) = mpsc::channel();
+        let sent = child.stdout.take().unwrap();
+        std::thread::spawn(move || {
+            for line in BufReader::new(sent).lines() {
+                let Ok(line) = line else { break };
+                if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                    if seen_tx.send(v).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        let (hermes_out, hermes_in) = std::io::pipe().unwrap();
+        let (input, lines) = translate(child.stdin.take().unwrap(), hermes_out, dir, opts, json!([])).unwrap();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(lines).lines() {
+                let Ok(line) = line else { break };
+                if tx.send(serde_json::from_str(&line).expect("translator wrote invalid JSON")).is_err() {
+                    break;
+                }
+            }
+        });
+        (child, hermes_in, input, rx, seen)
+    }
+
+    /// `scripted_seen`'s stand-in for `cat`: copies stdin to stdout a line at a time. Does nothing
+    /// unless that test started it.
+    #[test]
+    #[ignore = "run by scripted_seen"]
+    fn echo_for_scripted_seen() {
+        if std::env::var_os("HQ_TEST_ECHO").is_none() {
+            return;
+        }
+        let mut out = std::io::stdout().lock();
+        for line in std::io::stdin().lock().lines() {
+            let Ok(line) = line else { break };
+            if writeln!(out, "{line}").and_then(|_| out.flush()).is_err() {
+                break;
+            }
+        }
+    }
+
+    /// The next call HQ sends Hermes with this method, skipping nudges and the rest.
+    fn sent_call(seen: &mpsc::Receiver<Value>, method: &str) -> Value {
+        next_matching(seen, method, |v| v["method"] == method)
+    }
+
+    fn busy(id: &Value) -> Value {
+        json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32603, "message": "Internal error", "data": { "details": "session_busy" } } })
+    }
+
+    #[test]
+    fn a_switch_hermes_stays_busy_for_is_deferred_lets_prompts_go_and_lands_after_the_next_turn() {
+        let (mut child, mut hermes, input, rx, seen) = scripted_seen();
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": 0, "result": {} }));
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": 1, "result": { "sessionId": "s1" } }));
+        std::thread::sleep(Duration::from_millis(100));
+        let mode = json!({ "type": "control_request", "request_id": "m1", "request": { "subtype": "set_permission_mode", "mode": "bypassPermissions" } });
+        input.send(mode.to_string()).unwrap();
+        // Hermes stays busy after the turn (a background process still running): asked HELD_TRIES times.
+        for _ in 0..HELD_TRIES {
+            let call = sent_call(&seen, "session/set_mode");
+            assert_eq!(call["params"]["modeId"], "dont_ask", "{call}");
+            hermes_says(&mut hermes, busy(&call["id"]));
+        }
+        // Not failed: the cell keeps its choice, and a prompt is no longer held back by it.
+        std::thread::sleep(Duration::from_millis(50));
+        input.send(json!({ "type": "user", "message": { "role": "user", "content": "go on" } }).to_string()).unwrap();
+        let prompt = sent_call(&seen, "session/prompt");
+        let init = next_matching(&rx, "the turn's start", |v| v["type"] == "system" && v["subtype"] == "init");
+        assert_eq!(init["permissionMode"], "bypassPermissions", "the cell still shows the chosen mode: {init}");
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": prompt["id"], "result": { "stopReason": "end_turn" } }));
+        next_matching(&rx, "the turn's result", |v| v["type"] == "result");
+        // Once the turn is over the switch is asked again, and lands.
+        let call = sent_call(&seen, "session/set_mode");
+        assert_eq!(call["params"]["modeId"], "dont_ask", "{call}");
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": call["id"], "result": {} }));
+        let answer = next_matching(&rx, "the switch's answer", |v| v["type"] == "control_response");
+        assert_eq!(answer["response"]["request_id"], "m1", "{answer}");
+        assert_eq!(answer["response"]["subtype"], "success", "{answer}");
+        drop(input);
+        drop(hermes);
+        let _ = child.kill();
+    }
+
+    #[test]
+    fn a_deferred_switch_gives_way_to_a_newer_choice() {
+        let (mut child, mut hermes, input, rx, seen) = scripted_seen();
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": 0, "result": {} }));
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": 1, "result": { "sessionId": "s1" } }));
+        std::thread::sleep(Duration::from_millis(100));
+        let mode = |id: &str, mode: &str| json!({ "type": "control_request", "request_id": id, "request": { "subtype": "set_permission_mode", "mode": mode } }).to_string();
+        input.send(mode("m1", "bypassPermissions")).unwrap();
+        for _ in 0..HELD_TRIES {
+            let call = sent_call(&seen, "session/set_mode");
+            hermes_says(&mut hermes, busy(&call["id"]));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        input.send(mode("m2", "default")).unwrap();
+        let replaced = next_matching(&rx, "the replaced switch's answer", |v| v["type"] == "control_response");
+        assert_eq!(replaced["response"]["request_id"], "m1", "{replaced}");
+        let call = sent_call(&seen, "session/set_mode");
+        assert_eq!(call["params"]["modeId"], "default", "{call}");
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": call["id"], "result": {} }));
+        let answer = next_matching(&rx, "the newer switch's answer", |v| v["type"] == "control_response");
+        assert_eq!(answer["response"]["request_id"], "m2", "{answer}");
+        assert_eq!(answer["response"]["subtype"], "success", "{answer}");
+        drop(input);
+        drop(hermes);
+        let _ = child.kill();
+    }
+
+    /// Hermes' edit approval for `path`, as acp_adapter/edit_approval.py builds it.
+    fn edit_approval(rpc: u64, n: u32, path: &str) -> Value {
+        json!({ "jsonrpc": "2.0", "id": rpc, "method": "session/request_permission", "params": { "sessionId": "s1",
+            "options": [{ "optionId": "allow_once", "kind": "allow_once", "name": "Allow edit" }, { "optionId": "deny", "kind": "reject_once", "name": "Deny" }],
+            "toolCall": { "toolCallId": format!("edit-approval-{n}"), "title": format!("Approve edit: {path}"), "kind": "edit", "status": "pending",
+                "content": [{ "type": "diff", "path": path, "oldText": null, "newText": "x" }],
+                "rawInput": { "tool": "write_file", "arguments": { "path": path, "content": "x" } } } } })
+    }
+
+    #[test]
+    fn mid_turn_a_freer_mode_approves_the_edits_it_allows_and_sensitive_ones_still_ask() {
+        let (mut child, mut hermes, input, rx, seen) = scripted_seen();
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": 0, "result": {} }));
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": 1, "result": { "sessionId": "s1" } }));
+        std::thread::sleep(Duration::from_millis(100));
+        let work = std::env::temp_dir().join(format!("hq-hermes-midturn-{}", std::process::id()));
+        fs::create_dir_all(&work).unwrap();
+        let file = |name: &str| work.join(name).to_string_lossy().into_owned();
+        input.send(json!({ "type": "user", "message": { "role": "user", "content": "work" } }).to_string()).unwrap();
+        let prompt = sent_call(&seen, "session/prompt");
+        // An edit asked for under Ask before edits shows its card.
+        hermes_says(&mut hermes, edit_approval(900, 1, &file("open.rs")));
+        let card = next_matching(&rx, "the open card", |v| v["type"] == "control_request");
+        assert_eq!(card["request_id"], "hermes-perm-900", "{card}");
+        // Don't ask, mid-turn: held for Hermes, and the open card is answered as Don't ask would.
+        input.send(json!({ "type": "control_request", "request_id": "m1", "request": { "subtype": "set_permission_mode", "mode": "bypassPermissions" } }).to_string()).unwrap();
+        let gone = next_matching(&rx, "the card taken down", |v| v["type"] == "control_cancel_request");
+        assert_eq!(gone["request_id"], "hermes-perm-900", "{gone}");
+        let allowed = next_matching(&seen, "the open edit's answer", |v| v["id"] == 900);
+        assert_eq!(allowed["result"]["outcome"]["optionId"], "allow_once", "{allowed}");
+        // A new edit goes ahead with no card; a sensitive one still asks.
+        hermes_says(&mut hermes, edit_approval(901, 2, &file("new.rs")));
+        let allowed = next_matching(&seen, "the new edit's answer", |v| v["id"] == 901);
+        assert_eq!(allowed["result"]["outcome"]["optionId"], "allow_once", "{allowed}");
+        hermes_says(&mut hermes, edit_approval(902, 3, &file(".env")));
+        let card = next_matching(&rx, "the sensitive edit's card", |v| v["type"] == "control_request");
+        assert_eq!(card["request_id"], "hermes-perm-902", "{card}");
+        // The switch itself still waits for the turn's end.
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": prompt["id"], "result": { "stopReason": "end_turn" } }));
+        let call = sent_call(&seen, "session/set_mode");
+        assert_eq!(call["params"]["modeId"], "dont_ask", "{call}");
+        drop(input);
+        drop(hermes);
+        let _ = child.kill();
+        let _ = fs::remove_dir_all(&work);
+    }
+
+    #[test]
+    fn edits_are_judged_as_hermes_judges_them() {
+        let work = std::env::temp_dir().join(format!("hq-hermes-judge-{}", std::process::id()));
+        fs::create_dir_all(work.join("src")).unwrap();
+        let cwd = work.to_string_lossy().into_owned();
+        let at = |rel: &str| work.join(rel).to_string_lossy().into_owned();
+        let root = work.ancestors().last().unwrap().join("hq-not-a-folder").join("x.txt").to_string_lossy().into_owned();
+        assert!(edit_auto_allowed(&at("src/main.rs"), "dont_ask", &cwd));
+        assert!(edit_auto_allowed(&at("new/deeper/file.rs"), "dont_ask", &cwd), "a file not yet written");
+        assert!(edit_auto_allowed(&at("src/main.rs"), "accept_edits", &cwd));
+        assert!(edit_auto_allowed(&root, "dont_ask", &cwd), "Don't ask: anywhere but sensitive paths");
+        assert!(!edit_auto_allowed(&root, "accept_edits", &cwd), "Edit automatically: the folder and temp only");
+        assert!(!edit_auto_allowed(&at("src/main.rs"), "default", &cwd));
+        for sensitive in [".env", "sub/.ENV.local", ".git/config", "a/.ssh/config", "keys/id_rsa", "id_ed25519"] {
+            assert!(!edit_auto_allowed(&at(sensitive), "dont_ask", &cwd), "{sensitive}");
+        }
+        assert!(!edit_auto_allowed("src/main.rs", "dont_ask", &cwd), "relative paths ask");
+        assert!(!edit_auto_allowed(&at("src/../.git/config"), "dont_ask", &cwd), "a .. asks");
+        #[cfg(unix)]
+        {
+            fs::create_dir_all(work.join(".ssh")).unwrap();
+            let _ = std::os::unix::fs::symlink(work.join(".ssh"), work.join("innocent"));
+            assert!(!edit_auto_allowed(&at("innocent/authorized_keys"), "dont_ask", &cwd), "a link into .ssh");
+        }
+        assert_eq!(edit_rank("dont_ask"), 2);
+        assert_eq!(edit_rank("accept_edits"), 1);
+        assert_eq!(edit_rank("default"), 0);
+        let _ = fs::remove_dir_all(&work);
+    }
+
+    #[test]
+    fn only_a_plain_edit_approval_is_judged() {
+        let call = |id: &str, kind: &str, tool: &str, path: &str| json!({ "toolCallId": id, "kind": kind,
+            "content": [{ "type": "diff", "path": path, "oldText": null, "newText": "x" }],
+            "rawInput": { "tool": tool, "arguments": { "path": path, "content": "x" } } });
+        let abs = if cfg!(windows) { "C:\\w\\a.rs" } else { "/w/a.rs" };
+        assert_eq!(edit_approval_path(&call("edit-approval-1", "edit", "write_file", abs)).as_deref(), Some(abs));
+        assert_eq!(edit_approval_path(&call("perm-check-1", "edit", "write_file", abs)), None, "not an edit approval");
+        assert_eq!(edit_approval_path(&call("edit-approval-1", "execute", "write_file", abs)), None);
+        assert_eq!(edit_approval_path(&call("edit-approval-1", "edit", "write_file", "a.rs")), None, "relative");
+        let mut patch = call("edit-approval-1", "edit", "patch", abs);
+        patch["rawInput"]["arguments"]["mode"] = json!("patch");
+        assert_eq!(edit_approval_path(&patch), None, "a V4A patch names its own files");
     }
 
     #[test]
