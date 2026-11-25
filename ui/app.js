@@ -4317,7 +4317,8 @@ function renderContextPop() {
       percent != null ? h('span', { class: 'usage-pct', text: `${percent}%` }) : null));
   }
   if (info) {
-    parts.push(h('div', { class: 'ctx-line muted' }, h('span', { text: info.autoCompact && info.threshold ? `Auto-compact at ${formatTokens(info.threshold)}` : 'Auto-compact off' })));
+    // Hermes reports no threshold, so say nothing rather than a false "off".
+    if (info.threshold > 0 || !info.autoCompact) parts.push(h('div', { class: 'ctx-line muted' }, h('span', { text: info.autoCompact ? `Auto-compact at ${formatTokens(info.threshold)}` : 'Auto-compact off' })));
     if (info.categories.length) {
       parts.push(h('div', { class: 'ctx-sep' }));
       for (const cat of info.categories) {
