@@ -27,6 +27,13 @@ use crate::store::{self, TranscriptChunk};
 
 /// ACP version spoken; Hermes 0.21 answers 1.
 const PROTOCOL_VERSION: u64 = 1;
+/// Hermes' masked prompts: the sudo password, a skill's missing credential, the browser vault's
+/// unlock, save-login and one-time-code panels (Hermes' `acp_adapter/masked_prompts.py`). Hermes
+/// sends them only to a client that opts in with `clientCapabilities._meta.hermes.maskedPrompts`;
+/// without it they never reach the cell and the tool gives up.
+const MASKED_PROMPT: &str = "_hermes/masked_prompt";
+/// Hermes withdrew one: another of its viewers answered it, the turn ended, or it timed out.
+const MASKED_PROMPT_CANCEL: &str = "_hermes/masked_prompt_cancel";
 
 /// Starts every note HQ adds to a prompt (this one, and the composer's task-list nudge), so a copy
 /// rebuilt from Hermes' history can cut them off.
@@ -672,6 +679,8 @@ struct Bridge {
     delegated: bool,
     last_tool: Option<String>,
     permissions: HashMap<String, Permission>,
+    /// Masked prompts waiting on the user: request id -> (Hermes' prompt id, the request's rpc id).
+    masked: HashMap<String, (String, Value)>,
     /// Side questions in flight: forked session id -> (request id, answer so far).
     sides: HashMap<String, (String, String)>,
     /// Hermes' todo list for this session, which its updates (`merge`) change piecemeal.
@@ -732,6 +741,7 @@ impl Bridge {
             delegated: false,
             last_tool: None,
             permissions: HashMap::new(),
+            masked: HashMap::new(),
             sides: HashMap::new(),
             todos: Vec::new(),
             todos_known: true,
@@ -746,8 +756,11 @@ impl Bridge {
             "initialize",
             json!({
                 "protocolVersion": PROTOCOL_VERSION,
-                // Hermes reads and writes files and runs commands itself.
-                "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false },
+                // Hermes reads and writes files and runs commands itself. `_meta.hermes`: see `MASKED_PROMPT`.
+                "clientCapabilities": {
+                    "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false,
+                    "_meta": { "hermes": { "maskedPrompts": true } },
+                },
                 "clientInfo": { "name": "hq", "title": "HQ", "version": env!("CARGO_PKG_VERSION") },
             }),
             Call::Initialize,
@@ -883,6 +896,14 @@ impl Bridge {
             (Some("$/cancel_request"), None) => {
                 let rpc_id = msg["params"]["requestId"].clone();
                 self.dismiss(|p| p.rpc_id == rpc_id);
+            }
+            (Some(MASKED_PROMPT_CANCEL), None) => {
+                let prompt = msg["params"]["promptId"].as_str().unwrap_or_default();
+                let ids: Vec<String> = self.masked.iter().filter(|(_, (p, _))| p == prompt).map(|(r, _)| r.clone()).collect();
+                for request_id in ids {
+                    self.masked.remove(&request_id);
+                    self.emit(json!({ "type": "control_cancel_request", "request_id": request_id }));
+                }
             }
             (Some(_), None) => {}
             (None, Some(id)) => {
@@ -1119,6 +1140,9 @@ impl Bridge {
     }
 
     fn hermes_request(&mut self, method: &str, id: Value, params: &Value) {
+        if method == MASKED_PROMPT {
+            return self.masked_prompt(id, params);
+        }
         if method != "session/request_permission" {
             // Hermes does its own file and terminal work; nothing else is offered.
             return self.send_hermes(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": format!("HQ does not handle {method}") } }));
@@ -1163,6 +1187,51 @@ impl Bridge {
         let during = self.last_tool.clone().filter(|t| self.tools.len() == 1 && self.tools.contains(t));
         self.permissions.insert(request_id.clone(), Permission { rpc_id: id, tool_call_id, during, options });
         self.emit(json!({ "type": "control_request", "request_id": request_id, "request": request }));
+    }
+
+    /// A masked prompt becomes a card of its own (`hermes_masked_prompt`), which only the user
+    /// answers: AFK, the deputy and other sessions never see it (ui/app.js). Its answer goes
+    /// straight to Hermes and is never written to the mirror; the session host keeps no values
+    /// (host.rs `inbound_record`).
+    fn masked_prompt(&mut self, id: Value, params: &Value) {
+        let fields: Vec<Value> = params["fields"]
+            .as_array()
+            .map(|f| {
+                f.iter()
+                    .filter_map(|f| {
+                        let name = f["name"].as_str().filter(|n| !n.is_empty())?;
+                        // Masked unless Hermes says plainly that it is not (a username, a one-time code).
+                        Some(json!({ "name": name, "label": f["label"].as_str().unwrap_or(name), "masked": f["masked"].as_bool() != Some(false) }))
+                    })
+                    .take(4)
+                    .collect()
+            })
+            .unwrap_or_default();
+        // A side question's session asks nobody.
+        if params["sessionId"].as_str() != self.session.as_deref() || fields.is_empty() {
+            return self.send_hermes(json!({ "jsonrpc": "2.0", "id": id, "result": { "action": "decline" } }));
+        }
+        if !self.in_turn {
+            self.note_own_turn();
+        }
+        let request_id = format!("hermes-masked-{}", id.to_string().trim_matches('"'));
+        let request = json!({
+            "subtype": "hermes_masked_prompt", "kind": params["kind"], "title": params["title"],
+            "message": params["message"], "fields": fields,
+        });
+        self.masked.insert(request_id.clone(), (params["promptId"].as_str().unwrap_or_default().to_owned(), id));
+        self.emit(json!({ "type": "control_request", "request_id": request_id, "request": request }));
+    }
+
+    /// Skips every masked prompt still open (a Stop, or the turn ended): Hermes' tool then goes on
+    /// without the value instead of waiting out its timeout. `cards`: whether the cell still shows them.
+    fn decline_masked(&mut self, cards: bool) {
+        for (request_id, (_, rpc_id)) in std::mem::take(&mut self.masked) {
+            self.send_hermes(json!({ "jsonrpc": "2.0", "id": rpc_id, "result": { "action": "decline" } }));
+            if cards {
+                self.emit(json!({ "type": "control_cancel_request", "request_id": request_id }));
+            }
+        }
     }
 
     fn update(&mut self, params: &Value) {
@@ -1405,7 +1474,7 @@ impl Bridge {
     /// question still open is not quiet, however long it takes.
     fn own_turn_quiet(&mut self) {
         let Some((started, last)) = self.own_turn else { return };
-        if !self.tools.is_empty() || !self.permissions.is_empty() {
+        if !self.tools.is_empty() || !self.permissions.is_empty() || !self.masked.is_empty() {
             self.own_turn = Some((started, Instant::now()));
         } else if last.elapsed() >= OWN_TURN_QUIET {
             self.turn_ended(started, "end_turn", &Value::Null, None);
@@ -1475,6 +1544,7 @@ impl Bridge {
         for (_, p) in std::mem::take(&mut self.permissions) {
             self.send_hermes(json!({ "jsonrpc": "2.0", "id": p.rpc_id, "result": { "outcome": { "outcome": "cancelled" } } }));
         }
+        self.decline_masked(false);
         self.tools.clear();
         self.terminal_commands.clear();
         self.turn_tools.clear();
@@ -1647,6 +1717,7 @@ impl Bridge {
                 }
                 self.prompts.clear();
                 self.dismiss(|_| true); // as ACP asks: open permission requests end with the turn
+                self.decline_masked(true);
                 // Hermes holds no turn while HQ discards a lost one: the held prompt is dropped here.
                 if let Some((started, _, resend)) = self.lost_turn_prompt.as_mut().filter(|(_, _, r)| *r != Resend::Stopped) {
                     *resend = Resend::Stopped;
@@ -1707,6 +1778,16 @@ impl Bridge {
 
     fn permission_answer(&mut self, response: &Value) {
         let Some(request_id) = response["request_id"].as_str() else { return };
+        if let Some((_, rpc_id)) = self.masked.remove(request_id) {
+            // Only strings go on, and only on a Submit; anything else is the skip.
+            let values: serde_json::Map<String, Value> = response["response"]["values"]
+                .as_object()
+                .filter(|_| response["subtype"] == "success")
+                .map(|v| v.iter().filter(|(_, v)| v.is_string()).map(|(k, v)| (k.clone(), v.clone())).collect())
+                .unwrap_or_default();
+            let result = if values.is_empty() { json!({ "action": "decline" }) } else { json!({ "action": "accept", "values": values }) };
+            return self.send_hermes(json!({ "jsonrpc": "2.0", "id": rpc_id, "result": result }));
+        }
         let Some(p) = self.permissions.remove(request_id) else { return };
         let decision = &response["response"];
         let allow = response["subtype"] == "success" && decision["behavior"] == "allow";
@@ -2252,6 +2333,11 @@ mod tests {
     /// A translator on a scripted Hermes: what the test writes is Hermes' output, and what the
     /// translator sends Hermes goes to a process that only reads it.
     fn scripted() -> (Child, PipeWriter, mpsc::Sender<String>, mpsc::Receiver<Value>) {
+        scripted_to(Stdio::null())
+    }
+
+    /// `scripted`, with what HQ writes to Hermes going to `sent`.
+    fn scripted_to(sent: Stdio) -> (Child, PipeWriter, mpsc::Sender<String>, mpsc::Receiver<Value>) {
         let dir = std::env::temp_dir().join(format!("hq-hermes-scripted-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let opts = SpawnOptions {
@@ -2271,7 +2357,7 @@ mod tests {
         if cfg!(windows) {
             sink.arg("^");
         }
-        sink.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+        sink.stdin(Stdio::piped()).stdout(sent).stderr(Stdio::null());
         hide_console(&mut sink);
         let mut child = sink.spawn().unwrap();
         let (hermes_out, hermes_in) = std::io::pipe().unwrap();
@@ -2301,6 +2387,55 @@ mod tests {
                 return v;
             }
         }
+    }
+
+    #[test]
+    fn a_masked_prompt_goes_to_the_user_and_its_answer_only_to_hermes() {
+        let sent = std::env::temp_dir().join(format!("hq-hermes-masked-{}.jsonl", std::process::id()));
+        let (mut child, mut hermes, input, rx) = scripted_to(Stdio::from(fs::File::create(&sent).unwrap()));
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": 0, "result": {} }));
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "id": 1, "result": { "sessionId": "masked-s1" } }));
+        let ask = |id: u64, session: &str, prompt: &str| json!({ "jsonrpc": "2.0", "id": id, "method": MASKED_PROMPT, "params": {
+            "sessionId": session, "promptId": prompt, "kind": "vault.save_login", "title": "Save a login", "message": "For a.test",
+            "fields": [{ "name": "identifier", "label": "Username", "masked": false }, { "name": "password", "label": "Password" }, { "name": "" }],
+        } });
+        hermes_says(&mut hermes, ask(7, "masked-s1", "srq-a"));
+        let card = next_matching(&rx, "the masked card", |v| v["type"] == "control_request");
+        assert_eq!(card["request_id"], "hermes-masked-7");
+        let req = &card["request"];
+        assert_eq!(req["subtype"], "hermes_masked_prompt");
+        assert_eq!(req["title"], "Save a login");
+        assert_eq!(req["fields"], json!([{ "name": "identifier", "label": "Username", "masked": false }, { "name": "password", "label": "Password", "masked": true }]));
+        input.send(json!({ "type": "control_response", "response": { "subtype": "success", "request_id": "hermes-masked-7",
+            "response": { "values": { "identifier": "me", "password": "hunter2", "extra": 5 } } } }).to_string()).unwrap();
+
+        // Another session's prompt is skipped without a card; Skip and Stop are skips too.
+        hermes_says(&mut hermes, ask(8, "elsewhere", "srq-b"));
+        hermes_says(&mut hermes, ask(9, "masked-s1", "srq-c"));
+        next_matching(&rx, "the second card", |v| v["type"] == "control_request" && v["request_id"] == "hermes-masked-9");
+        input.send(json!({ "type": "control_response", "response": { "subtype": "success", "request_id": "hermes-masked-9", "response": { "skip": true } } }).to_string()).unwrap();
+
+        // Hermes withdraws one another viewer answered: its card closes, and HQ sends nothing.
+        hermes_says(&mut hermes, ask(10, "masked-s1", "srq-d"));
+        next_matching(&rx, "the third card", |v| v["type"] == "control_request" && v["request_id"] == "hermes-masked-10");
+        hermes_says(&mut hermes, json!({ "jsonrpc": "2.0", "method": MASKED_PROMPT_CANCEL, "params": { "sessionId": "masked-s1", "promptId": "srq-d", "reason": "resolved" } }));
+        let gone = next_matching(&rx, "the withdrawn card", |v| v["type"] == "control_cancel_request");
+        assert_eq!(gone["request_id"], "hermes-masked-10");
+
+        drop(input);
+        drop(hermes);
+        let _ = child.wait();
+        let lines: Vec<Value> = fs::read_to_string(&sent).unwrap().lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+        let _ = fs::remove_file(&sent);
+        let init = lines.iter().find(|l| l["method"] == "initialize").expect("no initialize");
+        assert_eq!(init["params"]["clientCapabilities"]["_meta"]["hermes"]["maskedPrompts"], true);
+        let answer = |id: u64| lines.iter().find(|l| l["id"] == id && l.get("method").is_none()).cloned();
+        assert_eq!(answer(7).unwrap()["result"], json!({ "action": "accept", "values": { "identifier": "me", "password": "hunter2" } }));
+        assert_eq!(answer(8).unwrap()["result"], json!({ "action": "decline" }));
+        assert_eq!(answer(9).unwrap()["result"], json!({ "action": "decline" }));
+        assert!(answer(10).is_none(), "answered a withdrawn prompt");
+        let mirror = std::env::temp_dir().join(format!("hq-hermes-scripted-{}", std::process::id())).join("masked-s1.jsonl");
+        assert!(!fs::read_to_string(mirror).unwrap_or_default().contains("hunter2"), "the value reached the mirror");
     }
 
     #[test]
