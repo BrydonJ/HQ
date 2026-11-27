@@ -668,7 +668,9 @@ fn handle(msg: &Value, gen: u64, tx: &mpsc::Sender<Wire>) {
 }
 
 /// What of a line HQ sent the session goes in the spool: the prompts (images blanked) and the
-/// answers to the session's requests, which a redraw needs; not HQ's own control requests.
+/// answers to the session's requests, which a redraw needs; not HQ's own control requests. The
+/// values typed into a masked prompt (`response.response.values`, hermes.rs `masked_prompt`)
+/// never go in: a redraw needs only the request id an answer closes.
 fn inbound_record(line: &str) -> Option<(Kind, String)> {
     #[derive(Deserialize)]
     struct Head {
@@ -681,6 +683,13 @@ fn inbound_record(line: &str) -> Option<(Kind, String)> {
         "control_response" => Kind::Other,
         _ => return None,
     };
+    if kind == Kind::Other && line.contains("\"values\"") {
+        let mut msg: serde_json::Value = serde_json::from_str(line).ok()?;
+        if let Some(response) = msg["response"]["response"].as_object_mut() {
+            response.remove("values");
+        }
+        return Some((kind, msg.to_string()));
+    }
     Some((kind, crate::store::blank_base64(line).into_owned()))
 }
 
@@ -943,6 +952,10 @@ mod tests {
         assert_eq!(inbound_record(r#"{"type":"control_response","response":{}}"#).map(|r| r.0), Some(Kind::Other));
         assert!(inbound_record(r#"{"type":"control_request","request":{"subtype":"interrupt"}}"#).is_none());
         assert!(inbound_record("not json").is_none());
+        // A masked prompt's answer keeps its request id and loses its values (hermes.rs `masked_prompt`).
+        let (_, kept) = inbound_record(r#"{"type":"control_response","response":{"subtype":"success","request_id":"hermes-masked-7","response":{"values":{"password":"hunter2"}}}}"#).unwrap();
+        assert!(!kept.contains("hunter2"), "{kept}");
+        assert!(kept.contains("hermes-masked-7"), "{kept}");
         assert_eq!(classify(r#"{"type":"stream_event","event":{}}"#), Kind::Stream);
         assert_eq!(classify(r#"{"type":"result","subtype":"success"}"#), Kind::TurnEnd);
         assert_eq!(classify(r#"{"type":"system","subtype":"init"}"#), Kind::Init);

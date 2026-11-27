@@ -64,7 +64,7 @@ function deputyRefuseMessage(caller, target) {
 /** Whether a card is the deputy's to answer (now or after its countdown). */
 function deputyCovers(cell, requestId, card) {
   const d = deputyCell();
-  return !!d && d !== cell && !deputyTied(d, cell) && cell.afk !== false && !cell.launched && !cell.missing && !cell.closing && cell.backend !== 'cloud'
+  return !!d && d !== cell && card.dataset.kind !== 'masked' && !deputyTied(d, cell) && cell.afk !== false && !cell.launched && !cell.missing && !cell.closing && cell.backend !== 'cloud'
     && !String(requestId).startsWith('mcp-') && !card.deputyLeft && !(cell.deputyLeftIds || []).includes(deputyLeftKey(requestId, card))
     // Hermes marks only a call whose shown input is what runs (hermes.rs).
     && !(cell.backend === 'hermes' && card.dataset.kind === 'permission' && !(card.afkReq && card.afkReq.hermes_reviewable === true))

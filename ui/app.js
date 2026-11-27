@@ -3202,6 +3202,7 @@ class Cell {
 
   onControlRequest(m) {
     const req = m.request || {};
+    if (req.subtype === 'hermes_masked_prompt' && this.backend === 'hermes') return this.addMaskedCard(m.request_id, req);
     if (req.subtype !== 'can_use_tool') {
       if (this.quiet) return; // refused, and said so, before HQ restarted
       // Hooks and SDK MCP servers are never registered by HQ, so refuse anything else, and say so.
@@ -3222,6 +3223,54 @@ class Cell {
     this.refreshState();
     if (this.quiet) { card.replayed = true; return; } // applyReplay rings once for those still open
     this.armPrompt(m.request_id, req, card);
+  }
+
+  /**
+   * A Hermes masked prompt (hermes.rs `masked_prompt`): a sudo password, a skill's credential, a
+   * vault unlock, login or one-time code. Only the user answers it: AFK, the deputy and other
+   * sessions never see it (afkHandle and deputyCovers skip `masked`), and the value goes only to Hermes.
+   */
+  addMaskedCard(requestId, req) {
+    const card = this.maskedCard(requestId, req);
+    card.dataset.kind = 'masked';
+    card.afkReq = { display_name: String(req.title || 'a masked prompt') }; // for the notification only
+    this.pending.set(requestId, card);
+    this.prompts.append(card);
+    this.syncPromptsBar();
+    this.unread = false;
+    this.refreshState();
+    if (this.quiet) { card.replayed = true; return; }
+    this.armPrompt(requestId, card.afkReq, card);
+  }
+
+  maskedCard(requestId, req) {
+    const fields = (Array.isArray(req.fields) ? req.fields : []).filter(f => f && typeof f.name === 'string' && f.name);
+    const inputs = fields.map(f => {
+      // Never remembered, filled in or spell-checked by the webview.
+      const input = h('input', { type: f.masked === false ? 'text' : 'password', autocomplete: f.masked === false ? 'off' : 'new-password',
+        spellcheck: 'false', autocapitalize: 'off', 'aria-label': String(f.label || f.name), placeholder: String(f.label || f.name) });
+      input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+      return input;
+    });
+    const clear = () => inputs.forEach(i => { i.value = ''; });
+    const submit = () => {
+      const values = {};
+      fields.forEach((f, i) => { values[f.name] = inputs[i].value; });
+      if (!fields.length || inputs.every(i => !i.value)) return; // nothing typed: Skip says no
+      clear();
+      this.answer(requestId, { values });
+    };
+    const skip = () => { clear(); this.answer(requestId, { skip: true }); };
+    const card = h('div', { class: 'prompt masked-prompt' },
+      h('div', { class: 'prompt-title' }, h('span', { class: 'pt-main' }, icon('lock'), ' ', String(req.title || 'Hermes needs a value'))),
+      req.message ? h('div', { class: 'mp-message', text: String(req.message) }) : null,
+      fields.map((f, i) => h('label', { class: 'mp-field' }, h('span', { class: 'mp-label', text: String(f.label || f.name) }), inputs[i])),
+      h('div', { class: 'mp-note', text: 'Goes only to Hermes: HQ does not keep it, and the model never sees it.' }),
+      h('div', { class: 'actions' },
+        h('button', { class: 'btn primary', onclick: submit }, 'Submit'),
+        h('button', { class: 'btn', onclick: skip }, 'Skip')));
+    if (inputs[0]) setTimeout(() => { if (card.isConnected && !this.promptsMin) inputs[0].focus(); }, 0);
+    return card;
   }
 
   /** Starts AFK's watch over a prompt card and asks for the user. */
@@ -3250,7 +3299,7 @@ class Cell {
     this.promptsBar.setAttribute('aria-expanded', String(!min));
     if (n) {
       const kinds = new Set([...this.pending.values()].map(c => c.dataset.kind));
-      const noun = kinds.size > 1 ? 'prompt' : kinds.has('question') ? 'question' : kinds.has('plan') ? 'plan' : 'permission request';
+      const noun = kinds.size > 1 || kinds.has('masked') ? 'prompt' : kinds.has('question') ? 'question' : kinds.has('plan') ? 'plan' : 'permission request';
       const label = n === 1 && noun === 'plan' ? 'Plan waiting for approval' : `${n} ${noun}${n === 1 ? '' : 's'} waiting`;
       this.promptsBar.querySelector('.pb-text').textContent = `${label} — ${min ? 'show' : 'hide'}`;
       this.promptsBar.title = min ? 'Show the prompts again' : 'Minimize the prompts to read the chat; typed answers are kept';

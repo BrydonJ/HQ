@@ -203,6 +203,7 @@ const AFK_ACTIONS = { question: 'Answering for you', plan: 'Holding the plan', p
 
 /** A prompt arrived (onControlRequest): answered after the grace period if the user has not. The card counts it down. */
 function afkWatch(cell, requestId, card) {
+  if (card.dataset.kind === 'masked') return; // a password or credential: only the user answers it
   if (deputyCovers(cell, requestId, card)) return deputyWatch(cell, requestId, card); // deputy.js: before AFK's deferral
   if (!cell.afkOn) return;
   const count = promptCountdown(card, Date.now() + AFK_GRACE_MS, `AFK: ${AFK_ACTIONS[card.dataset.kind] || 'Deferring'} in `, 'You are AFK. Answer it yourself before then to keep it.');
@@ -239,6 +240,7 @@ function afkUnwatch(card) {
 
 /** Answers a waiting prompt for the away user: a question with "your call", a plan held, anything else deferred. */
 async function afkHandle(cell, requestId, card) {
+  if (card.dataset.kind === 'masked') return; // a password or credential: it waits for the user
   afkUnwatch(card);
   const live = () => afkUntil(cell) && cell.pending.get(requestId) === card && !cell.closing;
   if (!live()) return;
